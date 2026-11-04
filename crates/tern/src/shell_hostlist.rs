@@ -25,6 +25,10 @@ pub(super) struct HostList {
     pub collapsed_groups: Vec<String>,
     pub recent: Recent,
     pub history: crate::host_history::HostHistory,
+    /// The row ↑ and ↓ have reached while the search box has focus, as a position in
+    /// [`visible_order`]; a new query starts again at the top.
+    pub cursor: usize,
+    query: String,
     _repaint: Subscription,
 }
 
@@ -38,12 +42,21 @@ impl HostList {
         };
         let search = cx.new(|cx| TextInput::new("Search hosts", false, colors, cx));
         // The list under the box re-filters on every keystroke.
-        let repaint = cx.observe(&search, |_, _, cx| cx.notify());
+        let repaint = cx.observe(&search, |shell: &mut Shell, search, cx| {
+            let query = search.read(cx).text();
+            if shell.hostlist.query != query {
+                shell.hostlist.query = query.to_owned();
+                shell.hostlist.cursor = 0;
+            }
+            cx.notify();
+        });
         Self {
             search,
             collapsed_groups: Vec::new(),
             recent,
             history: crate::host_history::HostHistory::default(),
+            cursor: 0,
+            query: String::new(),
             _repaint: repaint,
         }
     }
@@ -73,8 +86,25 @@ impl Shell {
             .update(cx, |input, cx| input.set_text("", cx));
     }
 
-    /// Escape clears the query and gives the terminal its keys back; Enter connects to the
-    /// top match.
+    /// The rows the sidebar shows, top to bottom.
+    fn visible_hosts(&self, cx: &gpui::App) -> Vec<usize> {
+        visible_order(
+            &self.search_query(cx),
+            &self.connections,
+            &self.hostlist.collapsed_groups,
+        )
+    }
+
+    /// The host ↑/↓ point at, drawn selected while the search box has focus.
+    pub(super) fn sidebar_selection(&self, window: &Window, cx: &gpui::App) -> Option<usize> {
+        let focused = self.hostlist.search.focus_handle(cx).is_focused(window);
+        focused
+            .then(|| self.visible_hosts(cx).get(self.hostlist.cursor).copied())
+            .flatten()
+    }
+
+    /// Escape clears the query and gives the terminal its keys back; ↑ and ↓ move through the
+    /// rows shown (stopping at the ends, as a macOS list does) and Enter connects to that one.
     pub(crate) fn on_search_key(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -86,10 +116,18 @@ impl Shell {
                 self.clear_search(cx);
                 self.restore_focus(window, cx);
             }
+            "down" | "up" => {
+                let last = self.visible_hosts(cx).len().saturating_sub(1);
+                let at = &mut self.hostlist.cursor;
+                *at = match event.keystroke.key.as_str() {
+                    "down" => (*at + 1).min(last),
+                    _ => at.saturating_sub(1),
+                };
+                cx.notify();
+            }
             "enter" => {
-                let query = self.search_query(cx);
-                let top = sidebar::search(&query, &self.connections).first().copied();
-                if let Some(host) = top.and_then(|ix| self.hosts.get(ix).cloned()) {
+                let at = self.visible_hosts(cx).get(self.hostlist.cursor).copied();
+                if let Some(host) = at.and_then(|ix| self.hosts.get(ix).cloned()) {
                     self.clear_search(cx);
                     self.connect_host(host, window, cx);
                 }
@@ -241,6 +279,21 @@ impl Shell {
     }
 }
 
+/// The connections the sidebar lists, in screen order: the ranked matches for a query, else
+/// the ungrouped hosts then each group by name, leaving out the folded ones.
+fn visible_order(query: &str, connections: &[Connection], folded: &[String]) -> Vec<usize> {
+    if !query.trim().is_empty() {
+        return sidebar::search(query, connections);
+    }
+    let layout = sidebar::layout(connections);
+    let open = layout
+        .groups
+        .into_iter()
+        .filter(|(name, _)| !folded.contains(name))
+        .flat_map(|(_, rows)| rows);
+    layout.ungrouped.into_iter().chain(open).collect()
+}
+
 const FILE_NAME: &str = "recent.json";
 /// What is kept on disk.
 pub const CAP: usize = 20;
@@ -318,6 +371,34 @@ pub fn now() -> u64 {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn conn(name: &str, group: Option<&str>) -> Connection {
+        Connection {
+            name: name.into(),
+            host: format!("{name}.example.com"),
+            group: group.map(Into::into),
+            ..Connection::default()
+        }
+    }
+
+    #[test]
+    fn arrows_walk_the_rows_in_screen_order_skipping_folded_groups() {
+        let all = [
+            conn("web", Some("prod")),
+            conn("laptop", None),
+            conn("db", Some("prod")),
+            conn("ci", Some("build")),
+        ];
+        assert_eq!(visible_order("", &all, &[]), [1, 3, 0, 2]);
+        assert_eq!(visible_order("", &all, &["prod".into()]), [1, 3]);
+        assert_eq!(visible_order("  ", &all, &["build".into()]), [1, 0, 2]);
+    }
+
+    #[test]
+    fn with_a_query_the_arrows_walk_the_matches_even_in_folded_groups() {
+        let all = [conn("web", Some("prod")), conn("laptop", None)];
+        assert_eq!(visible_order("web", &all, &["prod".into()]), [0]);
+    }
 
     fn aliases(r: &Recent) -> Vec<&str> {
         r.aliases().collect()

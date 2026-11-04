@@ -6,6 +6,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- From the sidebar's search box (⇧⌘F), ↑ and ↓ move through the hosts shown, skipping folded groups, and Return connects to the selected one rather than always the top match.
 - A full menu bar: tern (About, Services), File, Edit, View, Shell, Window and Help, so every shortcut can be found in a menu; ⌃⌘F enters full screen.
 - ⌘Z and ⇧⌘Z undo and redo adding, editing, removing and moving hosts (Edit → Undo); the toast's Undo is the same step. An edit is not undone once sync or an import has changed the list since.
 - Hosts in the sidebar can be dragged: onto another host to take its place (and its group), or onto a group's header to move to the end of that group. The order is saved in `hosts.json`.

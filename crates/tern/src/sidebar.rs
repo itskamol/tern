@@ -33,6 +33,8 @@ pub struct SidebarState<'a> {
     /// Indices into `hosts`, newest first, already limited to what the section shows.
     pub query: &'a str,
     pub search: &'a Entity<TextInput>,
+    /// The connection ↑/↓ reached from the search box, drawn selected.
+    pub selected: Option<usize>,
 }
 
 /// What a host drag carries: the connection it started from and what to draw under the
@@ -127,7 +129,7 @@ pub fn render(
         .px(px(8.));
     // What a row has to lay out: the sidebar less list padding, row padding, dot and gaps.
     let inner = s.width - 61.;
-    let one = |scope: &'static str, ix: usize, top: bool, cx: &mut Context<Shell>| {
+    let one = |scope: &'static str, ix: usize, cx: &mut Context<Shell>| {
         let host = &s.hosts[ix];
         let status = s
             .open
@@ -136,13 +138,14 @@ pub fn render(
             .find(|tab| tab.alias == host.alias)
             .map(|tab| tab.dot);
         let active = s.active_alias == Some(host.alias.as_str());
-        row(scope, ix, host, status, active, top, inner, t, cx)
+        let selected = s.selected == Some(ix);
+        row(scope, ix, host, status, active, selected, inner, t, cx)
     };
     if !s.query.trim().is_empty() {
         let found = search(s.query, s.connections);
         let mut body = div().pt(px(8.)).flex().flex_col().gap(px(2.));
-        for (n, &ix) in found.iter().enumerate() {
-            body = body.child(one("found", ix, n == 0, cx));
+        for &ix in &found {
+            body = body.child(one("found", ix, cx));
         }
         list = list.child(body);
         if found.is_empty() {
@@ -164,7 +167,7 @@ pub fn render(
                 let layout = layout(s.connections);
                 let mut body = div().pt(px(4.)).flex().flex_col().gap(px(2.));
                 for &ix in &layout.ungrouped {
-                    body = body.child(one("host", ix, false, cx));
+                    body = body.child(one("host", ix, cx));
                 }
                 list = list.child(body);
                 for (n, (name, rows)) in layout.groups.iter().enumerate() {
@@ -192,7 +195,7 @@ pub fn render(
                     if !folded {
                         let mut body = div().pt(px(4.)).pl(px(12.)).flex().flex_col().gap(px(2.));
                         for &ix in rows {
-                            body = body.child(one("host", ix, false, cx));
+                            body = body.child(one("host", ix, cx));
                         }
                         list = list.child(body);
                     }

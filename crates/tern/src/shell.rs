@@ -605,6 +605,7 @@ impl Render for Shell {
                 collapsed_groups: &self.hostlist.collapsed_groups,
                 query: &query,
                 search: &self.hostlist.search,
+                selected: self.sidebar_selection(window, cx),
             },
             &t,
             cx,
