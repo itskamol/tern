@@ -49,6 +49,27 @@ impl Shell {
         cx.notify();
     }
 
+    /// Reads macOS's Increase contrast and Reduce transparency and applies what changed: the
+    /// palette is rebuilt (stronger edges and secondary text), and open terminals restyled
+    /// (their see-through background under a wallpaper goes opaque).
+    pub(crate) fn sync_display_preferences(&mut self, cx: &mut Context<Self>) {
+        let contrast = crate::platform::system_increase_contrast();
+        let transparency = crate::platform::system_reduce_transparency();
+        let moved = (contrast, transparency)
+            != (
+                crate::theme::increase_contrast(),
+                crate::theme::reduce_transparency(),
+            );
+        if !moved {
+            return;
+        }
+        crate::theme::set_increase_contrast(contrast);
+        crate::theme::set_reduce_transparency(transparency);
+        self.refresh_theme(cx);
+        self.restyle_tabs(cx);
+        cx.notify();
+    }
+
     /// Standard-density mode for this frame, from the monitor the window is on right now.
     pub(super) fn sync_density(&self, window: &Window) {
         crate::theme::set_low_dpi(
@@ -194,10 +215,12 @@ impl Default for FrameState {
 impl Shell {
     /// Records the scale factor and switches the window between its blurred appearance (no
     /// wallpaper: the desktop shows through the frost) and an opaque one (a wallpaper is set:
-    /// nothing behind the window may show).
+    /// nothing behind the window may show). Reduce transparency forces the opaque one.
     pub(super) fn sync_frame(&mut self, window: &mut Window) {
         self.frame.scale = window.scale_factor();
-        let blurred = crate::theme::BLURS_BEHIND && !self.has_wallpaper();
+        let blurred = crate::theme::BLURS_BEHIND
+            && !self.has_wallpaper()
+            && !crate::theme::reduce_transparency();
         if self.frame.blurred != Some(blurred) {
             self.frame.blurred = Some(blurred);
             window.set_background_appearance(if blurred {

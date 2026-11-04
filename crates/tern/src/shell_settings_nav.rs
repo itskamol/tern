@@ -149,7 +149,7 @@ pub(super) fn render(
         .read(cx)
         .clone();
     let reduced = cx.reduce_motion();
-    let faint = th.muted.opacity(theme::by_dpi(0.7, 1.0));
+    let faint = th.secondary();
 
     let header = div()
         .flex_none()

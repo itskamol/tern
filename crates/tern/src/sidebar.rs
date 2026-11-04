@@ -323,7 +323,7 @@ fn section_header(
     cx: &mut Context<Shell>,
     on_toggle: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let faint = t.muted.opacity(crate::theme::by_dpi(0.7, 1.0));
+    let faint = t.secondary();
     let id = id.into();
     let key = format!("section-{id}");
     div()
@@ -481,7 +481,7 @@ fn row(
                 div()
                     .flex_none()
                     .text_size(px(meta_size))
-                    .text_color(t.muted.opacity(crate::theme::by_dpi(0.6, 0.85)))
+                    .text_color(t.secondary())
                     .group_hover(group.clone(), |s| s.invisible().min_w(px(MORE_ROOM)))
                     .child(SharedString::from(text)),
             )
