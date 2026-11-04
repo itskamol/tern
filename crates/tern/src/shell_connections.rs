@@ -490,27 +490,16 @@ impl Shell {
         };
         match saved {
             Ok(()) => {
-                let removed = self.connections.get(ix).cloned();
-                self.connections = next;
-                self.refresh_hosts();
-                if let Some(c) = removed {
-                    let name = c.name.clone();
+                let name = self.connections.get(ix).map(|c| c.name.clone());
+                self.commit_hosts(
+                    next,
+                    format!("Remove {}", name.as_deref().unwrap_or("host")),
+                );
+                if let Some(name) = name {
+                    // The same step as ⌘Z, so the toast and Edit → Undo never disagree.
                     self.toast(
-                        Toast::new(ToastKind::Default, format!("Removed {name}")).action(
-                            "Undo",
-                            move |s, _, cx| {
-                                let at = ix.min(s.connections.len());
-                                let mut next = s.connections.clone();
-                                next.insert(at, c.clone());
-                                if let Some(dir) = crate::settings::dir()
-                                    && connections::save(&dir, &next).is_ok()
-                                {
-                                    s.connections = next;
-                                    s.refresh_hosts();
-                                    cx.notify();
-                                }
-                            },
-                        ),
+                        Toast::new(ToastKind::Default, format!("Removed {name}"))
+                            .action("Undo", |s, w, cx| s.undo_hosts(w, cx)),
                         cx,
                     );
                 }

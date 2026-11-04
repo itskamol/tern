@@ -13,13 +13,28 @@ use gpui::{
     Render, StatefulInteractiveElement, Styled, Window, WindowControlArea, actions, div, px,
 };
 #[cfg(target_os = "macos")]
-use gpui::{Menu, MenuItem};
+use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
 
 use crate::hover::{Accessible as _, HoverFade as _};
 use crate::settings::{SIDEBAR_MAX, SIDEBAR_MIN};
 use crate::theme::{SPACE_SM, TITLEBAR_HEIGHT, TITLEBAR_TOP_PAD, Theme, titlebar_content_start};
 
-actions!(tern, [Quit, Hide, HideOthers, ShowAll, Minimize, Zoom]);
+actions!(
+    tern,
+    [
+        Quit,
+        Hide,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom,
+        ToggleFullScreen,
+        BringAllToFront,
+        OpenHelp
+    ]
+);
+
+const HELP_URL: &str = "https://github.com/your-moon/tern#readme";
 
 pub fn init_menus(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -28,13 +43,39 @@ pub fn init_menus(cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w| w.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w| w.zoom_window()));
+    cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |w| w.toggle_fullscreen()));
+    cx.on_action(|_: &BringAllToFront, cx| cx.activate(true));
+    cx.on_action(|_: &OpenHelp, cx| cx.open_url(HELP_URL));
     // Only macOS has an application menu bar; elsewhere the chords below are all there is.
     #[cfg(target_os = "macos")]
-    cx.set_menus([
-        Menu {
-            name: "tern".into(),
-            items: vec![
-                MenuItem::action("Settings…", crate::shell::OpenSettings),
+    cx.set_menus(app_menus());
+}
+
+/// The menus every Mac app has (HIG: Menus), so each shortcut can be found where people look
+/// for it. An item whose action nothing in focus handles is shown disabled.
+#[cfg(target_os = "macos")]
+fn app_menus() -> Vec<Menu> {
+    use crate::shell::{
+        DecreaseFontSize, IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize, ShowAbout,
+        SplitDown, SplitRight, ToggleSftp, ToggleSidebar, ToggleSnippets,
+    };
+    use crate::shell::{RedoHosts, UndoHosts};
+    use crate::tabs::{CloseTab, NextTab, PrevTab};
+    use crate::text_input::{Copy, Cut, Paste, SelectAll};
+    let menu = |name: &str, items| Menu {
+        name: name.to_owned().into(),
+        items,
+        disabled: false,
+    };
+    vec![
+        menu(
+            "tern",
+            vec![
+                MenuItem::action("About tern", ShowAbout),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Hide tern", Hide),
                 MenuItem::action("Hide Others", HideOthers),
@@ -42,17 +83,67 @@ pub fn init_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Quit tern", Quit),
             ],
-            disabled: false,
-        },
-        Menu {
-            name: "Window".into(),
-            items: vec![
+        ),
+        menu(
+            "File",
+            vec![
+                MenuItem::action("New Connection…", NewConnection),
+                MenuItem::action("Open Host…", crate::picker::ToggleHostPicker),
+                MenuItem::separator(),
+                MenuItem::action("Close Tab", CloseTab),
+            ],
+        ),
+        menu(
+            "Edit",
+            vec![
+                MenuItem::os_action("Undo", UndoHosts, OsAction::Undo),
+                MenuItem::os_action("Redo", RedoHosts, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("Cut", Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+                MenuItem::separator(),
+                MenuItem::action("Find Host…", crate::shell::FocusHostSearch),
+            ],
+        ),
+        menu(
+            "View",
+            vec![
+                MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
+                MenuItem::action("Browse Files", ToggleSftp),
+                MenuItem::separator(),
+                MenuItem::action("Bigger Text", IncreaseFontSize),
+                MenuItem::action("Smaller Text", DecreaseFontSize),
+                MenuItem::action("Actual Size", ResetFontSize),
+                MenuItem::separator(),
+                MenuItem::action("Enter Full Screen", ToggleFullScreen),
+            ],
+        ),
+        menu(
+            "Shell",
+            vec![
+                MenuItem::action("Split Right", SplitRight),
+                MenuItem::action("Split Down", SplitDown),
+                MenuItem::separator(),
+                MenuItem::action("Snippets…", ToggleSnippets),
+                MenuItem::action("Fill Password", crate::shell::FillPassword),
+            ],
+        ),
+        menu(
+            "Window",
+            vec![
                 MenuItem::action("Minimize", Minimize),
                 MenuItem::action("Zoom", Zoom),
+                MenuItem::separator(),
+                MenuItem::action("Show Next Tab", NextTab),
+                MenuItem::action("Show Previous Tab", PrevTab),
+                MenuItem::separator(),
+                MenuItem::action("Bring All to Front", BringAllToFront),
             ],
-            disabled: false,
-        },
-    ]);
+        ),
+        menu("Help", vec![MenuItem::action("tern Help", OpenHelp)]),
+    ]
 }
 
 /// The menu's own chords; not rebindable, as in every macOS app. Windows and Linux have only
@@ -70,6 +161,10 @@ pub fn menu_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
+        KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
+        // A text field has no history of its own yet; ⌘Z there must not undo a host.
+        KeyBinding::new("cmd-z", crate::shell::UndoHosts, Some("!TextInput")),
+        KeyBinding::new("shift-cmd-z", crate::shell::RedoHosts, Some("!TextInput")),
     ]
 }
 

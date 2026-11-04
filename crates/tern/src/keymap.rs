@@ -188,7 +188,7 @@ impl ShortcutId {
 
 /// Chords tern keeps for itself outside the keymap: the menu's (quit, hide, minimise),
 /// clipboard, and tab slots.
-const RESERVED_MAC: [&str; 7] = [
+const RESERVED_MAC: [&str; 10] = [
     "cmd-q",
     "cmd-h",
     "alt-cmd-h",
@@ -196,6 +196,9 @@ const RESERVED_MAC: [&str; 7] = [
     "cmd-c",
     "cmd-v",
     "cmd-a",
+    "ctrl-cmd-f",
+    "cmd-z",
+    "shift-cmd-z",
 ];
 
 /// Quit, and the terminal's copy / paste / find (see `tern-term`'s `view`).

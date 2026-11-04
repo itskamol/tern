@@ -94,6 +94,14 @@ impl Shell {
         }
     }
 
+    /// tern → About tern: the Settings page that has the version and links.
+    pub(crate) fn open_settings_at_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.select_section(Section::About, cx);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
     pub(crate) fn open_settings_at_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.picker = None;
         self.settings_page = Some(Section::Sync);

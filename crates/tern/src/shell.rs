@@ -38,7 +38,8 @@ actions!(
         FocusPaneRight,
         FocusPaneUp,
         FocusPaneDown,
-        OpenSettings
+        OpenSettings,
+        ShowAbout
     ]
 );
 
@@ -94,7 +95,7 @@ mod import_ui;
 #[path = "shell_snippets.rs"]
 mod snippets_ui;
 
-pub(crate) use hostlist::FocusHostSearch;
+pub(crate) use hostlist::{FocusHostSearch, RedoHosts, UndoHosts};
 pub(crate) use snippets_ui::ToggleSnippets;
 
 pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
@@ -679,6 +680,9 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &FillPassword, _, cx| s.fill_password(cx)))
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
             .on_action(cx.listener(|s, _: &OpenSettings, w, cx| s.toggle_settings(w, cx)))
+            .on_action(cx.listener(|s, _: &ShowAbout, w, cx| s.open_settings_at_about(w, cx)))
+            .on_action(cx.listener(|s, _: &UndoHosts, w, cx| s.undo_hosts(w, cx)))
+            .on_action(cx.listener(|s, _: &RedoHosts, w, cx| s.redo_hosts(w, cx)))
             // Capture phase: the terminal handles Escape itself, and ending a broadcast must
             // not depend on which pane has focus.
             .capture_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, _, cx| {

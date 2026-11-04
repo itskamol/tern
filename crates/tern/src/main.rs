@@ -8,6 +8,7 @@ mod connections;
 mod devkeys;
 mod empty_state;
 mod forward_spec;
+mod host_history;
 mod hover;
 mod icons;
 mod indicator;

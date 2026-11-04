@@ -18,12 +18,13 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-actions!(tern, [FocusHostSearch]);
+actions!(tern, [FocusHostSearch, UndoHosts, RedoHosts]);
 
 pub(super) struct HostList {
     pub search: Entity<TextInput>,
     pub collapsed_groups: Vec<String>,
     pub recent: Recent,
+    pub history: crate::host_history::HostHistory,
     _repaint: Subscription,
 }
 
@@ -42,6 +43,7 @@ impl HostList {
             search,
             collapsed_groups: Vec::new(),
             recent,
+            history: crate::host_history::HostHistory::default(),
             _repaint: repaint,
         }
     }
@@ -142,16 +144,69 @@ impl Shell {
         // A command typed in this form is approved by saving it.
         crate::password_command::approve_saved(&connection);
         let mut next = self.connections.clone();
-        match editing.and_then(|ix| next.get_mut(ix)) {
-            Some(slot) => *slot = connection,
-            None => next.push(connection),
-        }
+        let what = match editing.and_then(|ix| next.get_mut(ix)) {
+            Some(slot) => {
+                *slot = connection;
+                format!("Edit {}", slot.name)
+            }
+            None => {
+                let what = format!("Add {}", connection.name);
+                next.push(connection);
+                what
+            }
+        };
         if let Some(dir) = crate::settings::dir() {
             connections::save(&dir, &next).map_err(|e| e.to_string())?;
         }
-        self.connections = next;
-        self.refresh_hosts();
+        self.commit_hosts(next, what);
         Ok(())
+    }
+
+    /// The list after an edit made here, already written: shown, and kept for ⌘Z.
+    pub(super) fn commit_hosts(&mut self, next: Vec<Connection>, what: String) {
+        let before = std::mem::replace(&mut self.connections, next);
+        self.hostlist
+            .history
+            .record(before, self.connections.clone(), what);
+        self.refresh_hosts();
+    }
+
+    pub(super) fn undo_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let step = self.hostlist.history.undo(&self.connections);
+        self.restore_hosts(step, "Undo", window, cx);
+    }
+
+    pub(super) fn redo_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let step = self.hostlist.history.redo(&self.connections);
+        self.restore_hosts(step, "Redo", window, cx);
+    }
+
+    /// Writes back a list from the history and names what changed ("Undo Remove web-01").
+    /// Nothing to undo, or a list changed by sync since, only beeps.
+    fn restore_hosts(
+        &mut self,
+        step: Option<(Vec<Connection>, String)>,
+        verb: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((list, what)) = step else {
+            return window.play_system_bell();
+        };
+        if let Some(dir) = crate::settings::dir()
+            && let Err(e) = connections::save(&dir, &list)
+        {
+            self.hostlist.history.clear();
+            return self.notify_toast(
+                super::ToastKind::Critical,
+                format!("Could not {}: {e}", verb.to_lowercase()),
+                cx,
+            );
+        }
+        self.connections = list;
+        self.refresh_hosts();
+        self.notify_toast(super::ToastKind::Default, format!("{verb} {what}"), cx);
+        cx.notify();
     }
 
     /// A host dragged in the sidebar: moved (into the group it landed in) and written to
@@ -176,8 +231,12 @@ impl Shell {
                 cx,
             );
         }
-        self.connections = next;
-        self.refresh_hosts();
+        let moved = self
+            .connections
+            .get(from)
+            .map_or("host", |c| c.name.as_str());
+        let what = format!("Move {moved}");
+        self.commit_hosts(next, what);
         cx.notify();
     }
 }
