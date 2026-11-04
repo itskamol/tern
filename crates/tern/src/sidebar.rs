@@ -8,13 +8,13 @@ use crate::hover::Accessible as _;
 use crate::hover::HoverFade as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, Entity, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Transformation, div,
-    percentage, px,
+    AppContext as _, Context, Entity, Hsla, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    Transformation, div, percentage, px,
 };
 use tern_ssh::HostEntry;
 
-use crate::connections::Connection;
+use crate::connections::{Connection, Spot};
 use crate::icons::{self, icon};
 use crate::indicator::Dot;
 use crate::shell::Shell;
@@ -33,6 +33,32 @@ pub struct SidebarState<'a> {
     /// Indices into `hosts`, newest first, already limited to what the section shows.
     pub query: &'a str,
     pub search: &'a Entity<TextInput>,
+}
+
+/// What a host drag carries: the connection it started from and what to draw under the
+/// pointer.
+#[derive(Clone)]
+pub struct DraggedHost {
+    ix: usize,
+    label: SharedString,
+    background: Hsla,
+    color: Hsla,
+}
+
+impl gpui::Render for DraggedHost {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(26.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .rounded(px(8.))
+            .bg(self.background)
+            .text_color(self.color)
+            .text_size(px(13.))
+            .shadow_md()
+            .child(self.label.clone())
+    }
 }
 
 /// How the Saved section is laid out: ungrouped hosts first, then one folder per group.
@@ -144,15 +170,25 @@ pub fn render(
                 for (n, (name, rows)) in layout.groups.iter().enumerate() {
                     let folded = s.collapsed_groups.contains(name);
                     let toggled = name.clone();
-                    list = list.child(section_header(
-                        ("group-header", n),
-                        SharedString::from(format!("{name} · {}", rows.len())),
-                        folded,
-                        true,
-                        t,
-                        cx,
-                        move |shell, cx| shell.toggle_group(&toggled, cx),
-                    ));
+                    let into = Spot::EndOf(Some(name.clone()));
+                    let accent = t.accent;
+                    list = list.child(
+                        section_header(
+                            ("group-header", n),
+                            SharedString::from(format!("{name} · {}", rows.len())),
+                            folded,
+                            true,
+                            t,
+                            cx,
+                            move |shell, cx| shell.toggle_group(&toggled, cx),
+                        )
+                        .drag_over::<DraggedHost>(move |s, _, _, _| s.bg(accent.opacity(0.25)))
+                        .on_drop(cx.listener(
+                            move |shell, from: &DraggedHost, _, cx| {
+                                shell.move_host(from.ix, &into, cx);
+                            },
+                        )),
+                    );
                     if !folded {
                         let mut body = div().pt(px(4.)).pl(px(12.)).flex().flex_col().gap(px(2.));
                         for &ix in rows {
@@ -369,6 +405,13 @@ fn row(
     let group: SharedString = format!("host-row-{scope}-{ix}").into();
     let meta_size = if crate::theme::low_dpi() { 12. } else { 11. };
     let meta = fit_meta(host, inner, meta_size);
+    let dragged = DraggedHost {
+        ix,
+        label: SharedString::from(tabs::middle_ellipsis(&host.alias, 26)),
+        background: t.popup,
+        color: t.text,
+    };
+    let accent = t.accent;
     div()
         .id((scope, ix))
         .group(group.clone())
@@ -389,6 +432,14 @@ fn row(
         .on_click(cx.listener(move |shell, _, window, cx| {
             shell.connect_host(target.clone(), window, cx);
         }))
+        // Only the full list reorders: a search result's place says nothing about the order.
+        .when(scope == "host", |el| {
+            el.on_drag(dragged, |host, _, _, cx| cx.new(|_| host.clone()))
+                .drag_over::<DraggedHost>(move |s, _, _, _| s.bg(accent.opacity(0.25)))
+                .on_drop(cx.listener(move |shell, from: &DraggedHost, _, cx| {
+                    shell.move_host(from.ix, &Spot::At(ix), cx);
+                }))
+        })
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |shell, e: &MouseDownEvent, _, cx| {
