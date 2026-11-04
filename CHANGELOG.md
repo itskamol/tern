@@ -6,6 +6,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- Hosts in the sidebar can be dragged: onto another host to take its place (and its group), or onto a group's header to move to the end of that group. The order is saved in `hosts.json`.
 - A session stopped at a password, passphrase or host-key question shows an amber ring instead of the pulsing connecting dot, and the status line says "Waiting for your answer" (#31).
 - README keyboard table lists Windows and Linux shortcuts alongside macOS (#41).
 

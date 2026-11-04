@@ -297,6 +297,46 @@ pub fn parse_tags(text: &str) -> Vec<String> {
     tags
 }
 
+/// Where a host dragged in the sidebar lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spot {
+    /// Onto another host: it takes that host's place and its group, as a dragged tab does.
+    At(usize),
+    /// Onto a group's header: the end of that group (`None` is the ungrouped hosts).
+    EndOf(Option<String>),
+}
+
+/// Moves `connections[from]` to `to`. False when nothing changed (a drop on itself, an index
+/// out of range, or the end of the group it already ends).
+pub fn move_to(connections: &mut Vec<Connection>, from: usize, to: &Spot) -> bool {
+    if from >= connections.len() {
+        return false;
+    }
+    let (group, at) = match to {
+        Spot::At(ix) if *ix == from || *ix >= connections.len() => return false,
+        Spot::At(ix) => (connections[*ix].group.clone(), *ix),
+        Spot::EndOf(group) => {
+            let last = (0..connections.len())
+                .rev()
+                .find(|&ix| ix != from && connections[ix].group == *group);
+            // After `from` is taken out, everything past it is one slot earlier.
+            let at = match last {
+                Some(last) if last > from => last,
+                Some(last) => last + 1,
+                None => connections.len() - 1,
+            };
+            if at == from && connections[from].group == *group {
+                return false;
+            }
+            (group.clone(), at)
+        }
+    };
+    let mut moved = connections.remove(from);
+    moved.group = group;
+    connections.insert(at, moved);
+    true
+}
+
 /// Checks a draft. `others` are the names of the other tern connections (not the one being
 /// edited); reusing a `~/.ssh/config` alias is allowed and replaces that host.
 ///

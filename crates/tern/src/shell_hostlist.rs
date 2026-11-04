@@ -153,6 +153,33 @@ impl Shell {
         self.refresh_hosts();
         Ok(())
     }
+
+    /// A host dragged in the sidebar: moved (into the group it landed in) and written to
+    /// `hosts.json`. A failed write leaves the list as it was, and says so.
+    pub(crate) fn move_host(
+        &mut self,
+        from: usize,
+        to: &connections::Spot,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next = self.connections.clone();
+        if !connections::move_to(&mut next, from, to) {
+            return;
+        }
+        if let Some(dir) = crate::settings::dir()
+            && let Err(e) = connections::save(&dir, &next)
+        {
+            tracing::warn!(error = %e, "hosts_move_save_failed");
+            return self.notify_toast(
+                super::ToastKind::Critical,
+                format!("Could not move the host: {e}"),
+                cx,
+            );
+        }
+        self.connections = next;
+        self.refresh_hosts();
+        cx.notify();
+    }
 }
 
 const FILE_NAME: &str = "recent.json";

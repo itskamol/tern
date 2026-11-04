@@ -422,3 +422,69 @@ fn importing_an_ssh_config_host_copies_jump_forwards_agent_and_keep_alive() {
     assert_eq!(back.agent_socket, entry.agent_socket);
     assert_eq!(back.server_alive_interval, entry.server_alive_interval);
 }
+
+fn listed(group: Option<&str>, names: &[&str]) -> Vec<Connection> {
+    names
+        .iter()
+        .map(|n| Connection {
+            name: (*n).into(),
+            group: group.map(Into::into),
+            ..Connection::default()
+        })
+        .collect()
+}
+
+/// `name` or `name@group`, in saved order.
+fn order(all: &[Connection]) -> Vec<String> {
+    all.iter()
+        .map(|c| match &c.group {
+            Some(g) => format!("{}@{g}", c.name),
+            None => c.name.clone(),
+        })
+        .collect()
+}
+
+#[test]
+fn a_host_dropped_on_another_takes_its_place_up_or_down_like_a_tab() {
+    let mut all = listed(None, &["a", "b", "c", "d"]);
+    assert!(move_to(&mut all, 3, &Spot::At(1)));
+    assert_eq!(order(&all), ["a", "d", "b", "c"]);
+    assert!(move_to(&mut all, 0, &Spot::At(2)));
+    assert_eq!(order(&all), ["d", "b", "a", "c"]);
+}
+
+#[test]
+fn a_host_dropped_on_a_host_in_another_group_joins_that_group() {
+    let mut all = listed(None, &["a", "b"]);
+    all.extend(listed(Some("prod"), &["p1", "p2"]));
+    assert!(move_to(&mut all, 0, &Spot::At(3)));
+    assert_eq!(order(&all), ["b", "p1@prod", "p2@prod", "a@prod"]);
+    assert!(move_to(&mut all, 2, &Spot::At(0)));
+    assert_eq!(order(&all), ["p2", "b", "p1@prod", "a@prod"]);
+}
+
+#[test]
+fn a_host_dropped_on_a_group_header_goes_to_the_end_of_that_group() {
+    let mut all = listed(Some("prod"), &["p1", "p2"]);
+    all.extend(listed(None, &["a"]));
+    all.extend(listed(Some("dev"), &["d1"]));
+    assert!(move_to(&mut all, 2, &Spot::EndOf(Some("prod".into()))));
+    assert_eq!(order(&all), ["p1@prod", "p2@prod", "a@prod", "d1@dev"]);
+    assert!(move_to(&mut all, 0, &Spot::EndOf(Some("dev".into()))));
+    assert_eq!(order(&all), ["p2@prod", "a@prod", "d1@dev", "p1@dev"]);
+    assert!(move_to(&mut all, 3, &Spot::EndOf(Some("new".into()))));
+    assert_eq!(order(&all), ["p2@prod", "a@prod", "d1@dev", "p1@new"]);
+    assert!(move_to(&mut all, 1, &Spot::EndOf(None)));
+    assert_eq!(order(&all), ["p2@prod", "d1@dev", "p1@new", "a"]);
+}
+
+#[test]
+fn a_drop_that_changes_nothing_says_so_and_leaves_the_list_alone() {
+    let mut all = listed(Some("prod"), &["p1", "p2"]);
+    let before = all.clone();
+    assert!(!move_to(&mut all, 1, &Spot::At(1)));
+    assert!(!move_to(&mut all, 1, &Spot::EndOf(Some("prod".into()))));
+    assert!(!move_to(&mut all, 5, &Spot::At(0)));
+    assert!(!move_to(&mut all, 0, &Spot::At(5)));
+    assert_eq!(all, before);
+}
