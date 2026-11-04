@@ -341,6 +341,10 @@ fn status_dot(status: Option<Dot>, t: &Theme) -> impl IntoElement + use<> {
         })
 }
 
+/// How far the "..." button reaches into a row's text: 19 px wide at 4 px from the edge, less
+/// the row's 8 px padding, plus a 4 px gap so text never touches it.
+const MORE_ROOM: f32 = 19.;
+
 /// The "..." button's element id, distinct per section so a host listed twice has two.
 fn scope_more(scope: &'static str) -> &'static str {
     match scope {
@@ -402,6 +406,10 @@ fn row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
+                // With no meta to stand in for, the name makes room for the button itself.
+                .when(meta.is_none(), |el| {
+                    el.group_hover(group.clone(), |s| s.pr(px(MORE_ROOM)))
+                })
                 .text_size(px(13.))
                 .line_height(px(17.))
                 .text_color(if active {
@@ -412,21 +420,21 @@ fn row(
                 .child(SharedString::from(tabs::middle_ellipsis(&host.alias, 26))),
         )
         // The meta is only drawn whole: `fit_meta` already dropped what would not fit, so the
-        // name is what truncates, never an address cut mid-octet.
+        // name is what truncates, never an address cut mid-octet. On hover the "..." button
+        // takes its place rather than covering half of it; the tooltip still has the address.
         .when_some(meta.clone(), |el, text| {
             el.child(
                 div()
                     .flex_none()
                     .text_size(px(meta_size))
                     .text_color(t.muted.opacity(crate::theme::by_dpi(0.6, 0.85)))
+                    .group_hover(group.clone(), |s| s.invisible().min_w(px(MORE_ROOM)))
                     .child(SharedString::from(text)),
             )
         })
-        .when(
-            meta.as_deref() != Some(short_address(host).as_str()),
-            |el| el.hint(address(host), t),
-        )
-        // zeron's hover corner: floats over the end of the row, so it reserves no width.
+        .hint(address(host), t)
+        // zeron's hover corner: floats over the end of the row, where the meta was. No fill of
+        // its own until pointed at, so it sits on the row's hover colour instead of a block.
         .child(
             div()
                 .id((scope_more(scope), ix))
@@ -439,7 +447,6 @@ fn row(
                 .items_center()
                 .justify_center()
                 .rounded(px(5.))
-                .bg(t.popup)
                 .invisible()
                 .group_hover(group, |s| s.visible())
                 .hover(|s| s.bg(t.ink(0.18)))
