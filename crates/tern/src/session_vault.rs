@@ -114,6 +114,7 @@ impl Session {
             }
         };
         if Keeper::keychain_then(cx, wake) {
+            self.vault_busy = true;
             self.note("Asking the Keychain…", cx);
             return;
         }
@@ -137,6 +138,7 @@ impl Session {
         }: After,
         cx: &mut Context<Self>,
     ) {
+        self.vault_busy = false;
         if Keeper::locked(cx) {
             return self.ask_unlock(
                 After {
@@ -154,6 +156,7 @@ impl Session {
             self.save(vault, cx);
         }
         self.resume(prompt, fill, true, cx);
+        self.release_held(cx);
     }
 
     fn ask_passphrase(&mut self, after: After, cx: &mut Context<Self>) {
@@ -317,6 +320,7 @@ impl Session {
         let Some(path) = Keeper::path(cx) else {
             return;
         };
+        self.vault_busy = true;
         self.note("Unlocking the vault…", cx);
         let work = match opener {
             Opener::Passphrase(passphrase) => cx.background_spawn(async move {
@@ -339,6 +343,7 @@ impl Session {
 
     /// The vault opened, or it did not and the person is asked again.
     fn unlocked(&mut self, outcome: Outcome, after: After, cx: &mut Context<Self>) {
+        self.vault_busy = false;
         let vault = match outcome {
             Outcome::Opened(vault) => Some(vault),
             Outcome::Wrong { .. } => {
@@ -376,6 +381,7 @@ impl Session {
             }
         }
         self.resume(prompt, fill, unlocked, cx);
+        self.release_held(cx);
     }
 
     /// What waited for the vault goes on. The connection dials, with the keys if the vault
@@ -407,6 +413,7 @@ impl Session {
         let Some(path) = Keeper::path(cx) else {
             return;
         };
+        self.vault_busy = true;
         let work = cx.background_spawn(async move {
             let result = vault.save(&path);
             (vault, result)
@@ -422,6 +429,8 @@ impl Session {
                         s.note(&format!("Could not save the vault: {e}"), cx);
                     }
                 }
+                s.vault_busy = false;
+                s.release_held(cx);
             });
         })
         .detach();
