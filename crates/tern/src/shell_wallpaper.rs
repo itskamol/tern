@@ -191,9 +191,10 @@ impl Shell {
 
     /// The panel opacity while the picture fills the whole window; `None` in hero-only mode and
     /// without a picture. The smallest alpha at which text, muted and faint text (and the
-    /// terminal's own text) keep 4.5:1 over the picture's brightest and darkest regions.
+    /// terminal's own text) keep 4.5:1 over the picture's brightest and darkest regions. `None`
+    /// under Reduce transparency: the panels stay opaque and the picture never shows through.
     pub(crate) fn window_fill(&self) -> Option<f32> {
-        if !self.settings.wallpaper_fills_window {
+        if !self.settings.wallpaper_fills_window || crate::theme::reduce_transparency() {
             return None;
         }
         let shown = self.wp.shown.as_ref()?;
@@ -203,6 +204,7 @@ impl Shell {
             let mut v = vec![
                 (rgb_of(t.text), theme_tint::TEXT_CONTRAST),
                 (rgb_of(t.muted), theme_tint::TEXT_CONTRAST),
+                (rgb_of(t.secondary()), theme_tint::TEXT_CONTRAST),
                 (rgb_of(t.faint), theme_tint::FAINT_CONTRAST),
             ];
             v.extend(extra.map(|c| (rgb_of(c), theme_tint::TEXT_CONTRAST)));

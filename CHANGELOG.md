@@ -21,6 +21,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 - Clicking a session tab while Settings is open now closes Settings and shows the session, with typing going to its terminal (#63).
 - SFTP panel file sizes just under a unit boundary round up to the next unit (e.g. `1.0 MB` instead of `1024 KB`) and sizes just under 10 omit decimals (`10 KB` instead of `10.0 KB`) (#39).
 - Plain-text `ftps://` links are now detected and clickable in terminal output (#40).
+- Secondary text (sidebar host addresses and section labels) keeps 4.5:1 contrast in both themes, and tern follows macOS Increase contrast (full-strength secondary text, stronger borders) and Reduce transparency (opaque window and panels, no wallpaper showing through).
 
 ## [0.1.3] - 2026-10-11
 
