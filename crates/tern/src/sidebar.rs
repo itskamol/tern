@@ -224,7 +224,6 @@ fn empty_state(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
                 .items_center()
                 .justify_center()
                 .rounded(px(8.))
-                .cursor_pointer()
                 .text_size(px(13.))
                 .bg(t.accent)
                 .text_color(t.on_accent)
@@ -242,7 +241,6 @@ fn empty_state(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
                 .items_center()
                 .justify_center()
                 .rounded(px(8.))
-                .cursor_pointer()
                 .text_size(px(13.))
                 .hover_fade("import-ssh-config", t.row_hover, t.row_active)
                 .text_color(t.text)
@@ -310,7 +308,6 @@ fn section_header(
 ) -> gpui::Stateful<gpui::Div> {
     let faint = t.secondary();
     let id = id.into();
-    let key = format!("section-{id}");
     div()
         .id(id)
         .mt(px(if nested { 4. } else { 12. }))
@@ -321,8 +318,6 @@ fn section_header(
         .items_center()
         .gap(px(8.))
         .rounded(px(8.))
-        .cursor_pointer()
-        .hover_fade(key, gpui::transparent_black(), t.row_hover)
         .on_click(cx.listener(move |s, _, _, cx| on_toggle(s, cx)))
         .child(
             icon(icons::CHEVRON_RIGHT)
@@ -365,20 +360,9 @@ fn status_dot(status: Option<Dot>, t: &Theme) -> impl IntoElement + use<> {
         })
 }
 
-/// How far the "..." button reaches into a row's text: 19 px wide at 4 px from the edge, less
-/// the row's 8 px padding, plus a 4 px gap so text never touches it.
-const MORE_ROOM: f32 = 19.;
-
-/// The "..." button's element id, distinct per section so a host listed twice has two.
-fn scope_more(scope: &'static str) -> &'static str {
-    match scope {
-        "recent" => "recent-more",
-        "found" => "found-more",
-        _ => "host-more",
-    }
-}
-
-/// One host on one line, as zeron's session row: dot, name, the address faint at the end.
+/// One host on one line: dot, name, the address faint at the end. As in Finder's and Mail's
+/// sidebars (HIG: Sidebars) pointing at a row changes nothing; only the active or keyboard-
+/// selected host is filled, and its actions are in the menu a secondary click opens.
 #[allow(clippy::too_many_arguments)]
 fn row(
     scope: &'static str,
@@ -393,8 +377,7 @@ fn row(
 ) -> impl IntoElement + use<> {
     let target = host.clone();
     let menu_host = host.clone();
-    let more_host = host.clone();
-    let group: SharedString = format!("host-row-{scope}-{ix}").into();
+    let click_host = host.clone();
     let meta_size = if crate::theme::low_dpi() { 12. } else { 11. };
     let meta = fit_meta(host, inner, meta_size);
     let dragged = DraggedHost {
@@ -408,7 +391,6 @@ fn row(
         .id((scope, ix))
         .role(Role::Button)
         .aria_label(a11y::host_label(host, status))
-        .group(group.clone())
         .relative()
         .h(px(29.))
         .px(px(8.))
@@ -416,15 +398,14 @@ fn row(
         .flex()
         .items_center()
         .gap(px(8.))
-        .cursor_pointer()
-        .hover_fade(
-            format!("host-{scope}-{ix}"),
-            gpui::transparent_black(),
-            t.ink(0.11),
-        )
         .when(active || top, |el| el.bg(t.ink(0.11)))
-        .on_click(cx.listener(move |shell, _, window, cx| {
-            shell.connect_host(target.clone(), window, cx);
+        // Control-click is the secondary click on a Mac with one button.
+        .on_click(cx.listener(move |shell, e: &gpui::ClickEvent, window, cx| {
+            if e.modifiers().control {
+                shell.open_host_menu(&click_host, ix, e.position(), cx);
+            } else {
+                shell.connect_host(target.clone(), window, cx);
+            }
         }))
         // Only the full list reorders: a search result's place says nothing about the order.
         .when(scope == "host", |el| {
@@ -447,10 +428,6 @@ fn row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                // With no meta to stand in for, the name makes room for the button itself.
-                .when(meta.is_none(), |el| {
-                    el.group_hover(group.clone(), |s| s.pr(px(MORE_ROOM)))
-                })
                 .text_size(px(13.))
                 .line_height(px(17.))
                 .text_color(if active {
@@ -461,46 +438,20 @@ fn row(
                 .child(SharedString::from(tabs::middle_ellipsis(&host.alias, 26))),
         )
         // The meta is only drawn whole: `fit_meta` already dropped what would not fit, so the
-        // name is what truncates, never an address cut mid-octet. On hover the "..." button
-        // takes its place rather than covering half of it; the tooltip still has the address.
+        // name is what truncates, never an address cut mid-octet.
         .when_some(meta.clone(), |el, text| {
             el.child(
                 div()
                     .flex_none()
                     .text_size(px(meta_size))
                     .text_color(t.secondary())
-                    .group_hover(group.clone(), |s| s.invisible().min_w(px(MORE_ROOM)))
                     .child(SharedString::from(text)),
             )
         })
-        .hint(address(host), t)
-        // zeron's hover corner: floats over the end of the row, where the meta was. No fill of
-        // its own until pointed at, so it sits on the row's hover colour instead of a block.
-        .child(
-            div()
-                .id((scope_more(scope), ix))
-                .icon_button("Host actions", t)
-                .absolute()
-                .right(px(4.))
-                .top(px(5.))
-                .size(px(19.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(5.))
-                .invisible()
-                .group_hover(group, |s| s.visible())
-                .hover(|s| s.bg(t.ink(0.18)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |shell, e: &gpui::ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    shell.open_host_menu(&more_host, ix, e.position(), cx);
-                }))
-                .child(
-                    icon(icons::MORE)
-                        .size(px(crate::theme::fit(19., 13.)))
-                        .text_color(t.muted),
-                ),
+        // A tooltip only where the row does not already show the whole address.
+        .when(
+            meta.as_deref() != Some(short_address(host).as_str()),
+            |el| el.hint(address(host), t),
         )
 }
 
@@ -524,7 +475,6 @@ fn footer(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
                 .items_center()
                 .gap(px(8.))
                 .rounded(px(8.))
-                .cursor_pointer()
                 .text_size(px(13.))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(t.text.opacity(crate::theme::by_dpi(0.8, 0.9)))
@@ -557,7 +507,6 @@ pub fn icon_button(
         .items_center()
         .justify_center()
         .rounded(px(6.))
-        .cursor_pointer()
         .hover_fade(key, gpui::transparent_black(), t.ink(0.11))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(

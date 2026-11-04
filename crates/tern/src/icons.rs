@@ -84,7 +84,6 @@ icon_assets!(
     (INFO, "info-circle"),
     (CHEVRON_RIGHT, "alt-arrow-right"),
     (CHEVRON_LEFT, "alt-arrow-left"),
-    (MORE, "more-horizontal"),
     (SEARCH, "magnifer"),
     (GLOBE, "global"),
     (FOLDER, "folder"),
