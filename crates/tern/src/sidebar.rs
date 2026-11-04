@@ -9,7 +9,7 @@ use crate::hover::HoverFade as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AppContext as _, Context, Entity, Hsla, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    MouseDownEvent, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
     Transformation, div, percentage, px,
 };
 use tern_ssh::HostEntry;
@@ -21,6 +21,7 @@ use crate::shell::Shell;
 use crate::tabs::{self, TabInfo};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
+use drag::{DraggedHost, drop_line, spring_load};
 
 /// `hosts[i]` is `connections[i].entry()`: the sidebar lists tern's own connections only.
 pub struct SidebarState<'a> {
@@ -35,32 +36,6 @@ pub struct SidebarState<'a> {
     pub search: &'a Entity<TextInput>,
     /// The connection ↑/↓ reached from the search box, drawn selected.
     pub selected: Option<usize>,
-}
-
-/// What a host drag carries: the connection it started from and what to draw under the
-/// pointer.
-#[derive(Clone)]
-pub struct DraggedHost {
-    ix: usize,
-    label: SharedString,
-    background: Hsla,
-    color: Hsla,
-}
-
-impl gpui::Render for DraggedHost {
-    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h(px(26.))
-            .px(px(10.))
-            .flex()
-            .items_center()
-            .rounded(px(8.))
-            .bg(self.background)
-            .text_color(self.color)
-            .text_size(px(13.))
-            .shadow_md()
-            .child(self.label.clone())
-    }
 }
 
 /// How the Saved section is laid out: ungrouped hosts first, then one folder per group.
@@ -175,23 +150,29 @@ pub fn render(
                     let toggled = name.clone();
                     let into = Spot::EndOf(Some(name.clone()));
                     let accent = t.accent;
-                    list = list.child(
-                        section_header(
-                            ("group-header", n),
-                            SharedString::from(format!("{name} · {}", rows.len())),
-                            folded,
-                            true,
-                            t,
-                            cx,
-                            move |shell, cx| shell.toggle_group(&toggled, cx),
-                        )
-                        .drag_over::<DraggedHost>(move |s, _, _, _| s.bg(accent.opacity(0.25)))
-                        .on_drop(cx.listener(
-                            move |shell, from: &DraggedHost, _, cx| {
-                                shell.move_host(from.ix, &into, cx);
-                            },
-                        )),
-                    );
+                    let header = section_header(
+                        ("group-header", n),
+                        SharedString::from(format!("{name} · {}", rows.len())),
+                        folded,
+                        true,
+                        t,
+                        cx,
+                        move |shell, cx| shell.toggle_group(&toggled, cx),
+                    )
+                    .role(Role::Button)
+                    .aria_label(a11y::group_label(name, rows.len(), folded))
+                    .aria_expanded(!folded)
+                    .drag_over::<DraggedHost>(move |s, _, _, _| s.bg(accent.opacity(0.25)))
+                    .on_drop(cx.listener(
+                        move |shell, from: &DraggedHost, _, cx| {
+                            shell.move_host(from.ix, &into, cx);
+                        },
+                    ));
+                    list = list.child(if folded {
+                        spring_load(header, name.clone(), cx)
+                    } else {
+                        header
+                    });
                     if !folded {
                         let mut body = div().pt(px(4.)).pl(px(12.)).flex().flex_col().gap(px(2.));
                         for &ix in rows {
@@ -235,6 +216,8 @@ fn empty_state(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
         .child(
             div()
                 .id("empty-new")
+                .role(Role::Button)
+                .aria_label("New connection")
                 .h(px(28.))
                 .px(px(12.))
                 .flex()
@@ -251,6 +234,8 @@ fn empty_state(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
         .child(
             div()
                 .id("empty-import")
+                .role(Role::Button)
+                .aria_label("Import from SSH config")
                 .h(px(28.))
                 .px(px(12.))
                 .flex()
@@ -421,6 +406,8 @@ fn row(
     let accent = t.accent;
     div()
         .id((scope, ix))
+        .role(Role::Button)
+        .aria_label(a11y::host_label(host, status))
         .group(group.clone())
         .relative()
         .h(px(29.))
@@ -442,7 +429,7 @@ fn row(
         // Only the full list reorders: a search result's place says nothing about the order.
         .when(scope == "host", |el| {
             el.on_drag(dragged, |host, _, _, cx| cx.new(|_| host.clone()))
-                .drag_over::<DraggedHost>(move |s, _, _, _| s.bg(accent.opacity(0.25)))
+                .drag_over::<DraggedHost>(move |s, from, _, _| drop_line(s, from.ix, ix, accent))
                 .on_drop(cx.listener(move |shell, from: &DraggedHost, _, cx| {
                     shell.move_host(from.ix, &Spot::At(ix), cx);
                 }))
@@ -529,6 +516,8 @@ fn footer(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
         .child(
             div()
                 .id("footer-sync")
+                .role(Role::Button)
+                .aria_label("Sync")
                 .h(px(28.))
                 .px(px(8.))
                 .flex()
@@ -623,6 +612,11 @@ fn short_address(host: &HostEntry) -> String {
         meta
     }
 }
+
+#[path = "sidebar_a11y.rs"]
+mod a11y;
+#[path = "sidebar_drag.rs"]
+mod drag;
 
 #[cfg(test)]
 mod tests {

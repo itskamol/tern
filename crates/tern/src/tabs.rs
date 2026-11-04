@@ -9,8 +9,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, AppContext, Context, ElementId, Entity,
     FontWeight, Hsla, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window, actions, div,
-    pulsating_between, px,
+    Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window, actions,
+    div, pulsating_between, px,
 };
 
 use crate::indicator::Dot;
@@ -107,6 +107,8 @@ pub fn strip(
 ) -> impl IntoElement + use<> {
     let mut row = div()
         .id("tab-strip")
+        .role(Role::TabList)
+        .aria_label("Sessions")
         .flex()
         .items_center()
         .gap(px(2.))
@@ -137,6 +139,9 @@ fn tab_pill(
     let renaming = tab.rename.clone();
     div()
         .id(("tab", ix))
+        .role(Role::Tab)
+        .aria_label(tab_label(tab))
+        .aria_selected(active)
         .group("tab")
         .h(px(26.))
         .flex_shrink(1.)
@@ -209,11 +214,12 @@ fn tab_pill(
             el.child(
                 div()
                     .flex_none()
-                    .px(px(4.))
+                    .px(px(5.))
+                    .py(px(1.))
                     .rounded(px(3.))
                     .bg(t.accent.opacity(0.22))
                     .text_color(t.accent)
-                    .text_size(px(9.))
+                    .text_size(px(10.))
                     .child("BCAST"),
             )
         })
@@ -221,11 +227,12 @@ fn tab_pill(
             el.child(
                 div()
                     .flex_none()
-                    .px(px(4.))
+                    .px(px(5.))
+                    .py(px(1.))
                     .rounded(px(3.))
                     .bg(t.danger.opacity(0.18))
                     .text_color(t.danger)
-                    .text_size(px(9.))
+                    .text_size(px(10.))
                     .child("LOG"),
             )
         })
@@ -233,12 +240,12 @@ fn tab_pill(
             div()
                 .id(("close", ix))
                 .icon_button("Close tab", t)
-                .size(px(18.))
+                .size(px(20.))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(4.))
+                .rounded(px(5.))
                 .text_color(t.faint)
                 .invisible()
                 .group_hover("tab", |s| s.visible())
@@ -256,6 +263,27 @@ fn tab_pill(
                 }))
                 .child("×"),
         )
+}
+
+/// How a dot is said aloud; a host that is not connected has nothing to add.
+pub fn status_words(dot: Dot) -> Option<&'static str> {
+    (dot != Dot::Idle).then(|| dot.label())
+}
+
+/// A tab as VoiceOver reads it: the title, then what the badges and the dot show.
+fn tab_label(tab: &TabInfo) -> String {
+    let mut label = tab.label().to_owned();
+    for (on, words) in [
+        (tab.broadcast, "broadcasting"),
+        (tab.logging, "logging"),
+        (true, status_words(tab.dot).unwrap_or_default()),
+    ] {
+        if on && !words.is_empty() {
+            label.push_str(", ");
+            label.push_str(words);
+        }
+    }
+    label
 }
 
 /// zeron's `zeron-pulse` loader: 2.4 s, opacity 0.08 → 1.
@@ -330,7 +358,30 @@ pub fn step(active: usize, len: usize, delta: isize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{reorder, step};
+    use super::{TabInfo, reorder, step, tab_label};
+    use crate::indicator::Dot;
+
+    fn info(dot: Dot) -> TabInfo {
+        TabInfo {
+            alias: "web".into(),
+            title: None,
+            logging: false,
+            broadcast: false,
+            dot,
+            rename: None,
+        }
+    }
+
+    #[test]
+    fn a_tab_is_read_as_title_then_badges_then_status() {
+        assert_eq!(tab_label(&info(Dot::Idle)), "web");
+        let mut tab = info(Dot::Connected);
+        tab.title = Some("deploy".into());
+        assert_eq!(tab_label(&tab), "deploy, Connected");
+        tab.broadcast = true;
+        tab.logging = true;
+        assert_eq!(tab_label(&tab), "deploy, broadcasting, logging, Connected");
+    }
 
     /// Tabs named a..e, so a wrong move shows in the order and not only in an index.
     fn tabs() -> Vec<&'static str> {
