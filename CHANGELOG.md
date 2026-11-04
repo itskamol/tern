@@ -18,6 +18,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 ### Fixed
 
 - Text fields edit by word and line as other macOS fields do: ⌥←/→ moves by word, ⇧⌥←/→ and ⇧⌘←/→ select, ⌘←/→ go to the ends, ⌥⌫ and ⌘⌫ delete, a double click selects a word and a triple click everything. Masked fields count as one word.
+- Pointing at a host in the sidebar no longer covers the end of its address with a dark "..." block: the button takes the address's place, without a fill of its own, and the address stays in the tooltip.
 - Keychain unlock no longer reads the Keychain or runs scrypt at launch: the Keychain is asked once, the first time tern needs the vault, and a refusal falls back to the prompt without asking again (#91).
 - Clicking a session tab while Settings is open now closes Settings and shows the session, with typing going to its terminal (#63).
 - SFTP panel file sizes just under a unit boundary round up to the next unit (e.g. `1.0 MB` instead of `1024 KB`) and sizes just under 10 omit decimals (`10 KB` instead of `10.0 KB`) (#39).
