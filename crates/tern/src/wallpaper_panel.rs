@@ -68,6 +68,35 @@ fn holds(backdrop: &[[u8; 3]], panels: &[Panel], alpha: f32) -> bool {
     })
 }
 
+/// A panel alpha remembered with the key it was worked out for, so a frame that asks again with
+/// the same inputs does not repeat the search (the whole window asks several times a frame).
+#[derive(Debug)]
+pub struct Memo<K> {
+    slot: std::cell::RefCell<Option<(K, f32)>>,
+}
+
+impl<K> Default for Memo<K> {
+    fn default() -> Self {
+        Self {
+            slot: std::cell::RefCell::new(None),
+        }
+    }
+}
+
+impl<K> Memo<K> {
+    /// The remembered alpha, if the key it was worked out for satisfies `is`.
+    pub fn recall(&self, is: impl FnOnce(&K) -> bool) -> Option<f32> {
+        let slot = self.slot.borrow();
+        let (key, alpha) = slot.as_ref()?;
+        is(key).then_some(*alpha)
+    }
+
+    /// Replaces what is remembered.
+    pub fn remember(&self, key: K, alpha: f32) {
+        *self.slot.borrow_mut() = Some((key, alpha));
+    }
+}
+
 /// The smallest alpha in [[`MIN_ALPHA`], [`MAX_ALPHA`]] at which every text holds its contrast
 /// on every panel over the (frosted) picture; the cap when none does (or the picture has no pixels).
 pub fn panel_alpha(backdrop: &[[u8; 3]], panels: &[Panel]) -> f32 {
@@ -209,5 +238,63 @@ mod tests {
         assert!(b.windows(2).all(|w| w[0][0] <= w[1][0]));
         assert!(b[0][0] < 10 && b[SAMPLES - 1][0] < 255);
         assert!(backdrop(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_memo_answers_only_for_the_key_it_was_given() {
+        let memo: Memo<(u8, Option<String>)> = Memo::default();
+        assert_eq!(memo.recall(|_| true), None);
+        memo.remember((1, Some("Nord".into())), 0.7);
+        assert_eq!(
+            memo.recall(|k| k.0 == 1 && k.1.as_deref() == Some("Nord")),
+            Some(0.7)
+        );
+        assert_eq!(memo.recall(|k| k.0 == 2), None);
+        assert_eq!(memo.recall(|k| k.1.is_none()), None);
+        memo.remember((2, None), 0.9);
+        assert_eq!(memo.recall(|k| k.0 == 1), None);
+        assert_eq!(memo.recall(|k| k.0 == 2 && k.1.is_none()), Some(0.9));
+    }
+
+    /// What one `window_fill` costs when it is not remembered: run with
+    /// `cargo +1.99.1 test -p tern --release -- --ignored --nocapture panel_alpha_cost`.
+    #[test]
+    #[ignore = "benchmark: run with --release --ignored --nocapture"]
+    #[allow(clippy::print_stderr)]
+    fn panel_alpha_cost() {
+        let ramp = |lo: u8, hi: u8| -> Vec<[u8; 3]> {
+            (0..SAMPLES)
+                .map(|i| {
+                    let v = lo + ((hi - lo) as usize * i / (SAMPLES - 1)) as u8;
+                    [v, v, v]
+                })
+                .collect()
+        };
+        const TERMINAL: Panel = Panel {
+            surface: [0x16, 0x18, 0x1a],
+            texts: &[
+                ([0xe8, 0xe8, 0xea], 4.5),
+                ([0xa9, 0xa9, 0xae], 4.5),
+                ([0x85, 0x85, 0x8a], 3.0),
+                ([0xd0, 0xd0, 0xd0], 4.5),
+            ],
+        };
+        for (name, backdrop) in [
+            ("dark picture (floor holds at once)", ramp(5, 60)),
+            ("mid picture", ramp(40, 200)),
+            ("bright picture (no alpha holds: all steps)", ramp(180, 255)),
+        ] {
+            let runs = 2000;
+            let started = std::time::Instant::now();
+            let mut sum = 0.0;
+            for _ in 0..runs {
+                sum += panel_alpha(&backdrop, &[DARK, TERMINAL]);
+            }
+            let each = started.elapsed() / runs;
+            eprintln!(
+                "panel_alpha {name}: {each:?} per call (alpha {:.2})",
+                sum / runs as f32
+            );
+        }
     }
 }

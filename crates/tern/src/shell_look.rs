@@ -27,11 +27,17 @@ use super::*;
 impl Shell {
     /// The scheme a host's tabs use: its own, else the default, else zeron's (`None`).
     pub(super) fn scheme_for(&self, alias: &str) -> Option<&'static crate::theme::themes::Scheme> {
+        self.scheme_name_for(alias)
+            .and_then(crate::theme::themes::find)
+    }
+
+    /// The name of that scheme, without looking it up.
+    pub(super) fn scheme_name_for(&self, alias: &str) -> Option<&str> {
         self.settings
             .host_themes
             .get(alias)
             .or(self.settings.terminal_theme.as_ref())
-            .and_then(|name| crate::theme::themes::find(name))
+            .map(String::as_str)
     }
 
     /// Switches the palette when the chosen appearance (or the system's, for System) differs

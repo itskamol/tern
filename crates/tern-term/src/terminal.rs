@@ -735,5 +735,9 @@ impl Terminal {
 mod tests;
 
 #[cfg(test)]
+#[path = "terminal_bench_tests.rs"]
+mod bench_tests;
+
+#[cfg(test)]
 #[path = "history_trim_tests.rs"]
 mod history_trim_tests;

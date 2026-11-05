@@ -5,6 +5,7 @@
 mod box_drawing;
 mod config;
 mod element;
+pub mod frame_stats;
 mod links;
 mod mappings;
 mod search;

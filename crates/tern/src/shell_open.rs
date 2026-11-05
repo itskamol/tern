@@ -349,7 +349,9 @@ impl Shell {
                     // Before the terminal sees the click, so selecting text in a pane also
                     // gives it the keyboard.
                     .capture_any_mouse_down(cx.listener(move |s, _, w, cx| s.focus_pane(id, w, cx)))
-                    .child(pane.session.read(cx).view.clone())
+                    .child(tern_term::TerminalView::cached_child(
+                        &pane.session.read(cx).view,
+                    ))
                     .into_any_element()
             }
             Node::Split {

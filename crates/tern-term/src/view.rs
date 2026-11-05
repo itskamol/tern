@@ -84,6 +84,9 @@ pub struct TerminalView {
     bell_task: Option<Task<()>>,
     _bell_subscription: Subscription,
     _subscription: Subscription,
+    /// Prepaints so far; tests count them to tell a rebuilt view from a reused one.
+    #[cfg(test)]
+    prepaints: usize,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -138,7 +141,20 @@ impl TerminalView {
             bell_task: None,
             _bell_subscription: bell_subscription,
             _subscription: subscription,
+            #[cfg(test)]
+            prepaints: 0,
         }
+    }
+
+    /// `view` as a child that fills its parent and is rebuilt only when it changes: when it or
+    /// its terminal notifies (output, selection, theme, options, blink phase, find, bell), when
+    /// its bounds or inherited text style change, or when the window is refreshed (a focus
+    /// change, a scale change). A parent that re-renders around an unchanged terminal then
+    /// replays the terminal's last frame instead of snapshotting and shaping the grid again.
+    /// The size is definite (the parent's), as GPUI's cache needs.
+    pub fn cached_child(view: &Entity<Self>) -> impl IntoElement {
+        view.clone()
+            .cached(gpui::StyleRefinement::default().size_full())
     }
 
     pub fn terminal(&self) -> &Entity<Terminal> {
@@ -161,6 +177,10 @@ impl TerminalView {
     /// Called from element prepaint with the frame's measured grid. Resizes
     /// the local grid immediately and debounces the remote notification.
     pub(crate) fn on_grid_metrics(&mut self, geometry: GridGeometry, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.prepaints += 1;
+        }
         self.geometry = Some(geometry);
         let changed = self.terminal.update(cx, |t, _| {
             t.resize(
@@ -719,6 +739,10 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 #[cfg(test)]
 #[path = "view_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "view_cache_tests.rs"]
+mod cache_tests;
 
 mod cursor;
 mod find_links;

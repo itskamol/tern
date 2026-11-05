@@ -13,6 +13,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 - A session stopped at a password, passphrase or host-key question shows an amber ring instead of the pulsing connecting dot, and the status line says "Waiting for your answer" (#31).
 - README keyboard table lists Windows and Linux shortcuts alongside macOS (#41).
 - Once the tabs no longer fit, a button at the end of the strip lists every tab with the one in front checked; choosing one shows it. It appears only while the tabs overflow.
+- `TERN_FRAME_STATS=1` logs once a second the frames drawn and the mean and worst time of the shell's render and of a terminal's prepaint (`frame_stats` in the log). Off, it costs one atomic read per frame.
 
 ### Changed
 
@@ -23,6 +24,9 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 - Empty states show an icon, one line and a primary button: no hosts (sidebar and ⌘K picker), no snippets (Settings page and the snippet picker, which now opens empty instead of showing a toast) and an empty folder in the file browser (#32).
 - Scrollback rows keep only the cells they use, so a full history of short lines takes about a sixth of the memory (#89).
 - Starting with a wallpaper already rendered no longer decodes the picture, which took about 35 MB of memory at launch; the colours are cached beside it (#33).
+- A streaming terminal costs less per frame: a row is shaped only up to its last visible glyph, not to the window's right edge. In a headless run (243 x 59 grid, 30 new lines a frame) a frame took 3.0 ms, now 1.8 ms.
+- A terminal that did not change is replayed, not rebuilt, when the window around it redraws (a toast, a fading hover, a streaming split pane): 0.7 ms a frame, now 0.25 ms in the same run.
+- The panel opacity over a full-window wallpaper is worked out when the palette, the default scheme or the picture changes, not several times every frame.
 
 ### Fixed
 

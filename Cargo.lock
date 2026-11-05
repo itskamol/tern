@@ -7625,6 +7625,8 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "proptest",
+ "tracing",
+ "tracing-subscriber",
  "unicode-width",
 ]
 
