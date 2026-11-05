@@ -73,12 +73,12 @@ impl Login {
                 let pending: VecDeque<_> = prompts.into();
                 let mut display = Vec::new();
                 for line in [name, instructions].iter().filter(|l| !l.is_empty()) {
-                    display.extend_from_slice(line.replace('\n', "\r\n").as_bytes());
+                    display.extend_from_slice(&from_server(line));
                     display.extend_from_slice(b"\r\n");
                 }
                 let echo = pending.front().is_some_and(|p| p.echo);
                 if let Some(first) = pending.front() {
-                    display.extend_from_slice(first.text.as_bytes());
+                    display.extend_from_slice(&from_server(&first.text));
                 }
                 let kind = Kind::Challenge {
                     pending,
@@ -191,7 +191,7 @@ impl Login {
                 answers.push(SecretString::from(line));
                 if let Some(next) = pending.front() {
                     self.echo = next.echo;
-                    return Some(next.text.as_bytes().to_vec());
+                    return Some(from_server(&next.text));
                 }
                 if let Some(r) = reply.take() {
                     let _ = r.send(Some(std::mem::take(answers)));
@@ -221,6 +221,30 @@ impl Login {
             }
         }
     }
+}
+
+/// Text the server chose (keyboard-interactive name, instructions, prompts), made safe to
+/// write into the terminal: line breaks and tabs stay, every other control character is shown
+/// in caret notation (`^[`), so a server cannot move the cursor, retitle the tab, write the
+/// clipboard or draw a fake prompt. OpenSSH escapes these the same way.
+fn from_server(text: &str) -> Vec<u8> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\n' => out.push_str("\r\n"),
+            '\t' => out.push(c),
+            c if (c as u32) < 0x20 => {
+                out.push('^');
+                out.push(char::from(c as u8 + b'@'));
+            }
+            '\u{7f}' => out.push_str("^?"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.into_bytes()
 }
 
 #[cfg(test)]
@@ -343,6 +367,32 @@ mod tests {
         let answers = answer(rx).unwrap();
         let answers: Vec<&str> = answers.iter().map(|a| a.expose_secret()).collect();
         assert_eq!(answers, ["me", "123"]);
+    }
+
+    #[test]
+    fn challenge_text_from_the_server_cannot_drive_the_terminal() {
+        let (tx, _rx) = oneshot::channel();
+        let (mut login, shown) = Login::start(Prompt::Challenge {
+            name: "\x1b]0;pwned\x07".into(),
+            instructions: "line one\r\nline two\u{9b}2J".into(),
+            prompts: vec![
+                ChallengePrompt {
+                    text: "\x1b[2KPassword: ".into(),
+                    echo: false,
+                },
+                ChallengePrompt {
+                    text: "OTP:\x1b]52;c;aGk=\x07 ".into(),
+                    echo: false,
+                },
+            ],
+            reply: tx,
+        });
+        assert_eq!(
+            String::from_utf8(shown).unwrap(),
+            "^[]0;pwned^G\r\nline one\r\nline two\\u{9b}2J\r\n^[[2KPassword: "
+        );
+        let step = login.input(b"x\r");
+        assert_eq!(step.display, b"\r\nOTP:^[]52;c;aGk=^G ");
     }
 
     #[test]
