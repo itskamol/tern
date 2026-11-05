@@ -6,6 +6,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- The app bundle carries the licences: `LICENSE`, `NOTICE.md` and `THIRD-PARTY.txt` in `tern.app/Contents/Resources`. The last is written at bundle time by `scripts/third-party.py`, offline, from `cargo metadata`: every crate linked into the binary with its licence and each distinct licence text once.
 - `HashKnownHosts yes` in `~/.ssh/config` is honoured: a host key accepted in tern is written to known_hosts with the host name hashed (`|1|salt|hmac`), as `ssh` writes it, so the file does not list the hosts you connect to. A new known_hosts file is created 0600.
 - From the sidebar's search box (⇧⌘F), ↑ and ↓ move through the hosts shown, skipping folded groups, and Return connects to the selected one rather than always the top match.
 - A full menu bar: tern (About, Services), File, Edit, View, Shell, Window and Help, so every shortcut can be found in a menu; ⌃⌘F enters full screen.
