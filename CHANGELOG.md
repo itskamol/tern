@@ -31,6 +31,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- Saving a password to the vault no longer makes it look locked: the open vault used to be taken out while scrypt ran (about a second, longer during a sync), so another tab asked for the passphrase again and an edit made then could be lost. Every write now goes through one ordered path, and a sync works on a copy, keeping a change made here while it ran. Two saves at once (two tern processes) no longer share a temp file, which could leave a vault that does not open.
 - A new host's key can be read at leisure: the 15-second connect timeout no longer counts the time its fingerprint question is open, which used to drop the connection while it was being compared (jump hosts too).
 - A file downloaded over SFTP stays in ~/Downloads: a name the server sends with a `/`, `..` or an absolute path is refused instead of written where it points.
 - A paste can no longer end bracketed paste early: an end marker hidden inside another (`ESC[20ESC[201~1~`) is removed too, so the rest of the text is not run as typed commands.

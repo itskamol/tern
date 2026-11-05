@@ -244,7 +244,10 @@ impl Shell {
             Some(ui.pass_input.read(cx).text().to_owned()).filter(|p| !p.is_empty())
         };
         let remote_url = self.settings.sync_remote.clone();
-        let open = Keeper::take(cx);
+        // A copy: the open vault stays in the keeper, so tabs keep reading it while the network
+        // is slow, and writes made meanwhile are not lost (see `Keeper::sync_done`).
+        let open = Keeper::snapshot(cx);
+        let (opening, since) = (open.is_none(), Keeper::writes(cx));
         if open.is_none() && passphrase.is_none() {
             if !auto {
                 self.notify_toast(
@@ -274,7 +277,8 @@ impl Shell {
             let (vault, result) = work.await;
             let _ = this.update_in(cx, |s, window, cx| {
                 if let Some(v) = vault {
-                    Keeper::put(v, cx);
+                    let downloaded = matches!(result, Ok(Outcome::Pulled | Outcome::Merged));
+                    Keeper::sync_done(v, opening, downloaded, since, cx);
                 }
                 // The passphrase field may now be hidden; a hidden field must not keep focus,
                 // or Escape and every shortcut go nowhere. A background run leaves focus be.

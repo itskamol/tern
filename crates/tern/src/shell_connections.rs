@@ -415,8 +415,9 @@ impl Shell {
         );
     }
 
-    /// Unlocks or creates the vault as needed, stores the password and saves, all off the UI
-    /// thread (scrypt takes about a second).
+    /// Unlocks or creates the vault as needed, stores the password and saves, the scrypt work
+    /// off the UI thread (about a second each). An open vault never leaves the keeper, so other
+    /// tabs keep reading it while this writes, and the write is ordered with every other one.
     fn save_password(
         &mut self,
         key: Key,
@@ -427,46 +428,45 @@ impl Shell {
         let Some(path) = Keeper::path(cx) else {
             return;
         };
-        let open = Keeper::take(cx);
-        let exists = path.exists();
-        let work = cx.background_spawn(async move {
-            let mut vault = match open {
-                Some(v) => v,
-                None if exists => match Vault::unlock(&path, vault_pass) {
-                    Ok(v) => v,
-                    Err(e) => return (None, Err(e)),
-                },
-                None => Vault::new(vault_pass),
-            };
-            vault.set(key, password);
-            let saved = vault.save(&path);
-            (Some(vault), saved)
+        let opening = (Keeper::locked(cx) || !Keeper::exists(cx)).then(|| {
+            let exists = path.exists();
+            cx.background_spawn(async move {
+                if exists {
+                    Vault::unlock(&path, vault_pass)
+                } else {
+                    Ok(Vault::new(vault_pass))
+                }
+            })
         });
         cx.spawn(async move |this, cx| {
-            let (vault, result) = work.await;
-            let _ = this.update_in(cx, |shell, window, cx| {
-                if let Some(v) = vault {
-                    Keeper::put(v, cx);
+            let opened = match opening {
+                Some(task) => task.await.map(|vault| {
+                    cx.update(|cx| Keeper::adopt(vault, cx));
+                }),
+                None => Ok(()),
+            };
+            let result = match opened {
+                Ok(()) => match this.update(cx, |_, cx| Keeper::store(key, password, cx)) {
+                    Ok(Some(task)) => task.await,
+                    Ok(None) => Err("Vault: it was locked before the password was saved.".into()),
+                    Err(_) => return,
+                },
+                Err(VaultError::WrongPassphrase) => Err(
+                    "Wrong vault passphrase. The connection is saved; the password is not.".into(),
+                ),
+                Err(other) => Err(format!("Vault: {other}")),
+            };
+            let _ = this.update_in(cx, |shell, window, cx| match result {
+                Ok(()) => {
+                    shell.notify_toast(ToastKind::Positive, "Password saved in the vault", cx);
+                    shell.close_form(window, cx);
                 }
-                match result {
-                    Ok(()) => {
-                        shell.notify_toast(ToastKind::Positive, "Password saved in the vault", cx);
-                        shell.close_form(window, cx);
+                Err(message) => {
+                    if let Some(form) = shell.form.as_mut() {
+                        form.busy = false;
+                        form.error = Some(message);
                     }
-                    Err(e) => {
-                        if let Some(form) = shell.form.as_mut() {
-                            form.busy = false;
-                            form.error = Some(match e {
-                                VaultError::WrongPassphrase => {
-                                    "Wrong vault passphrase. The connection is saved; the \
-                                     password is not."
-                                        .into()
-                                }
-                                other => format!("Vault: {other}"),
-                            });
-                        }
-                        cx.notify();
-                    }
+                    cx.notify();
                 }
             });
         })

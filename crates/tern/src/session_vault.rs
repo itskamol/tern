@@ -147,11 +147,8 @@ impl Session {
                 cx,
             );
         }
-        if let Some((key, secret)) = entry
-            && let Some(mut vault) = Keeper::take(cx)
-        {
-            vault.set(key, secret);
-            self.save(vault, cx);
+        if let Some((key, secret)) = entry {
+            self.store(key, secret, cx);
         }
         self.resume(prompt, fill, true, cx);
     }
@@ -286,9 +283,8 @@ impl Session {
                         ..After::default()
                     };
                     self.ask_unlock(after, cx);
-                } else if let Some(mut vault) = Keeper::take(cx) {
-                    vault.set(key, secret);
-                    self.save(vault, cx);
+                } else {
+                    self.store(key, secret, cx);
                 }
             }
             Flow::NewPassphrase(key, secret) => match typed {
@@ -302,9 +298,8 @@ impl Session {
             },
             Flow::RepeatPassphrase(key, secret, first) => {
                 if typed.is_some_and(|again| again.expose_secret() == first.expose_secret()) {
-                    let mut vault = Vault::new(first);
-                    vault.set(key, secret);
-                    self.save(vault, cx);
+                    Keeper::adopt(Vault::new(first), cx);
+                    self.store(key, secret, cx);
                 } else {
                     self.note("Passphrases differ; not saved.", cx);
                 }
@@ -366,13 +361,10 @@ impl Session {
             fill,
         } = after;
         let unlocked = vault.is_some();
-        if let Some(mut vault) = vault {
-            match entry {
-                Some((key, secret)) => {
-                    vault.set(key, secret);
-                    self.save(vault, cx);
-                }
-                None => Keeper::put(vault, cx),
+        if let Some(vault) = vault {
+            Keeper::adopt(vault, cx);
+            if let Some((key, secret)) = entry {
+                self.store(key, secret, cx);
             }
         }
         self.resume(prompt, fill, unlocked, cx);
@@ -402,25 +394,19 @@ impl Session {
         }
     }
 
-    /// Encrypts and writes off the UI thread; the vault returns to the keeper afterwards.
-    fn save(&mut self, vault: Vault, cx: &mut Context<Self>) {
-        let Some(path) = Keeper::path(cx) else {
-            return;
+    /// Stores a secret in the open vault and writes it off the UI thread, in order with every
+    /// other write; the vault stays open for the other tabs meanwhile.
+    fn store(&mut self, key: Key, secret: SecretString, cx: &mut Context<Self>) {
+        let Some(task) = Keeper::store(key, secret, cx) else {
+            return self.note("Not saved: the vault is locked.", cx);
         };
-        let work = cx.background_spawn(async move {
-            let result = vault.save(&path);
-            (vault, result)
-        });
         cx.spawn(async move |this, cx| {
-            let (vault, result) = work.await;
-            let _ = this.update(cx, |s, cx| {
-                Keeper::put(vault, cx);
-                match result {
-                    Ok(()) => s.note("Saved in the vault.", cx),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "vault_save_failed");
-                        s.note(&format!("Could not save the vault: {e}"), cx);
-                    }
+            let result = task.await;
+            let _ = this.update(cx, |s, cx| match result {
+                Ok(()) => s.note("Saved in the vault.", cx),
+                Err(e) => {
+                    tracing::warn!(error = %e, "vault_save_failed");
+                    s.note(&format!("Could not save the vault: {e}"), cx);
                 }
             });
         })

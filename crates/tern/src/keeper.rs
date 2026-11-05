@@ -134,10 +134,6 @@ impl Keeper {
         }
     }
 
-    pub fn take(cx: &mut App) -> Option<Vault> {
-        cx.global_mut::<Self>().open.take()
-    }
-
     /// Hands an unlocked vault back. With the Keychain opt-in on, the passphrase is stored
     /// the first time (and again after it changes).
     pub fn put(vault: Vault, cx: &mut App) {
@@ -154,6 +150,61 @@ impl Keeper {
             }
         }
         k.open = Some(vault);
+    }
+
+    /// Keeps a vault opened or created away from the keeper (a typed passphrase, a new vault),
+    /// unless one is open already: that one may hold edits the other lacks, so it stays and
+    /// the other is dropped, which wipes it.
+    pub fn adopt(vault: Vault, cx: &mut App) {
+        if cx.global::<Self>().open.is_none() {
+            Self::put(vault, cx);
+        }
+    }
+
+    /// Stores `secret` under `key` in the open vault and writes it, in order with every other
+    /// write. The vault stays in the keeper throughout, so other tabs keep reading it instead
+    /// of finding it locked while scrypt runs. `None` when the vault is locked.
+    pub fn store(key: Key, secret: SecretString, cx: &mut App) -> Option<Task<Result<(), String>>> {
+        Self::edit(cx, |v| v.set(key, secret))?;
+        Self::persist(cx)
+    }
+
+    /// A copy of the open vault for work off the UI thread that may replace it (sync).
+    pub fn snapshot(cx: &App) -> Option<Vault> {
+        cx.global::<Self>().open.as_ref().map(Vault::snapshot)
+    }
+
+    /// How many writes were asked for so far: compare before and after to tell whether the
+    /// open vault changed meanwhile.
+    pub fn writes(cx: &App) -> u64 {
+        cx.global::<Self>().ticket
+    }
+
+    /// Takes back the vault a sync ends with. `opened` is true when the sync unlocked the vault
+    /// itself (it was locked when the sync began), `downloaded` when the vault is the remote's
+    /// and has replaced the file, and `since` is [`Keeper::writes`] when the sync began.
+    pub fn sync_done(vault: Vault, opened: bool, downloaded: bool, since: u64, cx: &mut App) {
+        let k = cx.global::<Self>();
+        if k.open.is_none() {
+            // Locked meanwhile (idle lock, Lock now): the sync's own copy does not reopen it.
+            if opened {
+                Self::put(vault, cx);
+            }
+            return;
+        }
+        if !downloaded {
+            return;
+        }
+        if k.ticket == since {
+            Self::put(vault, cx);
+            return;
+        }
+        // Written here while the sync ran: the download replaced the file under that write,
+        // so the local vault is written again and the next sync carries it up.
+        tracing::warn!("vault_changed_during_sync");
+        if let Some(task) = Self::persist(cx) {
+            task.detach();
+        }
     }
 
     /// Changes the open vault in place; the caller then calls [`Keeper::persist`].
@@ -607,5 +658,92 @@ mod tests {
         assert!(!is_yes(Some(&s("no"))));
         assert!(!is_yes(Some(&s(""))));
         assert!(!is_yes(None));
+    }
+
+    fn login(host: &str) -> Key {
+        Key::Password {
+            user: "deploy".into(),
+            host: host.into(),
+            port: 22,
+        }
+    }
+
+    /// A keeper over a vault file in a temp dir, with the Keychain and PIN off.
+    fn keeper(open: Option<Vault>) -> (gpui::TestApp, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = gpui::TestApp::new();
+        let path = dir.path().join("vault.age");
+        app.update(|cx| {
+            cx.set_global(Keeper {
+                path: Some(path),
+                open,
+                keychain: false,
+                gate: Gate::default(),
+                keychain_current: false,
+                ticket: 0,
+                pin: false,
+            })
+        });
+        (app, dir)
+    }
+
+    fn vault_with(host: &str) -> Vault {
+        let mut v = Vault::new(SecretString::from("p".to_owned()));
+        v.set(login(host), SecretString::from("pw".to_owned()));
+        v
+    }
+
+    fn has(app: &mut gpui::TestApp, host: &str) -> bool {
+        app.update(|cx| Keeper::lookup(&login(host), cx).is_some())
+    }
+
+    #[test]
+    fn storing_writes_without_taking_the_vault_away_from_other_tabs() {
+        // What reaches the disk is `persist`'s, ordered by a counter the tests share, so only
+        // the keeper's side is checked here.
+        let (mut app, _dir) = keeper(Some(vault_with("a")));
+        let task = app.update(|cx| {
+            let task = Keeper::store(login("b"), SecretString::from("pw".to_owned()), cx);
+            // While it is being written, another tab still finds it open.
+            assert!(!Keeper::locked(cx));
+            task
+        });
+        assert!(task.is_some());
+        app.run_until_parked();
+        assert!(has(&mut app, "a") && has(&mut app, "b"));
+        // A locked vault is not written to.
+        app.update(Keeper::lock);
+        let locked =
+            app.update(|cx| Keeper::store(login("c"), SecretString::from("pw".to_owned()), cx));
+        assert!(locked.is_none());
+    }
+
+    #[test]
+    fn a_sync_s_download_replaces_the_vault_only_if_nothing_was_written_meanwhile() {
+        let (mut app, _dir) = keeper(Some(vault_with("local")));
+        let since = app.update(|cx| Keeper::writes(cx));
+        app.update(|cx| Keeper::sync_done(vault_with("remote"), false, true, since, cx));
+        assert!(has(&mut app, "remote") && !has(&mut app, "local"));
+
+        let since = app.update(|cx| Keeper::writes(cx));
+        app.update(|cx| {
+            Keeper::store(login("typed"), SecretString::from("pw".to_owned()), cx);
+            Keeper::sync_done(vault_with("newer"), false, true, since, cx);
+        });
+        app.run_until_parked();
+        assert!(has(&mut app, "typed") && !has(&mut app, "newer"));
+    }
+
+    #[test]
+    fn a_sync_never_reopens_a_vault_locked_while_it_ran_unless_it_opened_it() {
+        let (mut app, _dir) = keeper(Some(vault_with("a")));
+        app.update(|cx| {
+            let since = Keeper::writes(cx);
+            Keeper::lock(cx);
+            Keeper::sync_done(vault_with("a"), false, false, since, cx);
+            assert!(Keeper::lookup(&login("a"), cx).is_none());
+            Keeper::sync_done(vault_with("a"), true, false, since, cx);
+        });
+        assert!(has(&mut app, "a"));
     }
 }

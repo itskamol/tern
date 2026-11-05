@@ -68,6 +68,9 @@ const WORK_FACTOR: u8 = 18;
 
 /// A new file only the owner can read (mode 0600; on Windows the file inherits the owner-only
 /// access of the user's profile directory it is written under).
+/// Numbers this process's temp files, so no two saves ever share one.
+static STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn private_file(path: &Path) -> io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -171,7 +174,11 @@ impl Vault {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("age.tmp");
+        // Unique per save: two saves at once (two tern processes, or a sync beside an edit)
+        // sharing one temp file would interleave their bytes, and the rename would publish
+        // the mix. Each now publishes a whole vault; the last rename wins.
+        let n = STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("age.{}-{n}.tmp", std::process::id()));
         let mut file = private_file(&tmp)?;
         file.write_all(&ciphertext)?;
         // On disk before the rename, or a crash could leave the new name on empty data.
@@ -754,7 +761,10 @@ mod tests {
             assert!(matches!(err, VaultError::Corrupt(_)), "{err:?}");
 
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
-            assert!(!path.with_extension("age.tmp").exists());
+            assert_eq!(
+                std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+                1
+            );
         }
     }
 
@@ -772,3 +782,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "save_tests.rs"]
+mod save_tests;
