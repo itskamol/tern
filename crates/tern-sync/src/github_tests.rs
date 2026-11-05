@@ -396,7 +396,7 @@ fn gist_push_creates_new_gist_when_none_exists() {
     let _g = set_test_http(Box::new(http.clone()));
 
     let gist = Gist::new("test-token".into());
-    gist.push("my-hash", "device-x", b"v-bytes", b"s-bytes")
+    gist.push("my-hash", 1, "device-x", b"v-bytes", b"s-bytes")
         .unwrap();
 
     let calls = http.send_calls.lock().unwrap();
@@ -426,7 +426,8 @@ fn gist_push_patches_existing_gist() {
     let _g = set_test_http(Box::new(http.clone()));
 
     let gist = Gist::new("test-token".into());
-    gist.push("hash-patched", "device-y", b"v2", b"s2").unwrap();
+    gist.push("hash-patched", 2, "device-y", b"v2", b"s2")
+        .unwrap();
 
     let calls = http.send_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);

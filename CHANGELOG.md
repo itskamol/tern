@@ -32,6 +32,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- A sync pull checks what it downloaded before using it. Each push now seals a manifest beside the files (every item's hash, the vault's included, and a bundle number), so a remote whose `vault.age` was swapped for another, whose `tern-meta.json` was edited, or that was rolled back to a bundle older than one this Mac already synced is refused with a message and nothing is written. A bundle pushed by an older tern is still taken when it matches its meta, but cannot be dated.
 - The log folder (`~/Library/Logs/tern`) is readable by you only, and an older log or folder another user could read is made private at launch; `panic.log` is created 0600 like session logs. App logs name hosts and users.
 - A keyboard-interactive login (a code or OTP prompt) shows the server's name, instructions and prompt text with control characters escaped (`^[`), so a server cannot move the cursor, retitle the tab, write the clipboard or draw a fake prompt there.
 - A saved connection's ProxyCommand runs only once this Mac has approved it, as password commands already did: `hosts.json` also arrives by sync and import, and its ProxyCommand ran through `sh -c` without a word. The first connect asks in the terminal; one saved from the form, or imported from this Mac's ~/.ssh/config, counts as approved, and a `~/.ssh/config` host runs its own as ssh does.

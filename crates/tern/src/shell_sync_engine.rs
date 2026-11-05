@@ -23,6 +23,8 @@ const SYNCED: [&str; 4] = [
 const VAULT_FILE: &str = "vault.age";
 const HOSTS_FILE: &str = "hosts.json";
 const STATE_FILE: &str = "sync.json";
+/// The manifest inside the sealed data. An older build's `decode` drops the name.
+const MANIFEST: &str = "tern-bundle";
 /// Every file that travels, each merged on its own.
 const ITEMS: [&str; 5] = [
     "hosts.json",
@@ -43,6 +45,20 @@ struct SyncState {
     /// `hosts.json` as both sides had it, the base for merging connections by name.
     #[serde(default)]
     hosts_base: Option<String>,
+    /// The highest bundle number this Mac pushed or checked; a remote below it was rolled back.
+    #[serde(default)]
+    seq: u64,
+}
+
+/// What the pushing Mac sealed beside the files: each item's hash, the vault's included, and
+/// the bundle's number. `tern-meta.json` and `vault.age` sit in the remote unsealed, so anyone
+/// who can write the gist or repository could edit the meta or swap in an older vault; this
+/// is what a pull checks them against.
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    hash: String,
+    items: BTreeMap<String, String>,
+    seq: u64,
 }
 
 fn load_state(dir: &Path) -> SyncState {
@@ -160,10 +176,17 @@ impl Backend {
         .map_err(|e| e.to_string())
     }
 
-    fn push(&self, hash: &str, device: &str, vault: &[u8], sealed: &[u8]) -> Result<(), String> {
+    fn push(
+        &self,
+        hash: &str,
+        seq: u64,
+        device: &str,
+        vault: &[u8],
+        sealed: &[u8],
+    ) -> Result<(), String> {
         match self {
-            Backend::Git(g) => g.push(hash, device, vault, sealed),
-            Backend::Gist(g) => g.push(hash, device, vault, sealed),
+            Backend::Git(g) => g.push(hash, seq, device, vault, sealed),
+            Backend::Gist(g) => g.push(hash, seq, device, vault, sealed),
         }
         .map_err(|e| e.to_string())
     }
@@ -212,16 +235,17 @@ fn sync(
             other => other.to_string(),
         })
     };
-    let push = |files: &Files, hash: &str, with: &Vault| -> Result<(), String> {
-        let mut rest = files.clone();
-        let vault_bytes = rest.remove(VAULT_FILE).unwrap_or_default();
-        let sealed = with.seal(&encode(&rest)?).map_err(|e| e.to_string())?;
+    // Numbered above anything this Mac or the remote has claimed, so no Mac reads it as old.
+    let next_seq = state.seq.max(remote.as_ref().map_or(0, |r| r.seq)) + 1;
+    let push = |files: &Files, hash: &str, with: &Vault| -> Result<u64, String> {
+        let (vault_bytes, sealed) = seal_bundle(files, hash, next_seq, with)?;
         let device = std::env::var("USER").unwrap_or_else(|_| "mac".into());
-        backend.push(hash, &device, &vault_bytes, &sealed)
+        backend.push(hash, next_seq, &device, &vault_bytes, &sealed)?;
+        Ok(next_seq)
     };
     match plan {
         Plan::UpToDate => {
-            write_state(dir, &local_hash, &local)?;
+            write_state(dir, &local_hash, &local, state.seq)?;
             Ok((Outcome::UpToDate, None))
         }
         Plan::Conflict => {
@@ -240,9 +264,7 @@ fn sync(
                 ));
             }
             let theirs = open_remote(&remote)?;
-            let mut remote_files =
-                decode(&theirs.open(&remote.sealed).map_err(|e| e.to_string())?)?;
-            remote_files.insert(VAULT_FILE.to_owned(), remote.vault.clone());
+            let (remote_files, remote_seq) = open_bundle(&remote, &theirs, state.seq)?;
             let picks = match decide_items(&state, &local, &remote_files, resolve)? {
                 Ok(picks) => picks,
                 Err(asks) => {
@@ -274,13 +296,15 @@ fn sync(
             }
             let merged_hash = tern_sync::hash(&merged);
             let vault_from_remote = matches!(picks.get(VAULT_FILE), Some(Pick::Remote));
-            if merged_hash != remote.hash {
+            let seq = if merged_hash == remote.hash {
+                remote_seq
+            } else {
                 push(
                     &merged,
                     &merged_hash,
                     if vault_from_remote { &theirs } else { vault },
-                )?;
-            }
+                )?
+            };
             for (name, pick) in &picks {
                 if matches!(pick, Pick::Mac) {
                     continue;
@@ -292,12 +316,12 @@ fn sync(
                     }
                 }
             }
-            write_state(dir, &merged_hash, &merged)?;
+            write_state(dir, &merged_hash, &merged, seq)?;
             Ok((Outcome::Merged, vault_from_remote.then_some(theirs)))
         }
         Plan::Push => {
-            push(&local, &local_hash, vault)?;
-            write_state(dir, &local_hash, &local)?;
+            let seq = push(&local, &local_hash, vault)?;
+            write_state(dir, &local_hash, &local, seq)?;
             Ok((Outcome::Pushed, None))
         }
         Plan::Pull => {
@@ -305,18 +329,19 @@ fn sync(
                 return Err("The remote has no bundle yet.".into());
             };
             let theirs = open_remote(&remote)?;
-            let mut rest = decode(&theirs.open(&remote.sealed).map_err(|e| e.to_string())?)?;
-            for (name, bytes) in &rest {
-                write_atomic(&dir.join(name), bytes)?;
+            let (files, seq) = open_bundle(&remote, &theirs, state.seq)?;
+            for (name, bytes) in &files {
+                if name != VAULT_FILE {
+                    write_atomic(&dir.join(name), bytes)?;
+                }
             }
             for name in SYNCED {
-                if !rest.contains_key(name) {
+                if !files.contains_key(name) {
                     let _ = std::fs::remove_file(dir.join(name));
                 }
             }
             write_atomic(&vault_path, &remote.vault)?;
-            rest.insert(VAULT_FILE.to_owned(), remote.vault.clone());
-            write_state(dir, &remote.hash, &rest)?;
+            write_state(dir, &remote.hash, &files, seq)?;
             Ok((Outcome::Pulled, Some(theirs)))
         }
     }
@@ -422,15 +447,95 @@ fn decode(bytes: &[u8]) -> Result<Files, String> {
         .collect()
 }
 
-/// Records what both sides now hold: the bundle hash, each item's hash, and `hosts.json`
-/// itself as the base for the next by-name merge. `files` is the agreed bundle, vault included.
-fn write_state(dir: &Path, hash: &str, files: &Files) -> Result<(), String> {
+/// What a push uploads for `files` (vault included): the vault as it is, and the other files
+/// sealed with the [`Manifest`] that binds them to it.
+fn seal_bundle(
+    files: &Files,
+    hash: &str,
+    seq: u64,
+    with: &Vault,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let mut rest = files.clone();
+    let vault_bytes = rest.remove(VAULT_FILE).unwrap_or_default();
+    let manifest = Manifest {
+        hash: hash.to_owned(),
+        items: tern_sync::item_hashes(files, &ITEMS),
+        seq,
+    };
+    rest.insert(
+        MANIFEST.to_owned(),
+        serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+    );
+    let sealed = with.seal(&encode(&rest)?).map_err(|e| e.to_string())?;
+    Ok((vault_bytes, sealed))
+}
+
+/// The remote's files, vault included, and its bundle number, once they are shown to be what
+/// one tern pushed together: the sealed manifest names every item's hash and the meta's
+/// bundle hash, and its number is not below one this Mac already had. A bundle from a tern
+/// before the manifest is checked against the meta's hash alone and cannot be dated.
+fn open_bundle(
+    remote: &tern_sync::RemoteBundle,
+    theirs: &Vault,
+    known_seq: u64,
+) -> Result<(Files, u64), String> {
+    const ALTERED: &str = "The remote copy was changed outside tern (its files do not match \
+                           each other), so nothing was taken from it. Sync from a Mac that \
+                           has the right copy to replace it.";
+    let plain = theirs.open(&remote.sealed).map_err(|e| e.to_string())?;
+    let mut files = decode(&plain)?;
+    files.insert(VAULT_FILE.to_owned(), remote.vault.clone());
+    let manifest = serde_json::from_slice::<BTreeMap<String, String>>(&plain)
+        .ok()
+        .and_then(|mut map| map.remove(MANIFEST))
+        .map(|b| {
+            B64.decode(b)
+                .ok()
+                .and_then(|json| serde_json::from_slice::<Manifest>(&json).ok())
+                .ok_or_else(|| ALTERED.to_owned())
+        })
+        .transpose()?;
+    let Some(manifest) = manifest else {
+        if tern_sync::hash(&files) != remote.hash {
+            return Err(ALTERED.into());
+        }
+        tracing::warn!("sync_bundle_unnumbered");
+        return Ok((files, known_seq));
+    };
+    let ours = tern_sync::item_hashes(&files, &ITEMS);
+    // An item the pusher did not know (an older build) must be absent here too.
+    let items_match = ITEMS.iter().all(|name| {
+        manifest
+            .items
+            .get(*name)
+            .map_or(tern_sync::ABSENT, String::as_str)
+            == ours[*name]
+    });
+    if !items_match || manifest.hash != remote.hash {
+        return Err(ALTERED.into());
+    }
+    if manifest.seq < known_seq {
+        return Err(format!(
+            "The remote copy is older than one this Mac already synced (number {} after {known_seq}): \
+             it may have been rolled back, so nothing was taken from it. Sync from a Mac that \
+             has the newest copy to replace it.",
+            manifest.seq
+        ));
+    }
+    Ok((files, manifest.seq))
+}
+
+/// Records what both sides now hold: the bundle hash and number, each item's hash, and
+/// `hosts.json` itself as the base for the next by-name merge. `files` is the agreed bundle,
+/// vault included.
+fn write_state(dir: &Path, hash: &str, files: &Files, seq: u64) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(&SyncState {
         last_hash: Some(hash.to_owned()),
         items: tern_sync::item_hashes(files, &ITEMS),
         hosts_base: files
             .get(HOSTS_FILE)
             .map(|b| String::from_utf8_lossy(b).into_owned()),
+        seq,
     })
     .map_err(|e| e.to_string())?;
     write_atomic(&dir.join(STATE_FILE), &json)

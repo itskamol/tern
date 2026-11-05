@@ -40,6 +40,7 @@ fn item_decisions_take_the_side_that_changed_and_ask_only_when_both_did() {
         last_hash: Some("x".into()),
         items: tern_sync::item_hashes(&base, &ITEMS),
         hosts_base: Some(String::from_utf8(hosts(&[("web", "1.1.1.1")])).unwrap()),
+        seq: 0,
     };
     let mut local = base.clone();
     let mut remote = base.clone();
@@ -77,6 +78,7 @@ fn hosts_changed_on_both_sides_merge_without_asking() {
         last_hash: Some("x".into()),
         items: tern_sync::item_hashes(&base, &ITEMS),
         hosts_base: Some(String::from_utf8(hosts(&[("web", "1.1.1.1")])).unwrap()),
+        seq: 0,
     };
     let local = bundle(&[(HOSTS_FILE, &hosts(&[("web", "1.1.1.1"), ("db", "2.2.2.2")]))]);
     let remote = bundle(&[(
@@ -264,4 +266,95 @@ fn approved_password_commands_never_travel_in_either_direction() {
     let incoming = br#"{"approved-commands.json":"WyJjdXJsIGV2aWwiXQ==","hosts.json":"e30="}"#;
     let got = decode(incoming).unwrap();
     assert!(!got.contains_key("approved-commands.json"));
+}
+
+/// A remote as a push leaves it, for the bundle checks below.
+fn remote_of(files: &Files, seq: u64, with: &Vault) -> tern_sync::RemoteBundle {
+    let hash = tern_sync::hash(files);
+    let (vault, sealed) = seal_bundle(files, &hash, seq, with).unwrap();
+    tern_sync::RemoteBundle {
+        hash,
+        updated_at: 0,
+        device: "mac".into(),
+        seq,
+        vault,
+        sealed,
+    }
+}
+
+#[test]
+fn a_pull_takes_only_a_bundle_whose_parts_belong_together_and_are_not_older() {
+    let v = Vault::new(SecretString::from("pw".to_owned()));
+    let new = bundle(&[(HOSTS_FILE, b"[]"), (VAULT_FILE, b"newer vault")]);
+    let old = bundle(&[(HOSTS_FILE, b"[1]"), (VAULT_FILE, b"older vault")]);
+    let good = remote_of(&new, 7, &v);
+    let (files, seq) = open_bundle(&good, &v, 3).unwrap();
+    assert_eq!((files, seq), (new.clone(), 7));
+
+    // An older vault.age put back beside the newer sealed data.
+    let mut swapped = remote_of(&new, 7, &v);
+    swapped.vault = b"older vault".to_vec();
+    assert!(
+        open_bundle(&swapped, &v, 3)
+            .unwrap_err()
+            .contains("changed outside tern")
+    );
+
+    // tern-meta.json edited to name another bundle.
+    let mut meta_edited = remote_of(&new, 7, &v);
+    meta_edited.hash = tern_sync::hash(&old);
+    assert!(open_bundle(&meta_edited, &v, 3).is_err());
+
+    // A whole earlier bundle restored: it holds together but is older than one seen here.
+    let rolled_back = remote_of(&new, 2, &v);
+    assert!(
+        open_bundle(&rolled_back, &v, 3)
+            .unwrap_err()
+            .contains("rolled back")
+    );
+}
+
+#[test]
+fn a_bundle_from_a_tern_before_the_manifest_is_checked_against_its_meta() {
+    let v = Vault::new(SecretString::from("pw".to_owned()));
+    let files = bundle(&[(HOSTS_FILE, b"[]"), (VAULT_FILE, b"vault")]);
+    let mut rest = files.clone();
+    let vault = rest.remove(VAULT_FILE).unwrap();
+    let legacy = |hash: String| tern_sync::RemoteBundle {
+        hash,
+        updated_at: 0,
+        device: "old".into(),
+        seq: 0,
+        vault: vault.clone(),
+        sealed: v.seal(&encode(&rest).unwrap()).unwrap(),
+    };
+    assert_eq!(
+        open_bundle(&legacy(tern_sync::hash(&files)), &v, 4).unwrap(),
+        (files, 4)
+    );
+    assert!(open_bundle(&legacy("edited".into()), &v, 4).is_err());
+}
+
+#[test]
+fn every_push_is_numbered_above_the_last_one_seen() {
+    let root = tempfile::tempdir().unwrap();
+    let url = bare_repo(root.path());
+    let (a, b) = (root.path().join("a"), root.path().join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let none = Resolutions::new();
+    let va = Vault::new(SecretString::from("pw".to_owned()));
+    std::fs::write(a.join(HOSTS_FILE), hosts(&[("web", "1.1.1.1")])).unwrap();
+    run_sync(&a, &url, &va, &none);
+    assert_eq!(load_state(&a).seq, 1);
+    let vb = match sync(&b, Some(&url), &va, Some("pw"), None, &none).unwrap() {
+        (Outcome::Pulled, Some(v)) => v,
+        (o, _) => unreachable!("{}", outcome_name(&o)),
+    };
+    assert_eq!(load_state(&b).seq, 1);
+    std::fs::write(b.join(HOSTS_FILE), hosts(&[("db", "2.2.2.2")])).unwrap();
+    assert!(matches!(run_sync(&b, &url, &vb, &none), Outcome::Pushed));
+    assert_eq!(load_state(&b).seq, 2);
+    assert!(matches!(run_sync(&a, &url, &va, &none), Outcome::Pulled));
+    assert_eq!(load_state(&a).seq, 2);
 }
