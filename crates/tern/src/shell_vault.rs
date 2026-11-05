@@ -13,6 +13,7 @@ use tern_vault::{ExposeSecret, Key, Vault, VaultError};
 
 use super::{Shell, Toast, ToastKind};
 use crate::keeper::{self, Keeper};
+use crate::lock_on_sleep::{self, Cause};
 use crate::text_input::{InputColors, TextInput};
 use crate::vault_pin;
 
@@ -367,6 +368,17 @@ impl Shell {
                 ui.shown_key = None;
             }
             self.notify_toast(ToastKind::Default, "Vault locked", cx);
+        }
+    }
+
+    /// Locks the vault because the Mac slept, the screen locked or the session changed hands
+    /// (Settings -> Vault), the same lock as Lock now: open sessions keep running.
+    pub(crate) fn lock_vault_for(&mut self, cause: Cause, cx: &mut Context<Self>) {
+        if lock_on_sleep::lock(self.settings.vault_lock_on_sleep, cx) {
+            if let Some(ui) = self.vault_ui.as_mut() {
+                ui.shown_key = None;
+            }
+            self.notify_toast(ToastKind::Default, cause.message(), cx);
         }
     }
 

@@ -324,6 +324,7 @@ impl Shell {
         };
         let (minus, value, plus) = w::stepper(&t, "vault-lock-after", label);
         let keychain = self.settings.vault_keychain;
+        let lock_on_sleep = self.settings.vault_lock_on_sleep;
         let card = w::card(&t)
             .child(w::row(
                 &t,
@@ -343,6 +344,20 @@ impl Shell {
                         let next = keeper::step_lock(s.settings.vault_lock_minutes, 1);
                         s.update_settings(|st| st.vault_lock_minutes = next, cx);
                     }))),
+            ))
+            .child(w::row(
+                &t,
+                false,
+                "Lock the vault when the Mac sleeps or the screen locks",
+                Some("Also when another user takes over the session. Open sessions keep running.".into()),
+                div()
+                    .id("toggle-vault-lock-on-sleep")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        let on = !s.settings.vault_lock_on_sleep;
+                        s.update_settings(|st| st.vault_lock_on_sleep = on, cx);
+                    }))
+                    .child(w::toggle(&t, lock_on_sleep, "vault-lock-on-sleep")),
             ))
             .child(w::row(
                 &t,

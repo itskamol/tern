@@ -15,6 +15,7 @@ mod indicator;
 mod keeper;
 mod keeper_gate;
 mod keymap;
+mod lock_on_sleep;
 mod login;
 mod password_command;
 mod picker;
@@ -154,6 +155,9 @@ fn main() {
                     cx.activate(true);
                 });
             }
+            lock_on_sleep::start(cx, move |cause, cx| {
+                let _ = window.update(cx, |shell, _, cx| shell.lock_vault_for(cause, cx));
+            });
             #[cfg(debug_assertions)]
             devkeys::replay(window, cx);
             cx.on_window_closed(|cx, _| {

@@ -64,6 +64,7 @@ zeron, and checking the code. ✓ marks what is done; each open line names how i
 | ✓ V3 | List and delete saved secrets | Vault page shows a count only |
 | ✓ V4 | Change vault passphrase | Not possible |
 | ✓ V5 | Auto-lock after idle | Stays unlocked until quit |
+| ✓ V6 | Lock when the Mac sleeps or the screen locks | An open vault stayed open behind a locked screen |
 
 ## 5. Sync
 

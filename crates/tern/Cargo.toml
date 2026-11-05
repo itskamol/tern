@@ -36,6 +36,10 @@ security-framework.workspace = true
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility"] }
+# The sleep and screen-lock notifications (lock_on_sleep.rs). Already in Cargo.lock through gpui.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSString", "NSNotification", "NSOperation", "NSDistributedNotificationCenter"] }
 
 [dev-dependencies]
 tempfile = "3"

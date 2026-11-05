@@ -113,6 +113,8 @@ pub struct Settings {
     pub vault_lock_minutes: u32,
     /// The vault passphrase is kept in the macOS login Keychain and the vault opens the first time tern needs it.
     pub vault_keychain: bool,
+    /// The open vault is locked when the Mac goes to sleep, the screen locks or another user takes over the session.
+    pub vault_lock_on_sleep: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +167,7 @@ impl Default for Settings {
             sync_auto: true,
             vault_lock_minutes: VAULT_LOCK_DEFAULT,
             vault_keychain: false,
+            vault_lock_on_sleep: true,
         }
     }
 }
@@ -347,6 +350,17 @@ mod tests {
         assert_eq!(got.cursor_style, CursorStyle::Block);
         assert_eq!(got.scrollback_lines, SCROLLBACK_DEFAULT);
         assert!(got.bell_bounces_dock);
+        // A file from before the option keeps the safe choice.
+        assert!(got.vault_lock_on_sleep);
+    }
+
+    #[test]
+    fn lock_on_sleep_is_on_by_default_and_can_be_turned_off() {
+        assert!(Settings::default().vault_lock_on_sleep);
+        let dir = temp_dir("lock-on-sleep");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"vaultLockOnSleep": false}"#).unwrap();
+        assert!(!Settings::load(&dir).vault_lock_on_sleep);
     }
 
     #[test]
@@ -440,6 +454,7 @@ mod tests {
             sync_auto: false,
             vault_lock_minutes: 30,
             vault_keychain: true,
+            vault_lock_on_sleep: false,
         };
         saved.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), saved);

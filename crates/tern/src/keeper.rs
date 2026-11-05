@@ -35,7 +35,12 @@ static WRITTEN: Mutex<u64> = Mutex::new(0);
 
 /// Runs `write` only if no newer write (higher `ticket`) has already run; `None` when skipped.
 fn in_order<T>(ticket: u64, write: impl FnOnce() -> T) -> Option<T> {
-    let mut last = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+    ordered(&WRITTEN, ticket, write)
+}
+
+/// [`in_order`] against any counter, so a test can use its own.
+fn ordered<T>(written: &Mutex<u64>, ticket: u64, write: impl FnOnce() -> T) -> Option<T> {
+    let mut last = written.lock().unwrap_or_else(|e| e.into_inner());
     if ticket < *last {
         return None;
     }
@@ -642,12 +647,11 @@ mod tests {
 
     #[test]
     fn an_older_write_never_overwrites_a_newer_one() {
-        // Tickets far above any a test run reaches, so the shared counter is not disturbed.
-        let base = 1_000_000;
-        assert_eq!(in_order(base + 2, || "newer"), Some("newer"));
-        assert_eq!(in_order(base + 1, || "older"), None);
-        assert_eq!(in_order(base + 2, || "same"), Some("same"));
-        assert_eq!(in_order(base + 3, || "newest"), Some("newest"));
+        let counter = Mutex::new(0);
+        assert_eq!(ordered(&counter, 2, || "newer"), Some("newer"));
+        assert_eq!(ordered(&counter, 1, || "older"), None);
+        assert_eq!(ordered(&counter, 2, || "same"), Some("same"));
+        assert_eq!(ordered(&counter, 3, || "newest"), Some("newest"));
     }
 
     #[test]
@@ -660,7 +664,7 @@ mod tests {
         assert!(!is_yes(None));
     }
 
-    fn login(host: &str) -> Key {
+    pub(super) fn login(host: &str) -> Key {
         Key::Password {
             user: "deploy".into(),
             host: host.into(),
@@ -669,7 +673,7 @@ mod tests {
     }
 
     /// A keeper over a vault file in a temp dir, with the Keychain and PIN off.
-    fn keeper(open: Option<Vault>) -> (gpui::TestApp, tempfile::TempDir) {
+    pub(super) fn keeper(open: Option<Vault>) -> (gpui::TestApp, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let mut app = gpui::TestApp::new();
         let path = dir.path().join("vault.age");
@@ -687,13 +691,13 @@ mod tests {
         (app, dir)
     }
 
-    fn vault_with(host: &str) -> Vault {
+    pub(super) fn vault_with(host: &str) -> Vault {
         let mut v = Vault::new(SecretString::from("p".to_owned()));
         v.set(login(host), SecretString::from("pw".to_owned()));
         v
     }
 
-    fn has(app: &mut gpui::TestApp, host: &str) -> bool {
+    pub(super) fn has(app: &mut gpui::TestApp, host: &str) -> bool {
         app.update(|cx| Keeper::lookup(&login(host), cx).is_some())
     }
 
@@ -747,3 +751,7 @@ mod tests {
         assert!(has(&mut app, "a"));
     }
 }
+
+#[cfg(test)]
+#[path = "keeper_lock_tests.rs"]
+mod lock_tests;

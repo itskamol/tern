@@ -8,6 +8,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 - The app bundle carries the licences: `LICENSE`, `NOTICE.md` and `THIRD-PARTY.txt` in `tern.app/Contents/Resources`. The last is written at bundle time by `scripts/third-party.py`, offline, from `cargo metadata`: every crate linked into the binary with its licence and each distinct licence text once.
 - `HashKnownHosts yes` in `~/.ssh/config` is honoured: a host key accepted in tern is written to known_hosts with the host name hashed (`|1|salt|hmac`), as `ssh` writes it, so the file does not list the hosts you connect to. A new known_hosts file is created 0600.
+- On macOS the open vault locks when the Mac goes to sleep, the screen locks or another user takes over the session, like Lock now: open sessions keep running and a secret is asked for again. Settings → Vault → "Lock the vault when the Mac sleeps or the screen locks" turns it off.
 - From the sidebar's search box (⇧⌘F), ↑ and ↓ move through the hosts shown, skipping folded groups, and Return connects to the selected one rather than always the top match.
 - A full menu bar: tern (About, Services), File, Edit, View, Shell, Window and Help, so every shortcut can be found in a menu; ⌃⌘F enters full screen.
 - ⌘Z and ⇧⌘Z undo and redo adding, editing, removing and moving hosts (Edit → Undo); the toast's Undo is the same step. An edit is not undone once sync or an import has changed the list since.

@@ -42,7 +42,7 @@ Hosts, snippets and settings sync to a private Git repository you own, encrypted
 - **Connections:** groups and tags, a one-time import from `~/.ssh/config`, ProxyJump chains, local, remote and SOCKS forwards, agent forwarding, and two-factor logins.
 - **Staying connected:** automatic reconnect after a network drop, but never after you type `exit`. A changed host key stops the connection and shows the exact `ssh-keygen -R` line to fix one you trust.
 - **Terminal:** tabs that reopen on launch, broadcast input to chosen tabs, ⌘-click links (including OSC 8), session logging, and a status line with latency.
-- **Vault:** passwords and SSH keys in an age-encrypted file that unlocks with a PIN or the Keychain and locks when you're idle. A password command that arrives through sync must be approved once on each Mac.
+- **Vault:** passwords and SSH keys in an age-encrypted file that unlocks with a PIN or the Keychain and locks when you're idle or the Mac sleeps or locks its screen (macOS). A password command that arrives through sync must be approved once on each Mac.
 - **Sync:** runs on its own, merges per host when both Macs changed, and only asks about a real conflict.
 
 Every shortcut can be rebound in Settings. The full list, with the Windows and Linux keys, is in [docs/keyboard.md](docs/keyboard.md).
