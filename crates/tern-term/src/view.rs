@@ -74,6 +74,8 @@ pub struct TerminalView {
     hover_link: Option<Link>,
     last_pointer: Option<gpui::Point<Pixels>>,
     options: TerminalOptions,
+    /// Text an input method is composing.
+    ime: Ime,
     /// Blink phase: whether a blinking cursor is currently drawn.
     cursor_on: bool,
     last_input: Instant,
@@ -107,6 +109,7 @@ impl TerminalView {
         terminal.update(cx, |t, _| t.set_theme(theme));
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
+        let ime = Ime::new(&focus_handle, window, cx);
         // Repaint exactly when the model changes.
         let subscription = cx.observe(&terminal, |this, _, cx| {
             // Output moved the grid under any hover; the next pointer move or
@@ -138,6 +141,7 @@ impl TerminalView {
             hover_link: None,
             last_pointer: None,
             options: TerminalOptions::default(),
+            ime,
             cursor_on: true,
             last_input: Instant::now(),
             _blink_task: Self::blink_loop(cx),
@@ -256,6 +260,8 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        // Only keys the mapping owns are written here. Typed text, dead keys and composition are
+        // left unhandled so GPUI offers them to the input handler (see `ime`), once.
         let bytes = keystroke_bytes(ks, mode, self.option_as_meta);
         if let Some(bytes) = bytes {
             self.send_input(bytes, cx);
@@ -749,10 +755,16 @@ mod tests;
 #[path = "view_cache_tests.rs"]
 mod cache_tests;
 
+#[cfg(test)]
+#[path = "view_ime_tests.rs"]
+mod ime_tests;
+
 mod cursor;
 mod find_links;
+mod ime;
 use cursor::{BELL_FLASH_MS, BELL_PEAK_OPACITY};
 use find_links::{find_status, is_find_chord};
+use ime::Ime;
 
 /// Moving through the scrollback from the keyboard, as Terminal.app does.
 #[derive(Debug, PartialEq, Eq)]

@@ -10,9 +10,11 @@
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
-    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, PaintQuad, Pixels, ShapedLine,
-    SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative, size,
+    App, Bounds, ElementInputHandler, Entity, Focusable as _, GlobalElementId, Hsla, LayoutId,
+    PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, Window, fill, font, outline,
+    point, px, relative, size,
 };
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::box_drawing;
 use crate::config::TerminalTheme;
@@ -52,6 +54,15 @@ pub struct TerminalPrepaint {
     cursor_over: Option<PaintQuad>,
     /// Underline under the hovered link, painted over the glyphs.
     link_quads: Vec<PaintQuad>,
+    /// Text an input method is composing, drawn over the cells at the cursor.
+    composing: Vec<ComposedGlyph>,
+}
+
+/// One run of composed text: a background that covers the grid under it, and the shaped glyphs.
+struct ComposedGlyph {
+    backdrop: PaintQuad,
+    at: gpui::Point<Pixels>,
+    line: ShapedLine,
 }
 
 impl gpui::IntoElement for TerminalElement {
@@ -141,9 +152,28 @@ impl gpui::Element for TerminalElement {
         // A focused blinking cursor is dark in its off phase; an unfocused
         // one is a steady hollow box.
         let cursor_on = !self.focused || self.view.read(cx).cursor_on();
-        let (grid, cursor) = {
+        // Composed text stands in for the cursor while it is on screen.
+        let marked = self
+            .view
+            .read(cx)
+            .marked_text()
+            .filter(|_| self.focused)
+            .map(str::to_owned);
+        let (grid, cursor, cursor_cell) = {
             let t = terminal.read(cx);
-            (t.lines(), t.cursor().filter(|_| cursor_on))
+            let cell = t.cursor_cell().filter(|_| marked.is_some());
+            let cursor = t.cursor().filter(|_| cursor_on && cell.is_none());
+            (t.lines(), cursor, cell)
+        };
+        let composing = match (&marked, cursor_cell) {
+            (Some(text), Some(start)) => {
+                let grid_size = (cols as usize, rows as usize);
+                let metrics = (cell_w, line_h, origin);
+                shape_composed(
+                    text, start, grid_size, metrics, &theme, &mono, font_size, window,
+                )
+            }
+            _ => Vec::new(),
         };
 
         let mut bg_quads = Vec::new();
@@ -234,6 +264,7 @@ impl gpui::Element for TerminalElement {
             cursor_under,
             cursor_over,
             link_quads,
+            composing,
         }
     }
 
@@ -248,6 +279,14 @@ impl gpui::Element for TerminalElement {
         cx: &mut App,
     ) {
         let (cell_w, line_h, origin) = (prepaint.cell_w, prepaint.line_h, prepaint.origin);
+        // The platform's text input (composition, dead keys) talks to the focused view through
+        // this; GPUI ignores it while the view is not focused.
+        let focus_handle = self.view.read(cx).focus_handle(cx);
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.view.clone()),
+            cx,
+        );
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for quad in prepaint.bg_quads.drain(..) {
                 window.paint_quad(quad);
@@ -277,11 +316,77 @@ impl gpui::Element for TerminalElement {
             for quad in prepaint.link_quads.drain(..) {
                 window.paint_quad(quad);
             }
+            for glyph in prepaint.composing.drain(..) {
+                window.paint_quad(glyph.backdrop);
+                let _ = glyph
+                    .line
+                    .paint(glyph.at, line_h, gpui::TextAlign::Left, None, window, cx);
+            }
             if let Some(quad) = prepaint.cursor_over.take() {
                 window.paint_quad(quad);
             }
         });
     }
+}
+
+/// Lay composed text out from `start` (row, column), one glyph pinned to its own cells as in
+/// [`shape_row`], wrapping at the right edge and stopping at the bottom. Underlined, on the
+/// theme background so the cells below do not show through.
+#[allow(clippy::too_many_arguments)]
+fn shape_composed(
+    text: &str,
+    start: (usize, usize),
+    (cols, rows): (usize, usize),
+    (cell_w, line_h, origin): (Pixels, Pixels, gpui::Point<Pixels>),
+    theme: &TerminalTheme,
+    mono: &gpui::Font,
+    font_size: Pixels,
+    window: &Window,
+) -> Vec<ComposedGlyph> {
+    let (mut row, mut col) = start;
+    let mut out = Vec::new();
+    for ch in text.chars().filter(|ch| !ch.is_control()) {
+        let width = ch.width().unwrap_or(1);
+        if col + width > cols {
+            row += 1;
+            col = 0;
+        }
+        if row >= rows {
+            break;
+        }
+        let at = point(
+            origin.x + cell_w * col as f32,
+            origin.y + line_h * row as f32,
+        );
+        let run = TextRun {
+            len: ch.len_utf8(),
+            font: mono.clone(),
+            color: theme.foreground,
+            background_color: None,
+            underline: Some(gpui::UnderlineStyle {
+                color: Some(theme.foreground),
+                thickness: px(1.0),
+                wavy: false,
+            }),
+            strikethrough: None,
+        };
+        let line = window.text_system().shape_line(
+            SharedString::from(ch.to_string()),
+            font_size,
+            &[run],
+            None,
+        );
+        out.push(ComposedGlyph {
+            backdrop: fill(
+                Bounds::new(at, size(cell_w * width.max(1) as f32, line_h)),
+                theme.background,
+            ),
+            at,
+            line,
+        });
+        col += width;
+    }
+    out
 }
 
 /// Contiguous `[start, end)` column runs of cells satisfying `pred`.

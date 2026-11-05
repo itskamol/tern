@@ -682,20 +682,23 @@ impl Terminal {
 
     /// Cursor in viewport coordinates; `None` when hidden or scrolled out.
     pub fn cursor(&self) -> Option<CursorSnapshot> {
-        let content = self.term.renderable_content();
-        if content.cursor.shape == CursorShape::Hidden {
+        let shape = self.term.renderable_content().cursor.shape;
+        if shape == CursorShape::Hidden {
             return None;
         }
-        let Point { line, column } = content.cursor.point;
+        let (row, col) = self.cursor_cell()?;
+        Some(CursorSnapshot { row, col, shape })
+    }
+
+    /// The cell the cursor is on as (row, column) in the viewport, hidden or not; `None` only
+    /// when it is scrolled out. An input method anchors its text here.
+    pub fn cursor_cell(&self) -> Option<(usize, usize)> {
+        let Point { line, column } = self.term.renderable_content().cursor.point;
         let row = line.0 + self.display_offset() as i32;
         if row < 0 || row >= self.rows() as i32 {
             return None;
         }
-        Some(CursorSnapshot {
-            row: row as usize,
-            col: column.0,
-            shape: content.cursor.shape,
-        })
+        Some((row as usize, column.0))
     }
 
     /// The text on the cursor's row up to (not including) the cursor, trailing blanks

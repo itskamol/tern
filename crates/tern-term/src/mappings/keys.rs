@@ -234,26 +234,15 @@ pub fn to_esc_str(
     None
 }
 
-/// Bytes to send for a key press: the escape-sequence mapping, else the typed
-/// character (layout- and shift-aware) when no ctrl/cmd/fn modifier is held.
-/// `None` means the key is not ours.
+/// Bytes for a key press the mapping owns: special keys, ctrl combos, and Option-as-Meta.
+/// `None` means GPUI should hand the key to the input handler, which is where plain typed text,
+/// dead keys and composition come from, so a character is never written by both paths.
 pub fn keystroke_bytes(
     keystroke: &Keystroke,
     mode: Modes,
     option_as_meta: bool,
 ) -> Option<Vec<u8>> {
-    if let Some(esc) = to_esc_str(keystroke, mode, option_as_meta) {
-        return Some(esc.as_bytes().to_vec());
-    }
-    let m = &keystroke.modifiers;
-    if m.control || m.platform || m.function {
-        return None;
-    }
-    keystroke
-        .key_char
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_bytes().to_vec())
+    to_esc_str(keystroke, mode, option_as_meta).map(|esc| esc.as_bytes().to_vec())
 }
 
 ///   Code     Modifiers
@@ -319,12 +308,18 @@ mod test {
     }
 
     #[test]
-    fn typed_text_falls_back_to_key_char() {
+    fn typed_text_is_left_to_the_input_handler() {
+        // A plain or shifted character is not ours: the input handler writes it.
         let mut ks = Keystroke::parse("shift-a").unwrap();
         ks.key_char = Some("A".into());
+        assert_eq!(keystroke_bytes(&ks, Modes::empty(), true), None);
+        // Option with the setting off is a dead key or a composed character, also its.
+        let mut alt = Keystroke::parse("alt-e").unwrap();
+        alt.key_char = Some("\u{b4}".into());
+        assert_eq!(keystroke_bytes(&alt, Modes::empty(), false), None);
         assert_eq!(
-            keystroke_bytes(&ks, Modes::empty(), true),
-            Some(b"A".to_vec())
+            keystroke_bytes(&alt, Modes::empty(), true),
+            Some(b"\x1be".to_vec())
         );
         // Cmd+letter is the app's, not the remote's.
         let mut cmd = Keystroke::parse("cmd-a").unwrap();
