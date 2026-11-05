@@ -8,17 +8,20 @@ rust-version.workspace = true
 
 [dependencies]
 async-channel = "2"
+base64 = "0.22"
 futures = { version = "0.3", default-features = false, features = ["std"] }
+hmac = "0.13"
+rand = { version = "0.10", features = ["thread_rng"] }
 russh = "0.64"
 russh-sftp = { workspace = true }
 secrecy = "0.10"
+sha1 = "0.11"
 ssh2-config = "0.8"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time", "net", "process", "io-util", "macros", "fs"] }
 tracing = "0.1"
 
 [dev-dependencies]
-rand = { version = "0.10", features = ["thread_rng"] }
 tempfile = "3"
 crossterm = "0.29"
 rpassword = "7"

@@ -49,7 +49,7 @@ Every shortcut can be rebound in Settings. The full list, with the Windows and L
 
 ## Security
 
-- Host keys are checked against `~/.ssh/known_hosts`. A changed key refuses the connection.
+- Host keys are checked against `~/.ssh/known_hosts`. A changed key refuses the connection. A key you accept is recorded with the host name hashed when `~/.ssh/config` says `HashKnownHosts yes`, as `ssh` does.
 - Secrets live in the vault (age, scrypt) or in your password manager. They are never written to logs, and never typed into the terminal unless you press ⌘\\.
 - Sync data is encrypted before it leaves your Mac. The repository sees `.age` files and a plain `tern-meta.json` (hash, time and a bundle number, nothing else). A pull checks the downloaded files against a manifest sealed inside them, so a remote whose files were swapped, edited or rolled back to an older copy is refused.
 - Losing a Mac doesn't lose your setup: see [docs/recovery.md](docs/recovery.md). Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).

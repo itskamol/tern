@@ -7586,13 +7586,16 @@ name = "tern-ssh"
 version = "0.1.3"
 dependencies = [
  "async-channel",
+ "base64 0.22.1",
  "crossterm",
  "futures",
+ "hmac 0.13.0",
  "rand 0.10.3",
  "rpassword",
  "russh",
  "russh-sftp",
  "secrecy",
+ "sha1 0.11.0",
  "ssh2-config",
  "tempfile",
  "thiserror 2.0.21",
