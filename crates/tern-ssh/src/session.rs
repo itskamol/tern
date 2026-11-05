@@ -23,7 +23,7 @@ use crate::authn::{self, Authenticator};
 use crate::config;
 use crate::error::{Cause, Failure, classify};
 use crate::forward::{self, Registry};
-use crate::hostkey::{Handler, known_algorithms};
+use crate::hostkey::{Asking, Handler, known_algorithms, within};
 use crate::sftp;
 use crate::{
     ConnectSpec, Disconnect, Forward, ForwardError, ForwardInfo, SessionEvent, Sftp, SftpError,
@@ -229,6 +229,7 @@ async fn run_inner(
     forwards: &Arc<Registry>,
 ) -> Result<Outcome, Failure> {
     let agent_socket = authn::socket_for(spec.forward_agent, spec.agent_socket.as_deref());
+    let asking = Asking::default();
     let handler = Handler {
         host: spec.host.clone(),
         port: spec.port,
@@ -237,6 +238,7 @@ async fn run_inner(
         cause: cause.clone(),
         remote: forwards.remote_targets.clone(),
         agent_socket: agent_socket.clone(),
+        asking: asking.clone(),
     };
 
     let cfg = client_config(spec, &spec.host, spec.port);
@@ -272,9 +274,9 @@ async fn run_inner(
             ),
         }
     };
-    let connected = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
+    let connected = within(CONNECT_TIMEOUT, &asking, connecting)
         .await
-        .map_err(|_| Failure::ConnectTimeout)??;
+        .ok_or(Failure::ConnectTimeout)??;
     let mut session = match connected {
         Ok(s) => s,
         Err(e) => {

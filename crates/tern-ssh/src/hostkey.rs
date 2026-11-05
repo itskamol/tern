@@ -2,6 +2,9 @@
 // learn helpers, with our own match policy on top — OpenSSH semantics (known if any recorded key
 // matches, changed only if none does; see `verdict`) plus the prompt / hard-fail layering.
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use futures::channel::oneshot;
 use russh::client;
@@ -90,6 +93,57 @@ pub(crate) fn known_algorithms(host: &str, port: u16, path: Option<&Path>) -> Ve
     out
 }
 
+/// Set while the person is shown a host key to accept: the connect timeout is for a network
+/// that does not answer, not for someone comparing a fingerprint, so its clock stops meanwhile.
+#[derive(Clone, Default)]
+pub(crate) struct Asking(Arc<AtomicBool>);
+
+/// Clears [`Asking`] when the question is over, however it ends.
+struct Held(Arc<AtomicBool>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+impl Asking {
+    fn hold(&self) -> Held {
+        self.0.store(true, Ordering::Relaxed);
+        Held(self.0.clone())
+    }
+
+    fn held(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// `fut`, or `None` once it has taken `limit` not counting the time a host key question was
+/// open. Checked every `TICK`, so the count is off by at most that much.
+pub(crate) async fn within<T>(
+    limit: Duration,
+    asking: &Asking,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    const TICK: Duration = Duration::from_millis(50);
+    tokio::pin!(fut);
+    let mut left = limit;
+    loop {
+        let started = tokio::time::Instant::now();
+        tokio::select! {
+            out = &mut fut => return Some(out),
+            () = tokio::time::sleep(TICK.min(left)) => {
+                if !asking.held() {
+                    left = left.saturating_sub(started.elapsed());
+                    if left.is_zero() {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) struct Handler {
     pub host: String,
     pub port: u16,
@@ -101,6 +155,8 @@ pub(crate) struct Handler {
     pub remote: RemoteTargets,
     /// The local agent socket to wire server-opened agent channels to; `None` refuses them.
     pub agent_socket: Option<PathBuf>,
+    /// Stops the connect timeout while the host key question is open.
+    pub asking: Asking,
 }
 
 impl client::Handler for Handler {
@@ -130,6 +186,7 @@ impl client::Handler for Handler {
             }
             Verdict::Unknown => {
                 tracing::info!(host = %self.host, port = self.port, "ssh_host_key_unknown");
+                let _held = self.asking.hold();
                 let (tx, rx) = oneshot::channel();
                 let prompt = Prompt::UnknownHostKey {
                     host: self.host.clone(),
@@ -386,5 +443,17 @@ mod tests {
             verdict("strong-b", 22, &key(KEY_A), Some(&p)),
             Verdict::Known
         );
+    }
+
+    #[tokio::test]
+    async fn the_connect_clock_stops_while_a_host_key_is_being_read() {
+        let slow = || tokio::time::sleep(Duration::from_millis(400));
+        let limit = Duration::from_millis(150);
+        assert_eq!(super::within(limit, &Asking::default(), slow()).await, None);
+        let asking = Asking::default();
+        let held = asking.hold();
+        assert_eq!(super::within(limit, &asking, slow()).await, Some(()));
+        drop(held);
+        assert!(!asking.held());
     }
 }

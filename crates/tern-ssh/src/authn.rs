@@ -24,7 +24,7 @@ use russh::{MethodKind, MethodSet};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::{Cause, Error, Failure};
-use crate::hostkey::Handler;
+use crate::hostkey::{Asking, Handler, within};
 use crate::{ChallengePrompt, ConnectSpec, MemoryKey, Prompt, SessionEvent};
 use std::ffi::OsStr;
 
@@ -527,6 +527,7 @@ pub(crate) async fn open_jump_chain(
         }
         let label = format!("{}:{}", hop.host, hop.port);
         let wrap = |f: Failure| Failure::Jump(label.clone(), Box::new(f));
+        let asking = Asking::default();
         let handler = Handler {
             host: hop.host.clone(),
             port: hop.port,
@@ -535,6 +536,7 @@ pub(crate) async fn open_jump_chain(
             cause: Cause::default(),
             remote: RemoteTargets::default(),
             agent_socket: None,
+            asking: asking.clone(),
         };
         let cfg = client_config(spec, &hop.host, hop.port);
         let connecting = async {
@@ -546,9 +548,9 @@ pub(crate) async fn open_jump_chain(
                 }
             }
         };
-        let mut session = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
+        let mut session = within(CONNECT_TIMEOUT, &asking, connecting)
             .await
-            .map_err(|_| wrap(Failure::ConnectTimeout))?
+            .ok_or_else(|| wrap(Failure::ConnectTimeout))?
             .map_err(|e| wrap(connect_failure(e, &hop.host, hop.port)))?;
         let user = hop
             .user

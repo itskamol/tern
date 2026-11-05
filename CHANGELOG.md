@@ -30,6 +30,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- A new host's key can be read at leisure: the 15-second connect timeout no longer counts the time its fingerprint question is open, which used to drop the connection while it was being compared (jump hosts too).
 - A file downloaded over SFTP stays in ~/Downloads: a name the server sends with a `/`, `..` or an absolute path is refused instead of written where it points.
 - A paste can no longer end bracketed paste early: an end marker hidden inside another (`ESC[20ESC[201~1~`) is removed too, so the rest of the text is not run as typed commands.
 - With many tabs the strip scrolled sideways (wheel, two-finger swipe) but nothing showed it: the tabs past the window's edge were out of sight with no hint they were there. The button above lists them, and the tab in front now stays on screen when tabs open, close, move or switch, and when the window is made smaller.
