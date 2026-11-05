@@ -82,7 +82,7 @@ pub fn search_label(connection: &Connection) -> String {
     )
 }
 
-/// Connections matching `query`, best first (the ranking the ⌘K picker uses).
+/// Connections matching `query`, best first (the ranking the host picker uses).
 pub fn search(query: &str, connections: &[Connection]) -> Vec<usize> {
     let labels: Vec<String> = connections.iter().map(search_label).collect();
     let names: Vec<&str> = connections.iter().map(|c| c.name.as_str()).collect();

@@ -44,10 +44,11 @@ pub enum ShortcutId {
     FontSmaller,
     FontReset,
     FillPassword,
+    ClearTerminal,
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 20] = [
+    pub const ALL: [ShortcutId; 21] = [
         ShortcutId::HostPicker,
         ShortcutId::SearchHosts,
         ShortcutId::Snippets,
@@ -68,11 +69,12 @@ impl ShortcutId {
         ShortcutId::FontSmaller,
         ShortcutId::FontReset,
         ShortcutId::FillPassword,
+        ShortcutId::ClearTerminal,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            ShortcutId::HostPicker => "Open host picker",
+            ShortcutId::HostPicker => "New tab (pick a host)",
             ShortcutId::SearchHosts => "Search hosts",
             ShortcutId::Snippets => "Snippets",
             ShortcutId::NewConnection => "New connection",
@@ -92,12 +94,13 @@ impl ShortcutId {
             ShortcutId::FontSmaller => "Smaller text",
             ShortcutId::FontReset => "Default text size",
             ShortcutId::FillPassword => "Fill password",
+            ShortcutId::ClearTerminal => "Clear scrollback",
         }
     }
 
     fn mac_combo(self) -> &'static str {
         match self {
-            ShortcutId::HostPicker => "cmd-k",
+            ShortcutId::HostPicker => "cmd-t",
             ShortcutId::SearchHosts => "cmd-shift-f",
             ShortcutId::Snippets => "cmd-shift-s",
             ShortcutId::NewConnection => "cmd-n",
@@ -117,12 +120,13 @@ impl ShortcutId {
             ShortcutId::FontSmaller => "cmd--",
             ShortcutId::FontReset => "cmd-0",
             ShortcutId::FillPassword => "cmd-\\",
+            ShortcutId::ClearTerminal => "cmd-k",
         }
     }
 
     fn other_combo(self) -> &'static str {
         match self {
-            ShortcutId::HostPicker => "ctrl-shift-k",
+            ShortcutId::HostPicker => "ctrl-shift-t",
             ShortcutId::SearchHosts => "ctrl-alt-f",
             ShortcutId::Snippets => "ctrl-alt-s",
             ShortcutId::NewConnection => "ctrl-shift-n",
@@ -143,6 +147,7 @@ impl ShortcutId {
             ShortcutId::FontReset => "ctrl-0",
             // Ctrl+\ alone is SIGQUIT in a terminal.
             ShortcutId::FillPassword => "ctrl-shift-\\",
+            ShortcutId::ClearTerminal => "ctrl-shift-k",
         }
     }
 
@@ -182,6 +187,7 @@ impl ShortcutId {
             ShortcutId::FontSmaller => Box::new(DecreaseFontSize),
             ShortcutId::FontReset => Box::new(ResetFontSize),
             ShortcutId::FillPassword => Box::new(crate::shell::FillPassword),
+            ShortcutId::ClearTerminal => Box::new(crate::shell::ClearTerminal),
         }
     }
 }
@@ -456,9 +462,9 @@ mod tests {
     #[test]
     fn overrides_fall_back_to_defaults_and_conflicts_name_the_owner() {
         let (picker, quit) = if cfg!(target_os = "macos") {
-            ("cmd-k", "cmd-q")
+            ("cmd-t", "cmd-q")
         } else {
-            ("ctrl-shift-k", "ctrl-shift-q")
+            ("ctrl-shift-t", "ctrl-shift-q")
         };
         let mut k = Keymap::default();
         assert_eq!(k.combo(ShortcutId::HostPicker), picker);
@@ -466,7 +472,7 @@ mod tests {
         assert_eq!(k.combo(ShortcutId::HostPicker), "cmd-p");
         assert!(!k.is_default(ShortcutId::HostPicker));
         let refusal = k.refusal(ShortcutId::Settings, "cmd-p").unwrap();
-        assert!(refusal.contains("Open host picker"), "{refusal}");
+        assert!(refusal.contains("New tab (pick a host)"), "{refusal}");
         assert!(k.refusal(ShortcutId::Settings, picker).is_none());
         // Re-recording a shortcut's own chord is not a conflict with itself.
         assert!(k.refusal(ShortcutId::HostPicker, "cmd-p").is_none());

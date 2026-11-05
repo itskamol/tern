@@ -88,7 +88,7 @@ fn app_menus() -> Vec<Menu> {
             "File",
             vec![
                 MenuItem::action("New Connection…", NewConnection),
-                MenuItem::action("Open Host…", crate::picker::ToggleHostPicker),
+                MenuItem::action("New Tab…", crate::picker::ToggleHostPicker),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
             ],
@@ -104,6 +104,7 @@ fn app_menus() -> Vec<Menu> {
                 MenuItem::os_action("Paste", Paste, OsAction::Paste),
                 MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
                 MenuItem::separator(),
+                MenuItem::action("Clear Scrollback", crate::shell::ClearTerminal),
                 MenuItem::action("Find Host…", crate::shell::FocusHostSearch),
             ],
         ),

@@ -1,6 +1,6 @@
 // Adapted from zeron crates/ui/src/popover.rs (search_input_frame) (MIT), see sidebar.rs.
 //! The sidebar's moving parts that are not drawing: the search box, the recent hosts, which
-//! group folders are folded, and the order the ⌘K picker lists hosts in.
+//! group folders are folded, and the order the host picker lists hosts in.
 //!
 //! Hosts connected to lately, newest first, in `recent.json`. It is per device (when you
 //! last used a host here), so it is not synced.
@@ -158,7 +158,7 @@ impl Shell {
         }
     }
 
-    /// Hosts the ⌘K picker lists for its current query, in order: the ranked matches, or on
+    /// Hosts the host picker lists for its current query, in order: the ranked matches, or on
     /// an empty query the recents first.
     pub fn picker_matches(&self) -> Vec<usize> {
         let labels: Vec<String> = self.connections.iter().map(sidebar::search_label).collect();

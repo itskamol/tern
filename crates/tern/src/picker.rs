@@ -1,6 +1,6 @@
 // Adapted from zeron crates/ui/src/shell/command_palette.rs (palette card, header, footer,
 // overlay) and crates/engine/src/repos.rs (nucleo ranking) (MIT).
-//! ⌘K host picker: type to fuzzy-filter tern's connections, Enter connects. An empty query
+//! The host picker (⌘T): type to fuzzy-filter tern's connections, Enter connects. An empty query
 //! lists recents first; text that matches nothing connects as a typed target.
 
 use crate::hover::HoverFade as _;

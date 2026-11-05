@@ -15,6 +15,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Changed
 
+- ⌘K clears the scrollback and the screen above the prompt, as in Terminal.app, iTerm2 and Ghostty (Edit → Clear Scrollback; Ctrl+Shift+K on Windows and Linux). The host picker moves to ⌘T, the new-tab shortcut of other Mac apps (Ctrl+Shift+T); a shortcut rebound in Settings keeps its binding.
 - VoiceOver reads host rows (name, address, connection state), group headers (name, count, collapsed or expanded), session tabs (title, badges, state, selected) and the sidebar's Sync and empty-state buttons.
 - Dragging a host shows a line where it will land instead of tinting the row, and a collapsed group opens after the drag rests on its header for a moment.
 - The BCAST and LOG badges are 10 pt and a tab's close button is 20 x 20 pt.

@@ -286,3 +286,28 @@ fn an_osc52_copy_up_to_the_cap_reaches_the_clipboard_and_a_larger_one_does_not()
     // Dropping one request leaves the terminal working.
     assert_eq!(clipboard_len(&t.process(&osc52(4))), Some(4));
 }
+
+#[test]
+fn clear_keeps_the_prompt_line_at_the_top_and_drops_the_history() {
+    let mut t = Terminal::with_scrollback(20, 3, 100);
+    t.process(b"one\r\ntwo\r\nthree\r\nfour\r\n$ ls");
+    assert!(t.history_size() > 0);
+    t.clear();
+    assert_eq!(t.history_size(), 0);
+    assert_eq!(t.row_text(0), "$ ls");
+    assert_eq!(t.row_text(1), "");
+    let c = t.cursor().unwrap();
+    assert_eq!((c.row, c.col), (0, 4));
+    // Typing goes on where it was.
+    t.process(b" -l");
+    assert_eq!(t.row_text(0), "$ ls -l");
+}
+
+#[test]
+fn clear_on_the_alternate_screen_leaves_the_program_s_screen() {
+    let mut t = Terminal::with_scrollback(20, 3, 100);
+    t.process(b"a\r\nb\r\nc\r\nd\r\n\x1b[?1049h\x1b[2;1Hvim");
+    t.clear();
+    assert_eq!(t.history_size(), 0);
+    assert_eq!(t.row_text(1), "vim");
+}

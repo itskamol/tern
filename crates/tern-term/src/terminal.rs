@@ -405,6 +405,26 @@ impl Terminal {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// ⌘K: forgets the scrollback and what is on screen above the cursor's line, which moves
+    /// to the top, so the prompt being typed at stays (as iTerm2's Clear Buffer and Ghostty's
+    /// clear_screen keep it). Nothing is sent to the remote. On the alternate screen (vim,
+    /// htop) only the history goes: that screen belongs to the program, which repaints it.
+    pub fn clear(&mut self) {
+        use alacritty_terminal::vte::ansi::{ClearMode, Handler};
+        self.term.scroll_display(Scroll::Bottom);
+        if !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            let cursor = self.term.grid().cursor.point;
+            let above = cursor.line.0.max(0) as usize;
+            if above > 0 {
+                self.term.scroll_up(above);
+                self.term.goto(0, cursor.column.0);
+            }
+        }
+        self.term.clear_screen(ClearMode::Saved);
+        self.term.selection = None;
+        self.clear_search();
+    }
+
     // ---- selection ----
     //
     // `Term` owns the selection: it rotates the anchors when output scrolls

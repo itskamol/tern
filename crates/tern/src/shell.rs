@@ -49,7 +49,7 @@ mod broadcast_ui;
 mod forwards_ui;
 #[path = "shell_sftp.rs"]
 mod sftp_ui;
-pub(crate) use forwards_ui::FillPassword;
+pub(crate) use forwards_ui::{ClearTerminal, FillPassword};
 pub(crate) use sftp_ui::ToggleSftp;
 #[path = "shell_wallpaper_gallery.rs"]
 mod gallery_ui;
@@ -206,7 +206,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
         shell.start_auto_sync(window, cx);
     })?;
     // With no tab open nothing else holds focus, and gpui only dispatches key bindings along
-    // the focused element's path, so the shell itself must be focused for ⌘K to work.
+    // the focused element's path, so the shell itself must be focused for ⌘T to work.
     window.update(cx, |shell, window, cx| window.focus(&shell.focus, cx))?;
     window.update(cx, |shell, window, cx| shell.restore_tabs(window, cx))?;
     window.update(cx, |shell, _, cx| shell.watch_idle(cx))?;
@@ -682,6 +682,7 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
             .on_action(cx.listener(|s, _: &ToggleSftp, w, cx| s.toggle_sftp(w, cx)))
             .on_action(cx.listener(|s, _: &FillPassword, _, cx| s.fill_password(cx)))
+            .on_action(cx.listener(|s, _: &ClearTerminal, _, cx| s.clear_terminal(cx)))
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
             .on_action(cx.listener(|s, _: &OpenSettings, w, cx| s.toggle_settings(w, cx)))
             .on_action(cx.listener(|s, _: &ShowAbout, w, cx| s.open_settings_at_about(w, cx)))

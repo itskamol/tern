@@ -18,7 +18,7 @@ use crate::session::Status;
 use crate::session::{Session, SessionNote};
 use crate::text_input::{InputColors, TextInput};
 
-actions!(tern, [FillPassword]);
+actions!(tern, [FillPassword, ClearTerminal]);
 
 /// The popovers and side panels a tab can have open.
 #[derive(Default)]
@@ -290,6 +290,21 @@ impl Shell {
         };
         let session = tab.session().clone();
         session.update(cx, |s, cx| s.fill_password(cx));
+    }
+
+    /// ⌘K: clears the focused pane's scrollback and screen, keeping the prompt line.
+    pub(super) fn clear_terminal(&mut self, cx: &mut Context<Self>) {
+        if self.settings_page.is_some() || self.form.is_some() {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let terminal = tab.session().read(cx).view.read(cx).terminal().clone();
+        terminal.update(cx, |t, cx| {
+            t.clear();
+            cx.notify();
+        });
     }
 
     /// What a session reports on its own: a forward that could not start, a password prompt
