@@ -154,7 +154,7 @@ impl Shell {
         };
         self.active = ix;
         self.persist_tabs();
-        self.tab_scroll.scroll_to_item(ix);
+        self.tab_scroll.reveal(ix);
         // Behind Settings the terminal is hidden, and keys sent to it would be typed blind.
         if self.settings_page.is_none() {
             let focus = tab.session().read(cx).view.focus_handle(cx);

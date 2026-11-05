@@ -38,6 +38,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 
 [dev-dependencies]
 tempfile = "3"
+# Layout and scroll tests drive a real gpui window through its test platform.
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
 
 [lints]
 workspace = true

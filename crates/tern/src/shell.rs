@@ -164,7 +164,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 vault_ui: None,
                 last_input: std::time::Instant::now(),
                 toasts: toast::Toasts::new(),
-                tab_scroll: gpui::ScrollHandle::new(),
+                tab_scroll: tabs::StripScroll::default(),
                 context_menu: None,
                 hostlist: hostlist::HostList::new(&theme, recent, cx),
                 snippets: snippets_ui::SnippetsUi::load(),
@@ -259,7 +259,7 @@ pub struct Shell {
     /// The last key or mouse input to the window, for the vault's idle lock.
     last_input: std::time::Instant,
     toasts: toast::Toasts,
-    tab_scroll: gpui::ScrollHandle,
+    tab_scroll: tabs::StripScroll,
     context_menu: Option<menu::ContextMenu>,
     hostlist: hostlist::HostList,
     snippets: snippets_ui::SnippetsUi,

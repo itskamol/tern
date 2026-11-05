@@ -229,7 +229,7 @@ pub fn render_titlebar(
         )
 }
 
-fn control(id: &'static str, t: &Theme) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn control(id: &'static str, t: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .size(px(24.))

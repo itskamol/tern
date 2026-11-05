@@ -12,6 +12,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 - Hosts in the sidebar can be dragged: onto another host to take its place (and its group), or onto a group's header to move to the end of that group. The order is saved in `hosts.json`.
 - A session stopped at a password, passphrase or host-key question shows an amber ring instead of the pulsing connecting dot, and the status line says "Waiting for your answer" (#31).
 - README keyboard table lists Windows and Linux shortcuts alongside macOS (#41).
+- Once the tabs no longer fit, a button at the end of the strip lists every tab with the one in front checked; choosing one shows it. It appears only while the tabs overflow.
 
 ### Changed
 
@@ -27,6 +28,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 - A file downloaded over SFTP stays in ~/Downloads: a name the server sends with a `/`, `..` or an absolute path is refused instead of written where it points.
 - A paste can no longer end bracketed paste early: an end marker hidden inside another (`ESC[20ESC[201~1~`) is removed too, so the rest of the text is not run as typed commands.
+- With many tabs the strip scrolled sideways (wheel, two-finger swipe) but nothing showed it: the tabs past the window's edge were out of sight with no hint they were there. The button above lists them, and the tab in front now stays on screen when tabs open, close, move or switch, and when the window is made smaller.
 - A dark terminal scheme under the light appearance and a full-window wallpaper no longer turns the terminal a flat grey and hides the picture: the wallpaper's tint leans a scheme toward its own lightness rather than the appearance's, the status line under it takes the palette that suits that background, and small secondary text is plain muted while the panels are see-through, so the panels no longer sit at their most opaque.
 - Settings is readable under a wallpaper with a dark terminal scheme in the light appearance: the page sat on the active tab's scheme background, a near-black veil over the picture that washed out its headings and descriptions. It now sits on the app's own surface, like the sidebar.
 - Text fields edit by word and line as other macOS fields do: ⌥←/→ moves by word, ⇧⌥←/→ and ⇧⌘←/→ select, ⌘←/→ go to the ends, ⌥⌫ and ⌘⌫ delete, a double click selects a word and a triple click everything. Masked fields count as one word.

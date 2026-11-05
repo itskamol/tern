@@ -175,6 +175,30 @@ impl Shell {
         cx.notify();
     }
 
+    /// The button at the end of an overflowing tab strip: every tab by name, the one in front
+    /// checked, so a tab scrolled out of sight is one click away.
+    pub(crate) fn open_tabs_menu(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let items = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, tab)| {
+                let name =
+                    crate::tabs::middle_ellipsis(tab.title.as_deref().unwrap_or(&tab.alias), 40);
+                let label = if ix == self.active {
+                    format!("{name}  ✓")
+                } else {
+                    name
+                };
+                action(icons::TERMINAL, label, move |s, w, cx| {
+                    s.show_tab(ix, w, cx)
+                })
+            })
+            .collect();
+        self.context_menu = Some(ContextMenu { position, items });
+        cx.notify();
+    }
+
     /// Right-click on an entry in Settings → Vault.
     pub(crate) fn open_vault_menu(
         &mut self,
