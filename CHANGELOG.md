@@ -24,6 +24,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- A dark terminal scheme under the light appearance and a full-window wallpaper no longer turns the terminal a flat grey and hides the picture: the wallpaper's tint leans a scheme toward its own lightness rather than the appearance's, the status line under it takes the palette that suits that background, and small secondary text is plain muted while the panels are see-through, so the panels no longer sit at their most opaque.
 - Settings is readable under a wallpaper with a dark terminal scheme in the light appearance: the page sat on the active tab's scheme background, a near-black veil over the picture that washed out its headings and descriptions. It now sits on the app's own surface, like the sidebar.
 - Text fields edit by word and line as other macOS fields do: ⌥←/→ moves by word, ⇧⌥←/→ and ⇧⌘←/→ select, ⌘←/→ go to the ends, ⌥⌫ and ⌘⌫ delete, a double click selects a word and a triple click everything. Masked fields count as one word.
 - The sidebar behaves like Finder's and Mail's: pointing at a host or a group changes nothing (no hover fill, no "..." button, arrow cursor), only the active or keyboard-selected host is filled, and a host's actions are in the menu a right-click or Control-click opens. The address tooltip shows only where the row cuts the address short.

@@ -200,17 +200,21 @@ impl Shell {
         let shown = self.wp.shown.as_ref()?;
         let t = &self.theme;
         let term = t.terminal(self.settings.terminal_font_size, self.scheme_for(""));
-        let words = |extra: Option<Hsla>| {
+        // Secondary text is plain muted while the panels are see-through (`Theme::secondary`);
+        // the status line on the terminal's panel uses the palette that suits its background.
+        let words = |t: &Theme, extra: Option<Hsla>| {
             let mut v = vec![
                 (rgb_of(t.text), theme_tint::TEXT_CONTRAST),
                 (rgb_of(t.muted), theme_tint::TEXT_CONTRAST),
-                (rgb_of(t.secondary()), theme_tint::TEXT_CONTRAST),
                 (rgb_of(t.faint), theme_tint::FAINT_CONTRAST),
             ];
             v.extend(extra.map(|c| (rgb_of(c), theme_tint::TEXT_CONTRAST)));
             v
         };
-        let (shell_words, terminal_words) = (words(None), words(Some(term.foreground)));
+        let (shell_words, terminal_words) = (
+            words(t, None),
+            words(&t.on(term.background), Some(term.foreground)),
+        );
         Some(wallpaper_panel::panel_alpha(
             &shown.prepared.backdrop,
             &[

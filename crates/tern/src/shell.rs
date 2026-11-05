@@ -592,6 +592,7 @@ impl Render for Shell {
         self.sync_density(window);
         self.sync_wallpaper(cx);
         self.sync_frame(window);
+        crate::theme::set_see_through(self.window_fill().is_some());
         let t = self.theme;
         let infos = self.tab_infos(cx);
         let active_alias = infos.get(self.active).map(|i| i.alias.clone());

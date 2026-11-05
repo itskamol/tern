@@ -90,10 +90,12 @@ pub fn harden(
 }
 
 /// A terminal scheme leaning toward the tint, its text kept readable on the new background.
-pub fn tint_terminal(theme: &mut TerminalTheme, color: [u8; 3], light: bool) {
+/// The tint is pre-mixed by the scheme's own lightness, not the appearance's: a dark scheme
+/// under the light appearance leaned toward near-white turns a flat mid grey.
+pub fn tint_terminal(theme: &mut TerminalTheme, color: [u8; 3]) {
     let background = mix(
         rgb_of(theme.background),
-        premixed(color, light),
+        premixed(color, crate::theme::is_light(theme.background)),
         SURFACE_MIX,
     );
     theme.background = from_rgb(background).opacity(theme.background.a);
@@ -186,6 +188,21 @@ mod tests {
         assert_eq!(rgb_of(theme.faint), rgb_of(base.faint));
         // While muted text, which has to reach 4.5, is already past it.
         assert!(contrast_ratio(pack(rgb_of(theme.muted)), pack(rgb_of(theme.shell))) >= 4.49);
+    }
+
+    /// A dark scheme stays dark under the light appearance: the tint is pre-mixed toward black
+    /// for it, not toward white (which turned #040404 into a flat #686868 grey).
+    #[test]
+    fn a_dark_scheme_keeps_its_lightness_under_either_appearance() {
+        let scheme = crate::theme::themes::find("12-bit Rainbow").unwrap();
+        for light in [false, true] {
+            let t = Theme::zeron(light).tinted([245, 236, 214]);
+            let term = t.terminal(13.0, Some(scheme));
+            let bg = rgb_of(term.background);
+            assert!(bg.iter().all(|c| *c < 0x20), "light={light}: {bg:?}");
+            let fg = pack(rgb_of(term.foreground));
+            assert!(contrast_ratio(fg, pack(bg)) >= 4.5);
+        }
     }
 
     /// Separators stay neutral whatever the wallpaper's colour; only interactive states lean.

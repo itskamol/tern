@@ -84,6 +84,18 @@ pub fn reduce_transparency() -> bool {
     REDUCE_TRANSPARENCY.load(Ordering::Relaxed)
 }
 
+/// Whether the panels are see-through over a full-window wallpaper this frame. Set once per
+/// frame by `Shell::render`, like `LOW_DPI`.
+static SEE_THROUGH: AtomicBool = AtomicBool::new(false);
+
+pub fn set_see_through(on: bool) {
+    SEE_THROUGH.store(on, Ordering::Relaxed);
+}
+
+pub fn see_through() -> bool {
+    SEE_THROUGH.load(Ordering::Relaxed)
+}
+
 /// `retina` normally, `standard` on a 1x display: used for opacities that need a step more
 /// contrast where grayscale-only text is thin.
 pub fn by_dpi(retina: f32, standard: f32) -> f32 {
@@ -195,11 +207,12 @@ impl Theme {
     }
 
     /// Small secondary text (host addresses, section labels): the dimmest `muted` that still
-    /// keeps 4.5:1 on the shell and popup, as an opaque colour so the wallpaper panel maths
-    /// (`window_fill`) sees what is drawn. Full strength under Increase contrast and on a
-    /// standard-density display, where thin grayscale text needs the extra step.
+    /// keeps 4.5:1 on the shell and popup. Full strength under Increase contrast and on a
+    /// standard-density display, where thin grayscale text needs the extra step, and over a
+    /// full-window wallpaper: a colour with no margin over the opaque shell loses it on any
+    /// see-through panel, and would hold the panels at their most opaque.
     pub fn secondary(&self) -> Hsla {
-        if self.increase_contrast || low_dpi() {
+        if self.increase_contrast || low_dpi() || see_through() {
             return self.muted;
         }
         let (shell, popup) = (rgb_u32(self.shell), rgb_u32(self.popup));
@@ -288,9 +301,20 @@ impl Theme {
             *slot = hex(color);
         }
         if let Some(tint) = self.tint {
-            crate::theme_tint::tint_terminal(&mut t, tint, self.light);
+            crate::theme_tint::tint_terminal(&mut t, tint);
         }
         t
+    }
+
+    /// The palette for text drawn on `bg`: this one, or the other appearance's taken toward the
+    /// same wallpaper when `bg` is of the other lightness. A terminal scheme picks its own
+    /// background, so the strip under it may be dark under the light appearance.
+    pub fn on(&self, bg: Hsla) -> Theme {
+        if is_light(bg) == self.light {
+            return *self;
+        }
+        let other = Theme::zeron(!self.light);
+        self.tint.map_or(other, |color| other.tinted(color))
     }
 
     /// Ink at `alpha`: zeron's `wash`, a pale grey over dark surfaces, a soft black over light.
@@ -324,6 +348,14 @@ impl Theme {
             self.glass()
         }
     }
+}
+
+/// Whether `c` is a light colour: black text reads better on it than white.
+pub fn is_light(c: Hsla) -> bool {
+    let c = crate::theme_tint::rgb_of(c);
+    let c = u32::from(c[0]) << 16 | u32::from(c[1]) << 8 | u32::from(c[2]);
+    let contrast = crate::wallpaper_fx::contrast_ratio;
+    contrast(c, 0x000000) > contrast(c, 0xffffff)
 }
 
 /// `fg` composited over `bg`, as an opaque colour (zeron `theme::flatten`).
@@ -624,5 +656,28 @@ mod tests {
         assert_eq!(on_light.background, on_dark.background);
         assert_eq!(on_light.ansi, on_dark.ansi);
         assert_eq!(rgb_of(on_light.background), scheme.background);
+    }
+
+    #[test]
+    fn secondary_text_is_plain_muted_while_the_panels_are_see_through() {
+        for base in [Theme::zeron_dark(), Theme::zeron_light()] {
+            let t = base.tinted([245, 236, 214]);
+            super::set_see_through(true);
+            let seen = t.secondary();
+            super::set_see_through(false);
+            assert_eq!(seen, t.muted);
+        }
+    }
+
+    #[test]
+    fn text_on_a_dark_scheme_takes_the_dark_palette_under_the_light_appearance() {
+        let light = Theme::zeron_light().tinted([245, 236, 214]);
+        let on_dark = light.on(hex(0x0e0e0d));
+        assert!(!on_dark.light);
+        assert_eq!(on_dark.tint, light.tint);
+        assert!(contrast_ratio(rgb_of(on_dark.muted), 0x0e0e0d) >= 4.5);
+        assert_eq!(light.on(light.shell), light);
+        let dark = Theme::zeron_dark();
+        assert!(dark.on(hex(0xfafafa)).light);
     }
 }
