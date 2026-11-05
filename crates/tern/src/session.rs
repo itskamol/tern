@@ -47,6 +47,17 @@ struct Link {
     password_command: Option<String>,
     /// Prints the password for `sudo` and other prompts after login (`session_fill`).
     sudo_command: Option<String>,
+    /// A saved connection's ProxyCommand, asked about before it first runs on this Mac.
+    proxy_command: Option<String>,
+}
+
+impl Link {
+    /// The saved ProxyCommand when this Mac has not approved it yet.
+    fn unapproved_proxy(&self) -> Option<String> {
+        self.proxy_command
+            .clone()
+            .filter(|c| !crate::password_command::is_approved(c))
+    }
 }
 
 impl Status {
@@ -150,10 +161,12 @@ impl Session {
                 vault_keys: auth.vault_keys,
                 password_command: auth.password_command,
                 sudo_command: auth.sudo_command,
+                proxy_command: auth.proxy_command,
             };
             // A locked vault is unlocked before dialling, so its keys can be offered.
             let unlock_first = !idle && Self::keys_need_unlock(&link, cx);
-            let task = if idle || unlock_first {
+            let vet_proxy = !idle && !unlock_first && link.unapproved_proxy().is_some();
+            let task = if idle || unlock_first || vet_proxy {
                 Task::ready(())
             } else {
                 Self::start(&mut link, size, cx)
@@ -205,6 +218,9 @@ impl Session {
             }
             if unlock_first {
                 this.ask_vault_before_dialling(cx);
+            }
+            if vet_proxy {
+                this.dial(cx);
             }
             this
         })
@@ -352,7 +368,11 @@ impl Session {
     }
 
     /// Starts the connection now.
+    /// Starts the connection now, or first asks to run a saved ProxyCommand not yet approved.
     fn dial(&mut self, cx: &mut Context<Self>) {
+        if let Some(command) = self.link.unapproved_proxy() {
+            return self.ask_proxy(command, cx);
+        }
         self._session_events = Self::start(&mut self.link, self.size, cx);
     }
 

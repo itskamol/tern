@@ -29,6 +29,10 @@ pub struct Auth {
     pub password_command: Option<String>,
     /// The "Sudo password command"; see `session_fill`.
     pub sudo_command: Option<String>,
+    /// The saved connection's ProxyCommand. Like the password command it may have come in
+    /// through sync or an import, so it runs only once this Mac approved it. A `~/.ssh/config`
+    /// host's is not here: that file is the person's own, and runs as ssh would run it.
+    pub proxy_command: Option<String>,
 }
 
 /// What to do about the command when a password prompt arrives.
@@ -252,19 +256,28 @@ impl Approved {
     }
 }
 
+/// Whether `command` was approved on this Mac.
+pub fn is_approved(command: &str) -> bool {
+    crate::settings::dir().is_some_and(|d| Approved::load(&d).contains(command))
+}
+
 /// A command saved from this Mac's form counts as seen, so it is approved with the save.
 pub fn approve_saved(connection: &crate::connections::Connection) {
-    let Some(dir) = crate::settings::dir() else {
-        return;
-    };
+    if let Some(dir) = crate::settings::dir() {
+        approve_saved_in(&dir, connection);
+    }
+}
+
+fn approve_saved_in(dir: &Path, connection: &crate::connections::Connection) {
     for command in [
         &connection.password_command,
         &connection.sudo_password_command,
+        &connection.proxy_command,
     ]
     .into_iter()
     .flatten()
     {
-        let _ = Approved::approve(&dir, command);
+        let _ = Approved::approve(dir, command);
     }
 }
 
@@ -368,6 +381,20 @@ mod tests {
             out.expose_secret()
                 .starts_with("/opt/homebrew/bin:/usr/local/bin")
         );
+    }
+
+    #[test]
+    fn saving_a_connection_here_approves_its_proxy_command_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = crate::connections::Connection {
+            proxy_command: Some("ssh -W %h:%p bastion".into()),
+            password_command: Some("gopass show -o web".into()),
+            ..crate::connections::Connection::default()
+        };
+        approve_saved_in(dir.path(), &connection);
+        let approved = Approved::load(dir.path());
+        assert!(approved.contains("ssh -W %h:%p bastion"));
+        assert!(approved.contains("gopass show -o web"));
     }
 
     #[test]

@@ -583,6 +583,11 @@ impl Shell {
                 .iter()
                 .find(|c| c.name == alias)
                 .and_then(|c| c.sudo_password_command.clone()),
+            proxy_command: self
+                .connections
+                .iter()
+                .find(|c| c.name == alias)
+                .and_then(|c| c.proxy_command.clone()),
         }
     }
 

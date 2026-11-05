@@ -44,6 +44,8 @@ pub(super) enum Flow {
     Unlock(After),
     /// "This connection runs `…` to get its password. Run it? (yes/no)".
     ApproveCommand(Prompt),
+    /// "This connection reaches the server through `…`. Run it? (yes/no)", before dialling.
+    ApproveProxy(String),
     /// The same for a password fill; the number is the screen it was asked on.
     ApproveFill(String, u64),
     /// "Save … in tern's vault? (yes/no)".
@@ -260,6 +262,9 @@ impl Session {
                 Some(passphrase) => self.unlock(Opener::Passphrase(passphrase), after, cx),
                 None => self.skipped(after, cx),
             },
+            Flow::ApproveProxy(command) => {
+                self.proxy_approved(&command, keeper::is_yes(typed.as_ref()), cx)
+            }
             Flow::ApproveCommand(prompt) => {
                 self.command_approved(prompt, keeper::is_yes(typed.as_ref()), cx)
             }
@@ -450,6 +455,35 @@ impl Session {
                 None
             }
         }
+    }
+
+    /// Asks before a saved ProxyCommand runs for the first time on this Mac: it came from
+    /// `hosts.json`, which sync and imports also write.
+    pub(super) fn ask_proxy(&mut self, command: String, cx: &mut Context<Self>) {
+        let text = format!(
+            "This connection reaches the server by running `{}` on this Mac. Run it? (yes/no) ",
+            command.replace(char::is_control, " ")
+        );
+        self.ask_local(&text, true, Flow::ApproveProxy(command), cx);
+    }
+
+    fn proxy_approved(&mut self, command: &str, yes: bool, cx: &mut Context<Self>) {
+        if !yes {
+            self.note(
+                "Not connected: the proxy command was not run. Enter asks again.",
+                cx,
+            );
+            self.status = super::Status::Closed;
+            return cx.notify();
+        }
+        if let Some(dir) = crate::settings::dir()
+            && let Err(e) = Approved::approve(&dir, command)
+        {
+            // Run it this once anyway: the person said yes.
+            tracing::warn!(error = %e, "proxy_command_approval_not_saved");
+            self.link.proxy_command = None;
+        }
+        self.dial(cx);
     }
 
     /// The answer to the approval question.
