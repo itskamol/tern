@@ -18,6 +18,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 - Once the tabs no longer fit, a button at the end of the strip lists every tab with the one in front checked; choosing one shows it. It appears only while the tabs overflow.
 - `TERN_FRAME_STATS=1` logs once a second the frames drawn and the mean and worst time of the shell's render and of a terminal's prepaint (`frame_stats` in the log). Off, it costs one atomic read per frame.
 - The terminal takes input from the system's input methods: Chinese, Japanese and Korean composition shows underlined at the cursor and is sent when committed, dead keys (Option+e, then e gives é) and the character picker work, and the candidate window sits at the cursor. Keys the terminal maps itself (arrows, ctrl combinations, Option as Meta) are unchanged; with Option as Meta off, Option composes characters. Holding a letter that has accents offers them, as in other Mac apps.
+- With Option as Meta on, an Option combination that your layout makes a printable ASCII character is typed instead of sent as Meta: @ on ⌥L, [ on ⌥5 and | on ⌥7 on a German keyboard. On US layouts ⌥ keys are still Meta.
 
 ### Changed
 

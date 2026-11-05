@@ -68,6 +68,17 @@ impl Rig {
         rig
     }
 
+    /// A keystroke with the character the layout gives it, which `simulate_keystroke` cannot carry.
+    fn dispatch(&mut self, keystroke: gpui::Keystroke) {
+        let handle: gpui::AnyWindowHandle = self.window.handle().into();
+        self.app.update(|cx| {
+            cx.update_window(handle, |_, window, cx| {
+                window.dispatch_keystroke(keystroke, cx);
+            })
+            .unwrap();
+        });
+    }
+
     fn typed(&self) -> Vec<Vec<u8>> {
         self.typed.borrow().clone()
     }
@@ -256,4 +267,19 @@ fn a_long_composition_wraps_and_is_clipped_at_the_bottom_without_trouble() {
         .update_entity(&terminal, |t, cx| t.feed(&b"\n".repeat(30), cx));
     rig.window.draw();
     assert!(rig.typed().is_empty());
+}
+
+#[test]
+fn a_layout_character_on_option_is_typed_once_with_meta_on() {
+    let mut rig = Rig::new();
+    // German Option+L: the key handler leaves it alone and the input handler types the "@".
+    let mut ks = gpui::Keystroke::parse("alt-l").unwrap();
+    ks.key_char = Some("@".into());
+    rig.dispatch(ks);
+    assert_eq!(rig.typed(), vec![b"@".to_vec()]);
+    // US Option+B ("\u{222b}") stays Meta.
+    let mut ks = gpui::Keystroke::parse("alt-b").unwrap();
+    ks.key_char = Some("\u{222b}".into());
+    rig.dispatch(ks);
+    assert_eq!(rig.typed(), vec![b"@".to_vec(), b"\x1bb".to_vec()]);
 }

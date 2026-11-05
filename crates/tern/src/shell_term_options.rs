@@ -255,7 +255,7 @@ impl Shell {
                         true,
                         "Use Option as Meta",
                         Some(
-                            "⌥B, ⌥F and friends reach the shell; off types the macOS character"
+                            "⌥B, ⌥F and friends reach the shell; a character your layout types with ⌥, such as @ on German, is still typed. Off types the macOS character"
                                 .into(),
                         ),
                         meta,

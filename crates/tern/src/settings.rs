@@ -64,7 +64,8 @@ pub struct Settings {
     pub terminal_font_family: Option<String>,
     /// Hold looping animations still. macOS's Reduce motion does the same on its own.
     pub reduce_motion: bool,
-    /// Option sends Meta (ESC-prefixed keys) to the remote, as most terminals offer.
+    /// Option sends Meta (ESC-prefixed keys) to the remote, as most terminals offer. A character
+    /// the layout types with Option, such as @ on German, is still typed.
     pub option_as_meta: bool,
     /// Open the tabs of the last run again at launch.
     pub reopen_tabs: bool,
