@@ -554,7 +554,9 @@ impl Session {
                 }
             }
             TerminalEvent::Typed(bytes) => self.mirror_typed(bytes, cx),
-            TerminalEvent::TitleChanged(_) | TerminalEvent::Bell => {}
+            TerminalEvent::TitleChanged(_)
+            | TerminalEvent::Bell
+            | TerminalEvent::ClipboardStore(_) => {}
         }
     }
 

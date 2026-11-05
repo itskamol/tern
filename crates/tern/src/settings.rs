@@ -101,6 +101,8 @@ pub struct Settings {
     pub middle_click_paste: bool,
     /// Flash the terminal on BEL.
     pub visual_bell: bool,
+    /// Programs on the remote may set the clipboard (OSC 52).
+    pub clipboard_write: bool,
     /// Bounce the Dock icon on BEL while tern is in the background.
     pub bell_bounces_dock: bool,
     /// Ask GitHub once a day whether a newer release exists; tern only says so, never installs.
@@ -157,6 +159,7 @@ impl Default for Settings {
             copy_on_select: false,
             middle_click_paste: false,
             visual_bell: false,
+            clipboard_write: true,
             bell_bounces_dock: true,
             check_for_updates: true,
             sync_auto: true,
@@ -431,6 +434,7 @@ mod tests {
             copy_on_select: true,
             middle_click_paste: true,
             visual_bell: true,
+            clipboard_write: false,
             bell_bounces_dock: false,
             check_for_updates: false,
             sync_auto: false,

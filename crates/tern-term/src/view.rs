@@ -118,6 +118,11 @@ impl TerminalView {
             if this.options.flashes_on(event) {
                 this.flash(cx);
             }
+            if let TerminalEvent::ClipboardStore(text) = event
+                && this.options.clipboard_write
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }
         });
         Self {
             terminal,

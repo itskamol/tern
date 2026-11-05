@@ -227,3 +227,32 @@ fn a_bell_flash_keeps_asking_for_frames_while_it_fades() {
         assert_eq!(rebuilt, 1, "the next frame of the fade");
     }
 }
+
+/// Not caching, but the same rig: OSC 52 reaches the clipboard only while the option allows.
+#[test]
+fn a_program_sets_the_clipboard_only_while_allowed() {
+    let mut rig = Rig::new();
+    let (terminal, view) = (rig.terminal.clone(), rig.view.clone());
+    let copy = |rig: &mut Rig, text: &[u8]| {
+        rig.app.update_entity(&terminal, |t, cx| t.feed(text, cx));
+        rig.app.read_from_clipboard().and_then(|c| c.text())
+    };
+    // "hello" and "bye", base64.
+    assert_eq!(
+        copy(&mut rig, b"\x1b]52;c;aGVsbG8=\x07").as_deref(),
+        Some("hello")
+    );
+    rig.app.update_entity(&view, |v, cx| {
+        v.set_options(
+            TerminalOptions {
+                clipboard_write: false,
+                ..TerminalOptions::default()
+            },
+            cx,
+        )
+    });
+    assert_eq!(
+        copy(&mut rig, b"\x1b]52;c;Ynll\x07").as_deref(),
+        Some("hello")
+    );
+}

@@ -28,6 +28,7 @@ impl Shell {
             copy_on_select: s.copy_on_select,
             middle_click_paste: s.middle_click_paste,
             visual_bell: s.visual_bell,
+            clipboard_write: s.clipboard_write,
         }
     }
 
@@ -48,7 +49,9 @@ impl Shell {
     }
 
     /// BEL from a session bounces the Dock icon while tern is behind other apps (macOS only
-    /// bounces for an inactive app, so a bell in the window being used stays quiet).
+    /// bounces for an inactive app, so a bell in the window being used stays quiet). A program
+    /// setting the clipboard is said in a toast, at most once a minute per session, so a copy
+    /// the person did not make never goes unseen.
     pub(super) fn on_bell(
         &self,
         session: &Entity<Session>,
@@ -56,11 +59,30 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Subscription {
         let terminal = session.read(cx).terminal();
-        cx.subscribe_in(&terminal, window, |shell, _, event, window, _| {
-            if matches!(event, TerminalEvent::Bell) && shell.settings.bell_bounces_dock {
-                window.request_attention();
-            }
-        })
+        let session = session.downgrade();
+        let mut said: Option<std::time::Instant> = None;
+        cx.subscribe_in(
+            &terminal,
+            window,
+            move |shell, _, event, window, cx| match event {
+                TerminalEvent::Bell if shell.settings.bell_bounces_dock => {
+                    window.request_attention();
+                }
+                TerminalEvent::ClipboardStore(text) => {
+                    if said.is_some_and(|at| at.elapsed() < CLIPBOARD_NOTE_EVERY) {
+                        return;
+                    }
+                    said = Some(std::time::Instant::now());
+                    let who = session
+                        .upgrade()
+                        .map_or_else(String::new, |s| s.read(cx).label());
+                    let text =
+                        clipboard_note(&who, text.chars().count(), shell.settings.clipboard_write);
+                    shell.notify_toast(super::ToastKind::Default, text, cx);
+                }
+                _ => {}
+            },
+        )
     }
 
     pub(super) fn terminal_page(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -258,6 +280,18 @@ impl Shell {
                             s.middle_click_paste,
                             |st| st.middle_click_paste = !st.middle_click_paste,
                         ),
+                    ))
+                    .child(w::row(
+                        &t,
+                        false,
+                        "Programs can copy to the clipboard",
+                        Some("OSC 52, as tmux and vim copy over SSH; a toast says when".into()),
+                        toggle(
+                            "clipboard-write",
+                            "Programs can copy to the clipboard",
+                            s.clipboard_write,
+                            |st| st.clipboard_write = !st.clipboard_write,
+                        ),
                     )),
             ))
             .child(w::section(
@@ -292,6 +326,18 @@ impl Shell {
     }
 }
 
+/// How often a session's clipboard writes are mentioned.
+const CLIPBOARD_NOTE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What the toast says when a program on `who` set the clipboard, or tried to.
+fn clipboard_note(who: &str, chars: usize, allowed: bool) -> String {
+    if allowed {
+        format!("{who} copied {chars} characters to the clipboard")
+    } else {
+        format!("{who} tried to set the clipboard; allow it in Settings → Terminal")
+    }
+}
+
 /// 10000 → "10,000", as the stepper reads at a glance.
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -312,5 +358,12 @@ mod tests {
         assert_eq!(super::thousands(1_000), "1,000");
         assert_eq!(super::thousands(100_000), "100,000");
         assert_eq!(super::thousands(999), "999");
+    }
+
+    #[test]
+    fn the_clipboard_note_says_who_and_what_to_do() {
+        let note = super::clipboard_note("me@web:22", 5, true);
+        assert_eq!(note, "me@web:22 copied 5 characters to the clipboard");
+        assert!(super::clipboard_note("me@web:22", 5, false).contains("Settings → Terminal"));
     }
 }

@@ -190,6 +190,9 @@ pub struct TerminalOptions {
     /// Flash the view on BEL. The `Bell` event is emitted either way, so the
     /// app can bounce the Dock regardless.
     pub visual_bell: bool,
+    /// Programs on the remote may set the clipboard (OSC 52), as tmux and vim do to copy over
+    /// SSH. Reading it is never allowed.
+    pub clipboard_write: bool,
 }
 
 impl Default for TerminalOptions {
@@ -201,6 +204,7 @@ impl Default for TerminalOptions {
             copy_on_select: false,
             middle_click_paste: false,
             visual_bell: false,
+            clipboard_write: true,
         }
     }
 }

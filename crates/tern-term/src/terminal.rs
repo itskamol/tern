@@ -58,6 +58,9 @@ pub enum TerminalEvent {
     /// OSC 0/2 title change. An empty string means "reset to default".
     TitleChanged(String),
     Bell,
+    /// OSC 52: the remote asks to put text on the clipboard. The view writes it only while
+    /// [`crate::TerminalOptions::clipboard_write`] allows; the app can say that it happened.
+    ClipboardStore(String),
 }
 
 /// Viewport dimensions in cells.
@@ -244,9 +247,7 @@ impl Terminal {
         for notice in self.process(bytes) {
             match notice {
                 Notice::Event(event) => cx.emit(event),
-                Notice::ClipboardStore(text) => {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
-                }
+                Notice::ClipboardStore(text) => cx.emit(TerminalEvent::ClipboardStore(text)),
             }
         }
         cx.notify();

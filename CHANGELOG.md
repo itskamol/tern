@@ -17,6 +17,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Changed
 
+- A program on the server setting the clipboard (OSC 52, as tmux and vim copy over SSH) is no longer silent: a toast names the host and how much it copied, at most once a minute per session, and Settings → Terminal → "Programs can copy to the clipboard" turns it off (a blocked attempt says where to allow it). Reading the clipboard stays refused.
 - ⌘K clears the scrollback and the screen above the prompt, as in Terminal.app, iTerm2 and Ghostty (Edit → Clear Scrollback; Ctrl+Shift+K on Windows and Linux). The host picker moves to ⌘T, the new-tab shortcut of other Mac apps (Ctrl+Shift+T); a shortcut rebound in Settings keeps its binding.
 - VoiceOver reads host rows (name, address, connection state), group headers (name, count, collapsed or expanded), session tabs (title, badges, state, selected) and the sidebar's Sync and empty-state buttons.
 - Dragging a host shows a line where it will land instead of tinting the row, and a collapsed group opens after the drag rests on its header for a moment.
