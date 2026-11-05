@@ -27,6 +27,7 @@ mod settings_widgets;
 mod sftp_paths;
 mod shell;
 mod sidebar;
+mod single_instance;
 mod snippets;
 mod split;
 mod statusline;
@@ -93,6 +94,20 @@ fn main() {
         },
     };
     let _log_guard = init_logging();
+    // One tern per settings folder: a second launch hands its host to the first and exits.
+    let instance =
+        match settings::dir().map(|dir| (single_instance::claim(&dir, target.as_deref()), dir)) {
+            Some((single_instance::Claim::First(instance), _)) => Some(instance),
+            Some((single_instance::Claim::Handed, _)) => return,
+            Some((single_instance::Claim::Unanswered(e), dir)) => {
+                eprintln!(
+                    "tern is already running for {} but did not answer: {e}",
+                    dir.display()
+                );
+                std::process::exit(1);
+            }
+            None => None,
+        };
     tern_term::frame_stats::init();
     log_panics();
     let _app = tracing::info_span!("app", service = "tern", env = env()).entered();
@@ -126,6 +141,17 @@ fn main() {
             if let Some(target) = target {
                 let _ = window.update(cx, |shell, window, cx| {
                     shell.connect_target(&target, window, cx)
+                });
+            }
+            if let Some(instance) = instance {
+                instance.serve(cx, move |target, cx| {
+                    let _ = window.update(cx, |shell, window, cx| {
+                        if let Some(target) = target {
+                            shell.connect_target(&target, window, cx);
+                        }
+                        window.activate_window();
+                    });
+                    cx.activate(true);
                 });
             }
             #[cfg(debug_assertions)]

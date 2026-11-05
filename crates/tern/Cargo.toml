@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+async-channel = "2"
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 nucleo-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }
