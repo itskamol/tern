@@ -76,3 +76,11 @@ fn scrollback_keys_need_their_modifier() {
     assert_eq!(key(top), Some(ScrollbackKey::Top));
     assert_eq!(key(bottom), Some(ScrollbackKey::Bottom));
 }
+
+#[test]
+fn a_nested_end_marker_cannot_break_out_of_a_bracketed_paste() {
+    let out = paste_bytes("a\x1b[20\x1b[201~1~rm -rf ~\n", true);
+    let inner = &out[6..out.len() - 6];
+    assert!(!inner.windows(6).any(|w| w == b"\x1b[201~"), "{inner:?}");
+    assert!(out.ends_with(b"\x1b[201~"));
+}

@@ -281,8 +281,14 @@ impl Shell {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return self.notify_toast(ToastKind::Critical, format!("{}: {e}", dir.display()), cx);
         }
+        let Some(dest) = sftp_paths::free_name(&dir, &entry.name, |p| p.exists()) else {
+            return self.notify_toast(
+                ToastKind::Critical,
+                format!("Not downloaded: {:?} is not a plain file name.", entry.name),
+                cx,
+            );
+        };
         panel.busy = true;
-        let dest = sftp_paths::free_name(&dir, &entry.name, |p| p.exists());
         let label = entry.name.clone();
         self.run_transfer(
             format!("Downloading {label}"),

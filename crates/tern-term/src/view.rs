@@ -700,7 +700,12 @@ pub fn cell_at(x: f32, y: f32, cell_w: f32, line_h: f32, cols: usize, rows: usiz
 /// Wrap pasted text for the remote (bracketed-paste aware; strips the one
 /// control sequence a paste could use to break out of the bracket).
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    let sanitized = text.replace("\x1b[201~", "");
+    // Until none is left: removing one can join the bytes around it into another
+    // (`\x1b[20\x1b[201~1~`), which would end the paste early and run the rest.
+    let mut sanitized = text.to_owned();
+    while sanitized.contains("\x1b[201~") {
+        sanitized = sanitized.replace("\x1b[201~", "");
+    }
     if bracketed {
         let mut out = b"\x1b[200~".to_vec();
         out.extend_from_slice(sanitized.as_bytes());

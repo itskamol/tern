@@ -76,11 +76,16 @@ pub fn percent(done: u64, total: u64) -> u64 {
 }
 
 /// `dir/name`, or `dir/name (1).ext`, `(2)`… when that exists, so a download never replaces a
-/// file already there.
-pub fn free_name(dir: &Path, name: &str, exists: impl Fn(&Path) -> bool) -> PathBuf {
+/// file already there. `None` unless `name` is one plain file name: the server picks it, and a
+/// `../.zshenv` or an absolute path would otherwise land outside `dir`.
+pub fn free_name(dir: &Path, name: &str, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let plain = !matches!(name, "" | "." | "..") && !name.contains(['/', '\\', '\0']);
+    if !plain {
+        return None;
+    }
     let first = dir.join(name);
     if !exists(&first) {
-        return first;
+        return Some(first);
     }
     let path = Path::new(name);
     let stem = path
@@ -93,7 +98,7 @@ pub fn free_name(dir: &Path, name: &str, exists: impl Fn(&Path) -> bool) -> Path
     (1..)
         .map(|n| dir.join(format!("{stem} ({n}){ext}")))
         .find(|p| !exists(p))
-        .unwrap_or(first)
+        .or(Some(first))
 }
 
 #[cfg(test)]
@@ -160,12 +165,18 @@ mod tests {
         ];
         let exists = |p: &Path| taken.iter().any(|t| t == p);
         let dir = Path::new("/d");
-        assert_eq!(free_name(dir, "notes.txt", exists), dir.join("notes.txt"));
+        assert_eq!(
+            free_name(dir, "notes.txt", exists),
+            Some(dir.join("notes.txt"))
+        );
         assert_eq!(
             free_name(dir, "report.txt", exists),
-            dir.join("report (2).txt")
+            Some(dir.join("report (2).txt"))
         );
-        assert_eq!(free_name(dir, "Makefile", exists), dir.join("Makefile (1)"));
+        assert_eq!(
+            free_name(dir, "Makefile", exists),
+            Some(dir.join("Makefile (1)"))
+        );
     }
 
     #[test]
@@ -175,5 +186,24 @@ mod tests {
         let old = modified(now - Duration::from_secs(400 * 24 * 3600), now);
         assert!(recent.contains(':'), "{recent}");
         assert!(!old.contains(':') && old.contains("202"), "{old}");
+    }
+
+    #[test]
+    fn a_name_the_server_sends_cannot_leave_the_downloads_folder() {
+        let dir = Path::new("/Users/me/Downloads");
+        let none = |_: &Path| false;
+        for hostile in [
+            "../.zshenv",
+            "/etc/passwd",
+            "a/../../b",
+            "..",
+            ".",
+            "",
+            "a\\b",
+            "a\0b",
+        ] {
+            assert_eq!(free_name(dir, hostile, none), None, "{hostile:?}");
+        }
+        assert_eq!(free_name(dir, "..hidden", none), Some(dir.join("..hidden")));
     }
 }
