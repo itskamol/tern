@@ -584,6 +584,7 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timed = tern_term::frame_stats::start(tern_term::frame_stats::Span::ShellRender);
         // Whatever held focus can disappear (a field hidden after sync, a closed form or tab);
         // with nothing focused gpui dispatches no keys at all, so the window takes it back.
         if window.focused(cx).is_none() {

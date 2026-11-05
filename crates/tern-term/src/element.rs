@@ -95,6 +95,7 @@ impl gpui::Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let _timed = crate::frame_stats::start(crate::frame_stats::Span::TermPrepaint);
         let theme = self.view.read(cx).terminal.read(cx).theme().clone();
         let mono = mono_font(&theme);
         let font_size = px(theme.font_size);
@@ -421,6 +422,16 @@ fn paint_box_row(
     }
 }
 
+/// How many cells of `row` can draw anything: the cells up to the last one that is not a plain
+/// space (an underlined or struck-through space draws a line). A row is mostly blanks to its
+/// right edge, and shaping them costs CoreText time for no ink; their backgrounds are quads of
+/// their own.
+fn ink_end(row: &[CellSnapshot]) -> usize {
+    row.iter()
+        .rposition(|c| !c.wide_spacer && ((c.ch != ' ' && !c.hidden) || c.underline || c.strikeout))
+        .map_or(0, |last| last + 1)
+}
+
 /// Shape one grid row into COLUMN-PINNED segments.
 ///
 /// A shaped line places glyphs by font advances, which only match the grid
@@ -428,7 +439,8 @@ fn paint_box_row(
 /// font fallback (arrows, emoji, CJK) has some other advance and would push
 /// the rest of the line out of the grid. So runs of ASCII shape together and
 /// every other glyph is its own segment pinned at its own column. Box-drawing
-/// cells are not shaped at all; they are returned for programmatic painting.
+/// cells are not shaped at all; they are returned for programmatic painting. Blank cells past
+/// the last inked one are not shaped.
 fn shape_row(
     row: &[CellSnapshot],
     theme: &TerminalTheme,
@@ -464,7 +476,7 @@ fn shape_row(
     let mut runs: Vec<TextRun> = Vec::new();
     let mut seg_col = 0usize;
 
-    for (col, cell) in row.iter().enumerate() {
+    for (col, cell) in row.iter().enumerate().take(ink_end(row)) {
         if cell.wide_spacer {
             continue;
         }
@@ -565,3 +577,7 @@ fn shape_row(
     );
     (segments, boxes)
 }
+
+#[cfg(test)]
+#[path = "element_tests.rs"]
+mod tests;

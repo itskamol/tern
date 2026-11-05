@@ -32,6 +32,24 @@ So the default scrollback is **5,000 lines**, configurable. A fresh tab pays onl
 
 That is 0.13% of a 60 fps frame, with no steady-state memory, so it stays (#3 closed wontfix).
 
+### Frame cost while a terminal streams (2026-11-05)
+
+Release build on an M-series Mac, no GPU and no window: `crates/tern-term/examples/frame_cost.rs`
+draws a 243×59 terminal through GPUI's `TestApp` with the real CoreText shaper. `TERN_FRAME_STATS=1`
+logs the same per-second figures from the app (`frame_stats`).
+
+| Frame | Before | After | What changed |
+| --- | --- | --- | --- |
+| Streaming, 30 new log lines a frame | 3.0 ms | 1.8 ms | rows shaped to their last glyph, not to the right edge |
+| Terminal idle, parent re-renders | 1.8 ms | 0.25 ms | the same, and the terminal a cached child |
+| Parse, mixed ANSI, 20 MiB in 64 KiB chunks | 110–140 MiB/s | unchanged | `parse_throughput` (ignored test) |
+| `window_fill` over a wallpaper | 6–47 µs a call, about seven calls a frame | once per change | `panel_alpha_cost` (ignored test) |
+
+Before the change a streaming frame was 57 µs of grid snapshot, 1.16 ms in `shape_line`, 0.22 ms
+building the runs, and the rest layout and painting; the snapshot and the parser are not where the
+time goes. The headless run cannot show GPU time (not measured at all) or the real `Shell::render`,
+which `TERN_FRAME_STATS=1` measures in the app.
+
 ## Budget
 
 Idle memory with one connected tab, release build: RSS from `scripts/measure-rss.sh` (30 s

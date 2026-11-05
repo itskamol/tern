@@ -93,6 +93,7 @@ fn main() {
         },
     };
     let _log_guard = init_logging();
+    tern_term::frame_stats::init();
     log_panics();
     let _app = tracing::info_span!("app", service = "tern", env = env()).entered();
     gpui_platform::application()

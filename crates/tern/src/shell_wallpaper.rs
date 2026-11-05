@@ -39,6 +39,9 @@ struct Want {
 struct Shown {
     want: Want,
     prepared: Prepared,
+    /// `window_fill` for the palette and default scheme it was worked out under. Kept with the
+    /// picture, so a new picture starts without it.
+    fill: wallpaper_panel::Memo<(Theme, Option<String>)>,
 }
 
 struct Fade {
@@ -138,7 +141,11 @@ impl Shell {
                     since: Instant::now(),
                 });
                 self.wp.error = None;
-                self.wp.shown = Some(Shown { want, prepared });
+                self.wp.shown = Some(Shown {
+                    want,
+                    prepared,
+                    fill: wallpaper_panel::Memo::default(),
+                });
             }
             Err(error) => {
                 tracing::warn!(error = %error, "wallpaper_failed");
@@ -198,6 +205,15 @@ impl Shell {
             return None;
         }
         let shown = self.wp.shown.as_ref()?;
+        // Called several times a frame and worked out from the palette, the default scheme and
+        // the picture alone, so it is remembered until one of them changes.
+        let scheme = self.scheme_name_for("");
+        if let Some(alpha) = shown
+            .fill
+            .recall(|(theme, name)| *theme == self.theme && name.as_deref() == scheme)
+        {
+            return Some(alpha);
+        }
         let t = &self.theme;
         let term = t.terminal(self.settings.terminal_font_size, self.scheme_for(""));
         // Secondary text is plain muted while the panels are see-through (`Theme::secondary`);
@@ -215,7 +231,7 @@ impl Shell {
             words(t, None),
             words(&t.on(term.background), Some(term.foreground)),
         );
-        Some(wallpaper_panel::panel_alpha(
+        let alpha = wallpaper_panel::panel_alpha(
             &shown.prepared.backdrop,
             &[
                 Panel {
@@ -227,7 +243,11 @@ impl Shell {
                     texts: &terminal_words,
                 },
             ],
-        ))
+        );
+        shown
+            .fill
+            .remember((self.theme, scheme.map(str::to_owned)), alpha);
+        Some(alpha)
     }
 
     /// `colour` at the panel opacity while the picture fills the window, else as it is.
