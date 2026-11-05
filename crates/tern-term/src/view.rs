@@ -216,6 +216,21 @@ impl TerminalView {
             return;
         }
         let mode = self.mode(cx);
+        // The alternate screen has no scrollback; the program there gets these keys.
+        if let Some(key) = scrollback_key(ks).filter(|_| !mode.contains(TermMode::ALT_SCREEN)) {
+            self.terminal.update(cx, |t, cx| {
+                let page = t.rows() as i32;
+                match key {
+                    ScrollbackKey::PageUp => t.scroll(page),
+                    ScrollbackKey::PageDown => t.scroll(-page),
+                    ScrollbackKey::Top => t.scroll(t.history_size() as i32),
+                    ScrollbackKey::Bottom => t.scroll_to_bottom(),
+                }
+                cx.notify();
+            });
+            cx.stop_propagation();
+            return;
+        }
         let bytes = keystroke_bytes(ks, mode, self.option_as_meta);
         if let Some(bytes) = bytes {
             self.send_input(bytes, cx);
@@ -704,3 +719,31 @@ mod cursor;
 mod find_links;
 use cursor::{BELL_FLASH_MS, BELL_PEAK_OPACITY};
 use find_links::{find_status, is_find_chord};
+
+/// Moving through the scrollback from the keyboard, as Terminal.app does.
+#[derive(Debug, PartialEq, Eq)]
+enum ScrollbackKey {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
+/// ⇧PageUp and ⇧PageDown move a page; ⌘Home and ⌘End (Ctrl+Shift+Home/End off macOS) go to
+/// the ends. Plain PageUp and Home still reach the remote.
+fn scrollback_key(ks: &gpui::Keystroke) -> Option<ScrollbackKey> {
+    let m = &ks.modifiers;
+    let ends = if cfg!(target_os = "macos") {
+        m.platform && !m.shift && !m.control && !m.alt
+    } else {
+        m.control && m.shift && !m.alt && !m.platform
+    };
+    let page = m.shift && !m.platform && !m.control && !m.alt;
+    match ks.key.as_str() {
+        "pageup" if page => Some(ScrollbackKey::PageUp),
+        "pagedown" if page => Some(ScrollbackKey::PageDown),
+        "home" if ends => Some(ScrollbackKey::Top),
+        "end" if ends => Some(ScrollbackKey::Bottom),
+        _ => None,
+    }
+}
