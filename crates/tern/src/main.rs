@@ -184,13 +184,13 @@ fn log_panics() {
                 .unwrap_or(0),
             env!("CARGO_PKG_VERSION"),
         );
-        if std::fs::create_dir_all(&dir).is_ok() {
+        if session_log::make_private(&dir).is_ok() {
             use std::io::Write as _;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dir.join("panic.log"))
-            {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            if let Ok(mut f) = options.open(dir.join("panic.log")) {
                 let _ = f.write_all(entry.as_bytes());
             }
         }
@@ -199,10 +199,10 @@ fn log_panics() {
     }));
 }
 
-/// Structured JSON logs on stderr, filtered by `TERN_LOG` (default `info`).
 /// Structured JSON logs on stderr and, so that a tern started from Finder or the Dock still
 /// leaves a record, in `tern.log` in `settings::log_dir` (daily files, a week kept). Filtered by
-/// `TERN_LOG` (default `info`). The returned guard flushes the file on exit.
+/// `TERN_LOG` (default `info`). The folder is the user's only (`session_log::make_private`).
+/// The returned guard flushes the file on exit.
 fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
@@ -211,7 +211,9 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
         .json()
         .with_current_span(true)
         .with_writer(std::io::stderr);
+    let mut not_private = None;
     let (file, guard) = match settings::log_dir().and_then(|dir| {
+        not_private = session_log::make_private(&dir).err();
         tracing_appender::rolling::Builder::new()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
             .filename_prefix("tern")
@@ -240,6 +242,9 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
         .with(stderr)
         .with(file)
         .init();
+    if let Some(e) = not_private {
+        tracing::warn!(error = %e, "log_dir_not_private");
+    }
     guard
 }
 

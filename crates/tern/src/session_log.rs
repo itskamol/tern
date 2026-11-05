@@ -15,6 +15,39 @@ pub fn directory() -> Option<PathBuf> {
     crate::settings::log_dir().map(|dir| dir.join("sessions"))
 }
 
+/// Creates the log folder `dir` (and any missing parent) readable by the user only, and takes
+/// back any looser mode it or the files directly in it already have: a log can name hosts and
+/// users, and a session log can show secrets. tracing's daily file cannot be given a mode of
+/// its own, so the folder is what keeps it private.
+///
+/// # Errors
+///
+/// When the folder cannot be created or its mode cannot be set.
+pub fn make_private(dir: &Path) -> io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        builder.mode(0o700);
+        builder.create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        for entry in std::fs::read_dir(dir)?.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            let wanted = if meta.is_dir() { 0o700 } else { 0o600 };
+            if meta.permissions().mode() & 0o077 != 0 {
+                let _ =
+                    std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(wanted));
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        builder.create(dir)
+    }
+}
+
 pub struct SessionLog {
     out: Stripper<BufWriter<File>>,
     path: PathBuf,
@@ -36,7 +69,7 @@ impl SessionLog {
     ///
     /// When the directory or file cannot be created.
     pub fn create(dir: &Path, alias: &str, now: SystemTime) -> io::Result<Self> {
-        std::fs::create_dir_all(dir)?;
+        make_private(dir)?;
         let stamp = timestamp(now);
         let path = dir.join(format!("{}-{stamp}.log", file_stem(alias)));
         let mut options = OpenOptions::new();
@@ -175,5 +208,24 @@ mod tests {
         let mode = std::fs::metadata(log.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         assert!(SessionLog::create(dir.path(), "prod", at(0)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_folder_is_made_private_and_takes_back_loose_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("Logs/tern");
+        make_private(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+
+        let old = dir.join("tern.2026-11-04.log");
+        std::fs::write(&old, "x").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_private(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&old), 0o600);
     }
 }

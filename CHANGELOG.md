@@ -32,6 +32,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- The log folder (`~/Library/Logs/tern`) is readable by you only, and an older log or folder another user could read is made private at launch; `panic.log` is created 0600 like session logs. App logs name hosts and users.
 - A keyboard-interactive login (a code or OTP prompt) shows the server's name, instructions and prompt text with control characters escaped (`^[`), so a server cannot move the cursor, retitle the tab, write the clipboard or draw a fake prompt there.
 - A saved connection's ProxyCommand runs only once this Mac has approved it, as password commands already did: `hosts.json` also arrives by sync and import, and its ProxyCommand ran through `sh -c` without a word. The first connect asks in the terminal; one saved from the form, or imported from this Mac's ~/.ssh/config, counts as approved, and a `~/.ssh/config` host runs its own as ssh does.
 - Saving a password to the vault no longer makes it look locked: the open vault used to be taken out while scrypt ran (about a second, longer during a sync), so another tab asked for the passphrase again and an edit made then could be lost. Every write now goes through one ordered path, and a sync works on a copy, keeping a change made here while it ran. Two saves at once (two tern processes) no longer share a temp file, which could leave a vault that does not open.
