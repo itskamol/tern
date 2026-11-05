@@ -24,6 +24,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- Settings is readable under a wallpaper with a dark terminal scheme in the light appearance: the page sat on the active tab's scheme background, a near-black veil over the picture that washed out its headings and descriptions. It now sits on the app's own surface, like the sidebar.
 - Text fields edit by word and line as other macOS fields do: ⌥←/→ moves by word, ⇧⌥←/→ and ⇧⌘←/→ select, ⌘←/→ go to the ends, ⌥⌫ and ⌘⌫ delete, a double click selects a word and a triple click everything. Masked fields count as one word.
 - The sidebar behaves like Finder's and Mail's: pointing at a host or a group changes nothing (no hover fill, no "..." button, arrow cursor), only the active or keyboard-selected host is filled, and a host's actions are in the menu a right-click or Control-click opens. The address tooltip shows only where the row cuts the address short.
 - Keychain unlock no longer reads the Keychain or runs scrypt at launch: the Keychain is asked once, the first time tern needs the vault, and a refusal falls back to the prompt without asking again (#91).

@@ -149,9 +149,11 @@ impl Shell {
                 nav,
             ))
             // The page is the body's main tile, so it carries the same tint as every other
-            // view of it over a wallpaper.
+            // view of it over a wallpaper. Its fill is the shell colour, not the active tab's
+            // scheme: the page's text is in the app palette, and a dark scheme under the light
+            // appearance would leave it unreadable.
             .child(
-                self.main_tile(self.panel_background()).child(
+                self.main_tile(self.theme.shell).child(
                     div()
                         .id("settings-scroll")
                         .flex_1()
