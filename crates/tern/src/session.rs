@@ -69,6 +69,9 @@ struct Attempt {
     command_tried: bool,
     /// Secrets the user was already asked for on this connection.
     asked: Vec<tern_vault::Key>,
+    /// The vault is being opened or written for tern's own question; its note ("Saved in the
+    /// vault.") is still to come, so remote output keeps waiting too.
+    vault_busy: bool,
 }
 
 pub struct Session {
@@ -96,6 +99,8 @@ pub struct Session {
     /// quiet moment so it is not interleaved with the login banner.
     last_output: std::time::Instant,
     ends_line: bool,
+    /// Remote output that arrived while tern's own question was open (see [`Held`]).
+    held: Held,
     pub view: Entity<TerminalView>,
     terminal: Entity<Terminal>,
     link: Link,
@@ -161,6 +166,7 @@ impl Session {
                 fill_hinted: false,
                 last_output: std::time::Instant::now(),
                 ends_line: true,
+                held: Held::default(),
                 view,
                 terminal,
                 link,
@@ -380,8 +386,12 @@ impl Session {
                 self.ends_line = bytes.last().is_some_and(|b| *b == b'\n');
                 self.output_seq += 1;
                 self.record(&bytes);
-                self.show(&bytes, cx);
-                self.offer_fill_hint(cx);
+                if !self.holding() {
+                    self.show(&bytes, cx);
+                    self.offer_fill_hint(cx);
+                } else if let Some(all) = self.held.hold(&bytes) {
+                    self.show(&all, cx);
+                }
             }
             SessionEvent::Prompt(prompt) => self.on_prompt(prompt, cx),
             SessionEvent::Connected => {
@@ -400,6 +410,8 @@ impl Session {
                 self.forget_forwards();
                 self.ended_at = Some(std::time::Instant::now());
                 self.attempt = Attempt::default();
+                let held = self.held.take();
+                self.show(&held, cx);
                 let end = match self.life.closed(&reason, Instant::now()) {
                     Next::RetryAt(at) => return self.schedule_retry(at, cx),
                     Next::Stop(end) => end,
@@ -514,6 +526,7 @@ impl Session {
                     self.show(&step.display, cx);
                     if step.done {
                         self.answered(answer, cx);
+                        self.release_held(cx);
                     }
                 }
                 None => self.send(bytes.clone()),
@@ -581,6 +594,51 @@ impl Session {
     fn show(&self, bytes: &[u8], cx: &mut Context<Self>) {
         self.terminal.update(cx, |t, cx| t.feed(bytes, cx));
     }
+
+    /// tern is asking, or finishing what an answer started, so remote output waits.
+    fn holding(&self) -> bool {
+        self.attempt.flow.is_some() || self.attempt.vault_busy
+    }
+
+    /// tern's question is over (and nothing it started is still running): what the remote
+    /// wrote meanwhile.
+    fn release_held(&mut self, cx: &mut Context<Self>) {
+        if self.holding() {
+            return;
+        }
+        let held = self.held.take();
+        if !held.is_empty() {
+            self.show(&held, cx);
+            self.offer_fill_hint(cx);
+        }
+    }
+}
+
+/// The most remote output kept back while tern asks; a remote that keeps writing past it is
+/// shown, mixed with the question, rather than buffered without end.
+const HELD_MAX: usize = 64 * 1024;
+
+/// Remote output kept off the screen while tern asks a question of its own, such as the save
+/// offer, so a shell prompt that arrives late is not drawn into the question's line.
+#[derive(Default)]
+struct Held(Vec<u8>);
+
+impl Held {
+    /// Keeps `bytes`, or returns everything kept so far plus `bytes` when that would pass
+    /// [`HELD_MAX`].
+    fn hold(&mut self, bytes: &[u8]) -> Option<Vec<u8>> {
+        if self.0.len() + bytes.len() > HELD_MAX {
+            let mut all = std::mem::take(&mut self.0);
+            all.extend_from_slice(bytes);
+            return Some(all);
+        }
+        self.0.extend_from_slice(bytes);
+        None
+    }
+
+    fn take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
 }
 
 #[path = "session_actions.rs"]
@@ -610,8 +668,29 @@ fn wants_reconnect(input: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{forget_key_command, wants_reconnect};
+    use super::{HELD_MAX, Held, forget_key_command, wants_reconnect};
     use tern_ssh::ConnectSpec;
+
+    #[test]
+    fn held_output_comes_back_whole_and_in_order() {
+        let mut held = Held::default();
+        assert_eq!(held.hold(b"Last login: today\r\n"), None);
+        assert_eq!(held.hold(b"user@host:~$ "), None);
+        assert_eq!(held.take(), b"Last login: today\r\nuser@host:~$ ");
+        assert!(held.take().is_empty());
+    }
+
+    #[test]
+    fn held_output_past_the_bound_is_let_through_with_what_was_kept() {
+        let mut held = Held::default();
+        let kept = vec![b'a'; HELD_MAX - 1];
+        assert_eq!(held.hold(&kept), None);
+        assert_eq!(held.hold(b"b"), None);
+        let all = held.hold(b"c").unwrap_or_default();
+        assert_eq!(all.len(), HELD_MAX + 1);
+        assert!(all.ends_with(b"abc"));
+        assert!(held.take().is_empty());
+    }
 
     #[test]
     fn forget_key_command_uses_openssh_host_forms() {

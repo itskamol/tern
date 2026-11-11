@@ -53,11 +53,16 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 - Settings is readable under a wallpaper with a dark terminal scheme in the light appearance: the page sat on the active tab's scheme background, a near-black veil over the picture that washed out its headings and descriptions. It now sits on the app's own surface, like the sidebar.
 - Text fields edit by word and line as other macOS fields do: ⌥←/→ moves by word, ⇧⌥←/→ and ⇧⌘←/→ select, ⌘←/→ go to the ends, ⌥⌫ and ⌘⌫ delete, a double click selects a word and a triple click everything. Masked fields count as one word.
 - The sidebar behaves like Finder's and Mail's: pointing at a host or a group changes nothing (no hover fill, no "..." button, arrow cursor), only the active or keyboard-selected host is filled, and a host's actions are in the menu a right-click or Control-click opens. The address tooltip shows only where the row cuts the address short.
+- The offer to save a password in the vault no longer shares its line with a shell prompt that arrives late: what the server writes while tern asks is shown once the question is answered (#105).
 - Keychain unlock no longer reads the Keychain or runs scrypt at launch: the Keychain is asked once, the first time tern needs the vault, and a refusal falls back to the prompt without asking again (#91).
 - Clicking a session tab while Settings is open now closes Settings and shows the session, with typing going to its terminal (#63).
 - SFTP panel file sizes just under a unit boundary round up to the next unit (e.g. `1.0 MB` instead of `1024 KB`) and sizes just under 10 omit decimals (`10 KB` instead of `10.0 KB`) (#39).
 - Plain-text `ftps://` links are now detected and clickable in terminal output (#40).
 - Secondary text (sidebar host addresses and section labels) keeps 4.5:1 contrast in both themes, and tern follows macOS Increase contrast (full-strength secondary text, stronger borders) and Reduce transparency (opaque window and panels, no wallpaper showing through).
+
+### Security
+
+- Dependencies updated past RUSTSEC-2026-0383 (`webpki-root-certs` trusted distrusted emSign intermediates), RUSTSEC-2026-0385 and -0387 (timing leaks in `ctutils` and `crypto-bigint`) and RUSTSEC-2026-0386 (`tokio` `AsyncFd` I/O safety), and off the yanked `async-executor` 1.14.0 and `crypto-bigint` 0.7.5.
 
 ## [0.1.3] - 2026-10-11
 

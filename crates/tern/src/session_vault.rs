@@ -117,7 +117,10 @@ impl Session {
         let opening = Keeper::need_vault(cx, wake);
         let after = slot.borrow_mut().take();
         match (opening, after) {
-            (Opening::Waiting, _) => self.note("Asking the Keychain…", cx),
+            (Opening::Waiting, _) => {
+                self.attempt.vault_busy = true;
+                self.note("Asking the Keychain…", cx);
+            }
             (Opening::Open, after) => self.keychain_resolved(after.unwrap_or_default(), cx),
             (Opening::Ask(ask), after) => self.ask_for(ask, after.unwrap_or_default(), cx),
         }
@@ -144,6 +147,7 @@ impl Session {
         }: After,
         cx: &mut Context<Self>,
     ) {
+        self.attempt.vault_busy = false;
         if Keeper::locked(cx) {
             return self.ask_unlock(
                 After {
@@ -158,6 +162,7 @@ impl Session {
             self.store(key, secret, cx);
         }
         self.resume(prompt, fill, true, cx);
+        self.release_held(cx);
     }
 
     fn ask_passphrase(&mut self, after: After, cx: &mut Context<Self>) {
@@ -313,6 +318,7 @@ impl Session {
 
     /// Opens the vault off the UI thread, then does what was waiting for it.
     fn unlock(&mut self, typed: Typed, after: After, cx: &mut Context<Self>) {
+        self.attempt.vault_busy = true;
         self.note("Unlocking the vault…", cx);
         let work = Keeper::try_unlock(typed, cx);
         cx.spawn(async move |this, cx| {
@@ -324,6 +330,7 @@ impl Session {
 
     /// The vault opened, or it did not and the person is asked again or let through.
     fn unlocked(&mut self, tried: Tried, after: After, cx: &mut Context<Self>) {
+        self.attempt.vault_busy = false;
         let opened = match tried {
             Tried::Opened => true,
             Tried::Again { ask, message } => {
@@ -344,6 +351,7 @@ impl Session {
             self.store(key, secret, cx);
         }
         self.resume(prompt, fill, opened, cx);
+        self.release_held(cx);
     }
 
     /// What waited for the vault goes on. The connection dials, with the keys if the vault
@@ -376,14 +384,19 @@ impl Session {
         let Some(task) = Keeper::store(key, secret, cx) else {
             return self.note("Not saved: the vault is locked.", cx);
         };
+        self.attempt.vault_busy = true;
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |s, cx| match result {
-                Ok(()) => s.note("Saved in the vault.", cx),
-                Err(e) => {
-                    tracing::warn!(error = %e, "vault_save_failed");
-                    s.note(&format!("Could not save the vault: {e}"), cx);
+            let _ = this.update(cx, |s, cx| {
+                match result {
+                    Ok(()) => s.note("Saved in the vault.", cx),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "vault_save_failed");
+                        s.note(&format!("Could not save the vault: {e}"), cx);
+                    }
                 }
+                s.attempt.vault_busy = false;
+                s.release_held(cx);
             });
         })
         .detach();
