@@ -35,6 +35,14 @@ actions!(
         NewConnection,
         SplitRight,
         SplitDown,
+        SplitRightWithHost,
+        SplitDownWithHost,
+        ResizePaneLeft,
+        ResizePaneRight,
+        ResizePaneUp,
+        ResizePaneDown,
+        EqualizePanes,
+        ClosePane,
         FocusPaneLeft,
         FocusPaneRight,
         FocusPaneUp,
@@ -63,6 +71,8 @@ mod menu;
 mod open;
 #[path = "shell_settings.rs"]
 mod settings_ui;
+#[path = "shell_split.rs"]
+mod split_ui;
 #[path = "shell_sync.rs"]
 mod sync_ui;
 #[path = "shell_tabs.rs"]
@@ -139,6 +149,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
             let mut shell = Shell {
                 focus: cx.focus_handle(),
                 tabs: TabSet::new(Box::new(DiskTabs), settings.reopen_tabs),
+                drop_hint: None,
                 settings,
                 theme,
                 hosts: Vec::new(),
@@ -234,6 +245,8 @@ pub struct Shell {
     form: Option<connections_ui::ConnectionForm>,
     confirm_delete: Option<usize>,
     tabs: TabSet<Pane>,
+    /// A host being dragged over a pane: the pane and the side it would take.
+    drop_hint: Option<(PaneId, split::Direction)>,
     /// The tab whose title is being edited in the strip.
     renaming: Option<tabs_ui::Rename>,
     /// Input typed in one tab also going to others, and the list that picks them.
@@ -285,6 +298,8 @@ fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
 /// One terminal in a tab: a connection.
 struct Pane {
     id: PaneId,
+    /// The host this pane is connected to; a split tab's title follows the focused pane's.
+    host: String,
     session: Entity<Session>,
     _repaint: Subscription,
     _bell: Subscription,
@@ -296,6 +311,10 @@ type Tab = crate::tab_set::Tab<Pane>;
 impl Paned for Pane {
     fn pane_id(&self) -> PaneId {
         self.id
+    }
+
+    fn host(&self) -> &str {
+        &self.host
     }
 }
 
@@ -437,6 +456,8 @@ impl Shell {
             .enumerate()
             .map(|(ix, tab)| TabInfo {
                 alias: tab.alias.clone(),
+                host: tab.front().host.clone(),
+                others: tab.panes().len() - 1,
                 title: tab.title().map(str::to_owned),
                 logging: tab.session().read(cx).is_logging(),
                 broadcast: self.is_broadcasting(tab.id),
@@ -622,24 +643,7 @@ impl Render for Shell {
             .font_family(UI_FONT)
             .text_color(t.text)
             .on_action(cx.listener(|s, _: &CloseTab, w, cx| s.close_pane_or_tab(w, cx)))
-            .on_action(
-                cx.listener(|s, _: &SplitRight, w, cx| s.split_pane(split::Axis::Row, w, cx)),
-            )
-            .on_action(
-                cx.listener(|s, _: &SplitDown, w, cx| s.split_pane(split::Axis::Column, w, cx)),
-            )
-            .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| {
-                s.move_pane_focus(split::Direction::Left, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| {
-                s.move_pane_focus(split::Direction::Right, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneUp, w, cx| {
-                s.move_pane_focus(split::Direction::Up, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneDown, w, cx| {
-                s.move_pane_focus(split::Direction::Down, w, cx)
-            }))
+            .map(|el| split_ui::pane_actions(el, cx))
             .on_action(cx.listener(|s, _: &NextTab, w, cx| {
                 s.show_tab(tabs::step(s.tabs.active(), s.tabs.len(), 1), w, cx)
             }))

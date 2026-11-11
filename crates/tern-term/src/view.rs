@@ -63,6 +63,10 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     geometry: Option<GridGeometry>,
     resize_task: Option<Task<()>>,
+    /// The remote is not told of size changes until released (a divider is being dragged).
+    resize_held: bool,
+    /// A size change happened while held: the remote still has to hear of it.
+    resize_owed: bool,
     selection_drag: Option<SelectionDrag>,
     selection_scroll_task: Option<Task<()>>,
     scroll_remainder: f32,
@@ -133,6 +137,8 @@ impl TerminalView {
             focus_handle,
             geometry: None,
             resize_task: None,
+            resize_held: false,
+            resize_owed: false,
             selection_drag: None,
             selection_scroll_task: None,
             scroll_remainder: 0.0,
@@ -181,39 +187,6 @@ impl TerminalView {
 
     fn mode(&self, cx: &App) -> TermMode {
         self.terminal.read(cx).mode()
-    }
-
-    /// Called from element prepaint with the frame's measured grid. Resizes
-    /// the local grid immediately and debounces the remote notification.
-    pub(crate) fn on_grid_metrics(&mut self, geometry: GridGeometry, cx: &mut Context<Self>) {
-        #[cfg(test)]
-        {
-            self.prepaints += 1;
-        }
-        self.geometry = Some(geometry);
-        let changed = self.terminal.update(cx, |t, _| {
-            t.resize(
-                geometry.cols,
-                geometry.rows,
-                geometry.cell_w,
-                geometry.line_h,
-            )
-        });
-        if !changed {
-            return;
-        }
-        self.resize_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(RESIZE_DEBOUNCE_MS))
-                .await;
-            // Read the current size: later prepaints may have resized again
-            // inside the debounce window.
-            let _ = this.update(cx, |view, cx| {
-                view.terminal.update(cx, |t, cx| t.notify_remote_resize(cx));
-            });
-        }));
-        // No cx.notify(): this runs during prepaint, which already paints the
-        // resized grid.
     }
 
     // ---- keyboard ----
@@ -762,6 +735,7 @@ mod ime_tests;
 mod cursor;
 mod find_links;
 mod ime;
+mod resize;
 use cursor::{BELL_FLASH_MS, BELL_PEAK_OPACITY};
 use find_links::{find_status, is_find_chord};
 use ime::Ime;

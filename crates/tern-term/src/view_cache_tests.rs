@@ -256,3 +256,43 @@ fn a_program_sets_the_clipboard_only_while_allowed() {
         Some("hello")
     );
 }
+
+#[test]
+fn a_held_resize_tells_the_remote_once_on_release() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut rig = Rig::new();
+    let heard = Rc::new(Cell::new(0));
+    let _watch = rig.app.update(|cx| {
+        let heard = heard.clone();
+        cx.subscribe(&rig.terminal, move |_, event: &TerminalEvent, _| {
+            if matches!(event, TerminalEvent::Resized { .. }) {
+                heard.set(heard.get() + 1);
+            }
+        })
+    });
+    let at = |cols, rows| GridGeometry {
+        origin: gpui::point(px(0.), px(0.)),
+        cell_w: 8.0,
+        line_h: 16.0,
+        cols,
+        rows,
+    };
+    let view = rig.view.clone();
+    rig.app
+        .update_entity(&view, |v, cx| v.hold_remote_resize(true, cx));
+    // The panes pass through several sizes while the divider moves.
+    for cols in [70, 60, 50] {
+        rig.app
+            .update_entity(&view, |v, cx| v.on_grid_metrics(at(cols, 24), cx));
+    }
+    rig.app.run_until_parked();
+    assert_eq!(heard.get(), 0, "nothing is sent while the divider is held");
+    rig.app
+        .update_entity(&view, |v, cx| v.hold_remote_resize(false, cx));
+    assert_eq!(heard.get(), 1, "one size is sent on release");
+    rig.app
+        .update_entity(&view, |v, cx| v.hold_remote_resize(false, cx));
+    assert_eq!(heard.get(), 1, "a release with nothing owed sends nothing");
+}
