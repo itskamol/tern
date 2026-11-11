@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
-//! The lock the OS signals ask for (`lock_on_sleep`), against a keeper over a temp vault file.
+//! Opening and locking the keeper's vault (`need_vault`, `try_unlock`, and the lock the OS
+//! signals ask for), against a keeper over a temp vault file.
 use tern_ssh::SecretString;
 use tern_vault::Vault;
 
@@ -103,4 +104,76 @@ fn a_keychain_read_running_when_the_mac_sleeps_does_not_reopen_the_vault() {
     });
     assert!(!has(&mut app, "a"));
     assert!(ran.get(), "the waiter ran and saw the vault locked");
+}
+
+/// Runs `try_unlock` to the end and returns what it said.
+fn try_unlock(app: &mut gpui::TestApp, typed: Typed) -> Tried {
+    let said = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = said.clone();
+    app.update(|cx| {
+        let task = Keeper::try_unlock(typed, cx);
+        cx.spawn(async move |_| *slot.borrow_mut() = Some(task.await))
+            .detach();
+    });
+    app.run_until_parked();
+    said.borrow_mut().take().unwrap()
+}
+
+fn passphrase(p: &str) -> Typed {
+    Typed::Passphrase(SecretString::from(p.to_owned()))
+}
+
+#[test]
+fn a_need_asks_for_the_pin_while_one_is_set_else_the_passphrase() {
+    let (mut app, dir) = keeper(None);
+    vault_with("a").save(&dir.path().join("vault.age")).unwrap();
+    let need = |app: &mut gpui::TestApp| app.update(|cx| Keeper::need_vault(cx, |_| {}));
+    assert_eq!(need(&mut app), Opening::Ask(Ask::Passphrase));
+    app.update(|cx| cx.global_mut::<Keeper>().pin = true);
+    assert_eq!(need(&mut app), Opening::Ask(Ask::Pin));
+    // A wiped PIN is forgotten: the next need goes straight to the passphrase.
+    app.update(|cx| Keeper::unlock_done(vault_pin::Outcome::Wiped, 0, cx));
+    assert_eq!(need(&mut app), Opening::Ask(Ask::Passphrase));
+    app.update(|cx| Keeper::adopt(vault_with("a"), cx));
+    assert_eq!(need(&mut app), Opening::Open);
+}
+
+#[test]
+fn a_typed_passphrase_opens_the_vault_for_every_tab() {
+    let (mut app, dir) = keeper(None);
+    vault_with("a").save(&dir.path().join("vault.age")).unwrap();
+    assert_eq!(
+        try_unlock(&mut app, passphrase("wrong")),
+        Tried::Failed("Wrong vault passphrase.".into())
+    );
+    assert!(!has(&mut app, "a"));
+    assert_eq!(try_unlock(&mut app, passphrase("p")), Tried::Opened);
+    assert!(has(&mut app, "a"));
+}
+
+/// Another tab opened the vault and saved to it while this unlock ran: the open one stays.
+#[test]
+fn an_unlock_never_replaces_a_vault_opened_meanwhile() {
+    let (mut app, dir) = keeper(None);
+    vault_with("a").save(&dir.path().join("vault.age")).unwrap();
+    app.update(|cx| Keeper::adopt(vault_with("typed-elsewhere"), cx));
+    assert_eq!(try_unlock(&mut app, passphrase("p")), Tried::Opened);
+    assert!(has(&mut app, "typed-elsewhere") && !has(&mut app, "a"));
+}
+
+#[test]
+fn an_unlock_that_outlives_a_lock_leaves_the_vault_shut() {
+    let (mut app, dir) = keeper(None);
+    vault_with("a").save(&dir.path().join("vault.age")).unwrap();
+    let said = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = said.clone();
+    app.update(|cx| {
+        let task = Keeper::try_unlock(passphrase("p"), cx);
+        Keeper::lock(cx);
+        cx.spawn(async move |_| *slot.borrow_mut() = Some(task.await))
+            .detach();
+    });
+    app.run_until_parked();
+    assert!(matches!(said.borrow().as_ref(), Some(Tried::Failed(_))));
+    assert!(!has(&mut app, "a"));
 }

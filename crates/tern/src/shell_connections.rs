@@ -9,11 +9,11 @@ use gpui::{
     Subscription, Window, anchored, deferred, div, point, px,
 };
 use tern_ssh::SecretString;
-use tern_vault::{Key, Vault, VaultError};
+use tern_vault::{Key, Vault};
 
 use super::{Shell, Toast, ToastKind};
 use crate::connections::{self, Connection, DEFAULT_KEEP_ALIVE, Draft};
-use crate::keeper::Keeper;
+use crate::keeper::{Keeper, Tried, Typed};
 use crate::sidebar;
 use crate::text_input::{InputColors, TextInput};
 use crate::theme::Theme;
@@ -425,24 +425,22 @@ impl Shell {
         vault_pass: SecretString,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = Keeper::path(cx) else {
-            return;
+        // A locked vault opens with the passphrase typed in the form; with no vault yet, that
+        // passphrase starts one.
+        let unlocking = if Keeper::locked(cx) {
+            Some(Keeper::try_unlock(Typed::Passphrase(vault_pass), cx))
+        } else {
+            if !Keeper::exists(cx) {
+                Keeper::adopt(Vault::new(vault_pass), cx);
+            }
+            None
         };
-        let opening = (Keeper::locked(cx) || !Keeper::exists(cx)).then(|| {
-            let exists = path.exists();
-            cx.background_spawn(async move {
-                if exists {
-                    Vault::unlock(&path, vault_pass)
-                } else {
-                    Ok(Vault::new(vault_pass))
-                }
-            })
-        });
         cx.spawn(async move |this, cx| {
-            let opened = match opening {
-                Some(task) => task.await.map(|vault| {
-                    cx.update(|cx| Keeper::adopt(vault, cx));
-                }),
+            let opened = match unlocking {
+                Some(task) => match task.await {
+                    Tried::Opened => Ok(()),
+                    Tried::Again { message, .. } | Tried::Failed(message) => Err(message),
+                },
                 None => Ok(()),
             };
             let result = match opened {
@@ -451,10 +449,9 @@ impl Shell {
                     Ok(None) => Err("Vault: it was locked before the password was saved.".into()),
                     Err(_) => return,
                 },
-                Err(VaultError::WrongPassphrase) => Err(
-                    "Wrong vault passphrase. The connection is saved; the password is not.".into(),
-                ),
-                Err(other) => Err(format!("Vault: {other}")),
+                Err(message) => Err(format!(
+                    "{message} The connection is saved; the password is not."
+                )),
             };
             let _ = this.update_in(cx, |shell, window, cx| match result {
                 Ok(()) => {

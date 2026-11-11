@@ -12,10 +12,9 @@ use tern_vault::keys::{self, KeyInfo};
 use tern_vault::{ExposeSecret, Key, Vault, VaultError};
 
 use super::{Shell, Toast, ToastKind};
-use crate::keeper::{self, Keeper};
+use crate::keeper::{self, Ask, Keeper, Tried, Typed};
 use crate::lock_on_sleep::{self, Cause};
 use crate::text_input::{InputColors, TextInput};
-use crate::vault_pin;
 
 /// How often the idle lock looks at the clock.
 const IDLE_CHECK: Duration = Duration::from_secs(10);
@@ -150,7 +149,7 @@ impl Shell {
     /// Keychain's one try this run. The fields show as before when it cannot open the vault.
     pub(super) fn unlock_from_keychain(&mut self, cx: &mut Context<Self>) {
         let this = cx.weak_entity();
-        Keeper::keychain_then(cx, move |cx| {
+        let _ = Keeper::need_vault(cx, move |cx| {
             let _ = this.update(cx, |_, cx| cx.notify());
         });
     }
@@ -170,83 +169,54 @@ impl Shell {
 
     // ---- unlock / create / lock -------------------------------------------------------
 
+    /// Settings' Unlock row: the PIN while one is set (unless the person chose the passphrase),
+    /// else the passphrase, tried off the UI thread.
     pub(super) fn unlock_vault(&mut self, cx: &mut Context<Self>) {
-        let (Some(path), Some(ui)) = (Keeper::path(cx), self.vault_ui.as_mut()) else {
+        let pin_set = Keeper::pin_set(cx);
+        let Some(ui) = self.vault_ui.as_mut() else {
             return;
         };
         if ui.busy {
             return;
         }
-        if Keeper::pin_set(cx) && !ui.use_passphrase {
-            return self.unlock_with_pin(cx);
-        }
-        let typed = ui.unlock.read(cx).text().to_owned();
-        if typed.is_empty() {
-            return self.vault_message(false, "Enter the vault passphrase.", cx);
-        }
-        ui.busy = true;
-        ui.message = None;
-        let work = cx.background_spawn(async move { Vault::unlock(&path, secret(&typed)) });
-        cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let _ = this.update(cx, |s, cx| {
-                if let Some(ui) = s.vault_ui.as_mut() {
-                    ui.busy = false;
-                }
-                match result {
-                    Ok(vault) => {
-                        Keeper::put(vault, cx);
-                        if let Some(ui) = &s.vault_ui {
-                            let input = ui.unlock.clone();
-                            s.clear_inputs(&[&input], cx);
-                        }
-                        s.notify_toast(ToastKind::Positive, "Vault unlocked", cx);
-                    }
-                    Err(VaultError::WrongPassphrase) => {
-                        s.vault_message(false, "Wrong vault passphrase.", cx)
-                    }
-                    Err(e) => s.vault_message(false, format!("Vault unavailable: {e}"), cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Settings' Unlock row while a PIN is set: the PIN first, off the UI thread.
-    fn unlock_with_pin(&mut self, cx: &mut Context<Self>) {
-        let Some(ui) = self.vault_ui.as_mut() else {
-            return;
+        let (input, typed) = if pin_set && !ui.use_passphrase {
+            let pin = ui.pin.read(cx).text().to_owned();
+            if pin.is_empty() {
+                return self.vault_message(false, "Enter the vault PIN.", cx);
+            }
+            (ui.pin.clone(), Typed::Pin(pin))
+        } else {
+            let typed = ui.unlock.read(cx).text().to_owned();
+            if typed.is_empty() {
+                return self.vault_message(false, "Enter the vault passphrase.", cx);
+            }
+            (ui.unlock.clone(), Typed::Passphrase(secret(&typed)))
         };
-        let pin = ui.pin.read(cx).text().to_owned();
-        if pin.is_empty() {
-            return self.vault_message(false, "Enter the vault PIN.", cx);
-        }
         ui.busy = true;
         ui.message = None;
-        let work = Keeper::pin_unlock(pin, cx);
+        let work = Keeper::try_unlock(typed, cx);
         cx.spawn(async move |this, cx| {
-            let outcome = work.await;
+            let tried = work.await;
             let _ = this.update(cx, |s, cx| {
-                let off = !matches!(
-                    outcome,
-                    vault_pin::Outcome::Opened(_) | vault_pin::Outcome::Wrong { .. }
-                );
-                let message = Keeper::pin_done(outcome, cx);
                 if let Some(ui) = s.vault_ui.as_mut() {
                     ui.busy = false;
                     // A PIN that is off leaves only the passphrase to ask for.
-                    ui.use_passphrase |= off;
-                }
-                match message {
-                    None => {
-                        if let Some(ui) = &s.vault_ui {
-                            let input = ui.pin.clone();
-                            s.clear_inputs(&[&input], cx);
+                    ui.use_passphrase |= matches!(
+                        tried,
+                        Tried::Again {
+                            ask: Ask::Passphrase,
+                            ..
                         }
+                    );
+                }
+                match tried {
+                    Tried::Opened => {
+                        s.clear_inputs(&[&input], cx);
                         s.notify_toast(ToastKind::Positive, "Vault unlocked", cx);
                     }
-                    Some(text) => s.vault_message(false, text, cx),
+                    Tried::Again { message, .. } | Tried::Failed(message) => {
+                        s.vault_message(false, message, cx);
+                    }
                 }
                 cx.notify();
             });
