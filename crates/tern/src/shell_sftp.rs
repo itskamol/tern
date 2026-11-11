@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use gpui::{AppContext, Context, Entity, FocusHandle, Focusable, Window, actions};
-use tern_ssh::{Progress, Sftp, SftpEntry, SftpError};
+use tern_ssh::{FileEntry, Progress, Sftp, SftpError};
 
 use super::broadcast_ui::TabId;
 use super::{Shell, Toast, ToastKind};
@@ -33,7 +33,7 @@ pub(super) struct SftpPanel {
     pub(super) tab: TabId,
     sftp: Option<Sftp>,
     pub(super) cwd: String,
-    pub(super) entries: Vec<SftpEntry>,
+    pub(super) entries: Vec<FileEntry>,
     pub(super) state: State,
     pub(super) selected: Option<usize>,
     pub(super) path: Entity<TextInput>,
@@ -263,7 +263,7 @@ impl Shell {
         self.sftp_download(entry, cx);
     }
 
-    fn sftp_download(&mut self, entry: SftpEntry, cx: &mut Context<Self>) {
+    fn sftp_download(&mut self, entry: FileEntry, cx: &mut Context<Self>) {
         let Some(panel) = self.panels.sftp.as_mut() else {
             return;
         };
