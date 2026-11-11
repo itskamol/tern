@@ -248,7 +248,7 @@ impl FilesView {
             return;
         };
         match access.session.clone() {
-            Some(handle) => self.open_sftp(side, handle, access.label, false, cx),
+            Some(handle) => self.open_sftp(side, handle, access.label, cx),
             None => self.login(side, access, cx),
         }
     }
@@ -263,7 +263,7 @@ impl FilesView {
             match event {
                 LoginEvent::Connected => {
                     if let Some(handle) = login.read(cx).handle() {
-                        this.open_sftp(side, handle, label.clone(), true, cx);
+                        this.open_sftp(side, handle, label.clone(), cx);
                     }
                 }
                 LoginEvent::Dropped(why) => {
@@ -279,14 +279,13 @@ impl FilesView {
         cx.notify();
     }
 
-    /// Opens SFTP on `handle`. A connection the panel made itself rides along with its source,
-    /// so it closes when the panel and every copy using it are done.
+    /// Opens SFTP on `handle`. The connection rides along with its source, whoever opened it, so
+    /// a copy in progress keeps it open after the panel or the terminal tab is closed.
     fn open_sftp(
         &mut self,
         side: usize,
         handle: SessionHandle,
         label: String,
-        owned: bool,
         cx: &mut Context<Self>,
     ) {
         let generation = self.panels[side].generation;
@@ -304,10 +303,7 @@ impl FilesView {
                 }
                 match opened {
                     Ok(Ok(sftp)) => {
-                        let mut files = SftpFiles::new(label, sftp);
-                        if owned {
-                            files = files.keeping(handle);
-                        }
+                        let files = SftpFiles::new(label, sftp).keeping(handle);
                         p.source = Some(Arc::new(files));
                         this.go_home(side, cx);
                     }

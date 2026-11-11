@@ -1,6 +1,7 @@
 //! A host panel's own connection, with the login questions a session asks in its terminal, asked
-//! in the panel instead: the host key, the password or key passphrase, the vault passphrase when
-//! the vault is locked, and an offer to save a typed password. The answers are the same as a
+//! in the panel instead: a saved ProxyCommand and password command not yet approved on this Mac,
+//! the host key, the password or key passphrase, the vault passphrase when the vault is locked
+//! (or a new one, when the offer to save a typed password finds no vault). The answers are the same as a
 //! session's (see `session_vault.rs`); only where they are shown differs. A changed host key is
 //! a hard stop here too: the connection ends with the reason and nothing offers to go on.
 
@@ -10,12 +11,12 @@ use gpui::{AppContext, Context, Entity, EventEmitter, Task};
 use tern_ssh::oneshot::Sender;
 use tern_ssh::{
     ChallengePrompt, ConnectSpec, Disconnect, ExposeSecret, MemoryKey, Prompt, SecretString,
-    SessionEvent, SessionHandle, TermSize,
+    SessionEvent, SessionHandle,
 };
-use tern_vault::Key;
+use tern_vault::{Key, Vault};
 
 use crate::keeper::{Ask as VaultAsk, Keeper, Opening, Pending, Tried, Typed};
-use crate::password_command::{Approvals, Auth, Purpose};
+use crate::password_command::{self as pc, Approvals, Auth, Purpose};
 use crate::platform::SshRuntime;
 use crate::text_input::{InputColors, TextInput};
 
@@ -50,6 +51,10 @@ enum Kind {
     },
     /// The vault passphrase or PIN, for what waits on it.
     Vault(VaultAsk, Then),
+    /// Run this command here? The answer goes on with what waited for it.
+    Approve(Option<pc::Question>, Option<Then>),
+    /// A first vault's passphrase, then again, to keep a typed password.
+    NewVault(Key, SecretString, Option<SecretString>),
 }
 
 /// What waits for the vault to open.
@@ -60,6 +65,10 @@ enum Then {
     Prompt(Prompt),
     /// A typed password to save.
     Save(Key, SecretString),
+    /// The saved ProxyCommand, before dialling.
+    Proxy,
+    /// A password question the password command may answer.
+    Login(Prompt),
 }
 
 /// What a panel hears from its login.
@@ -74,6 +83,12 @@ pub struct PanelLogin {
     spec: ConnectSpec,
     vault_keys: Vec<String>,
     proxy_command: Option<String>,
+    password_command: Option<String>,
+    /// The password command gets one turn per connection, whatever came of it.
+    command_tried: bool,
+    approvals: Approvals,
+    /// The connection is up, so a question asked now returns to [`Step::Connected`].
+    up: bool,
     colors: InputColors,
     step: Step,
     handle: Option<SessionHandle>,
@@ -93,10 +108,21 @@ impl EventEmitter<LoginEvent> for PanelLogin {}
 
 impl PanelLogin {
     /// Starts connecting. Nothing is dialled before the saved ProxyCommand, if there is one, is
-    /// approved on this Mac; the panel cannot ask that, so it says where to.
+    /// approved on this Mac; the panel asks.
     pub fn start(
         spec: ConnectSpec,
         auth: Auth,
+        colors: InputColors,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::start_with(spec, auth, Approvals::here(), colors, cx)
+    }
+
+    /// [`Self::start`] with the commands this Mac approved given, for tests.
+    pub fn start_with(
+        spec: ConnectSpec,
+        auth: Auth,
+        approvals: Approvals,
         colors: InputColors,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -104,6 +130,10 @@ impl PanelLogin {
             spec,
             vault_keys: auth.vault_keys,
             proxy_command: auth.proxy_command,
+            password_command: auth.password_command,
+            command_tried: false,
+            approvals,
+            up: false,
             colors,
             step: Step::Connecting,
             handle: None,
@@ -142,27 +172,130 @@ impl PanelLogin {
 
     fn begin(&mut self, cx: &mut Context<Self>) {
         self.step = Step::Connecting;
+        self.up = false;
+        self.command_tried = false;
         self.tried.clear();
         self.asked.clear();
         self.typed = None;
         self.offer = None;
         self.note = None;
-        if let Some(command) = self
-            .proxy_command
-            .as_deref()
-            .filter(|c| Approvals::here().ask(Purpose::Proxy, c).is_some())
+        if let Some(command) = self.proxy_command.clone()
+            && let Some(question) = self.approvals.ask(Purpose::Proxy, &command)
         {
-            self.step = Step::Failed(format!(
-                "This host connects through a command that was not approved on this Mac yet \
-                 ({command}). Open a terminal to it once and answer yes."
-            ));
-            return;
+            return self.ask_approval(question, Then::Proxy, cx);
         }
+        self.unlock_and_dial(cx);
+    }
+
+    fn unlock_and_dial(&mut self, cx: &mut Context<Self>) {
         if !self.vault_keys.is_empty() && Keeper::locked(cx) && !self.skipped_vault {
             // The connection names vault keys and the vault is shut: open it first.
             return self.need_vault(Then::Dial, cx);
         }
         self.dial(cx);
+    }
+
+    /// What shows when nothing is being asked: connecting, or the connection up.
+    fn between(&self) -> Step {
+        if self.up {
+            Step::Connected
+        } else {
+            Step::Connecting
+        }
+    }
+
+    fn ask_approval(&mut self, question: pc::Question, then: Then, cx: &mut Context<Self>) {
+        let text = question.text();
+        let line = text.trim().trim_end_matches("(yes/no)").trim_end();
+        self.step = Step::Asking(Question {
+            lines: vec![line.to_owned()],
+            input: None,
+            yes_no: true,
+            skippable: false,
+            kind: Kind::Approve(Some(question), Some(then)),
+        });
+        cx.notify();
+    }
+
+    /// A no goes on as each use needs: the password question falls to the vault and the person,
+    /// a proxy leaves the panel failed.
+    fn approval_answered(
+        &mut self,
+        question: pc::Question,
+        then: Then,
+        yes: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match (then, self.approvals.answer(question, yes)) {
+            (Then::Proxy, Some(_)) => self.unlock_and_dial(cx),
+            (Then::Proxy, None) => {
+                self.step = Step::Failed(
+                    "Not connected: the proxy command was not run. Retry asks again.".into(),
+                );
+            }
+            (Then::Login(prompt), Some(command)) => self.run_command(command, prompt, cx),
+            (Then::Login(prompt), None) => {
+                self.command_tried = true;
+                self.on_prompt(prompt, cx);
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// The password command, when it has a turn, answers a password question: asked about first
+    /// if this Mac never approved it. Gives the prompt back when it does not apply.
+    fn try_command(&mut self, prompt: Prompt, cx: &mut Context<Self>) -> Option<Prompt> {
+        if !matches!(prompt, Prompt::Password { .. }) {
+            return Some(prompt);
+        }
+        let command = self.password_command.clone();
+        let question = command
+            .as_deref()
+            .and_then(|c| self.approvals.ask(Purpose::Login, c));
+        match (
+            pc::plan(command.as_deref(), self.command_tried, question.is_none()),
+            question,
+            command,
+        ) {
+            (pc::Step::Approve, Some(question), _) => {
+                self.ask_approval(question, Then::Login(prompt), cx);
+                None
+            }
+            (pc::Step::Run, _, Some(command)) => {
+                self.run_command(command, prompt, cx);
+                None
+            }
+            _ => Some(prompt),
+        }
+    }
+
+    fn run_command(&mut self, command: String, prompt: Prompt, cx: &mut Context<Self>) {
+        self.command_tried = true;
+        self.step = self.between();
+        self.note = None;
+        let work = cx.background_spawn(async move { pc::run(&command, pc::TIMEOUT) });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |s, cx| {
+                match result {
+                    Ok(secret) => {
+                        // Answered straight to the server, never through `typed`, so it is not
+                        // offered for saving in the vault.
+                        s.note = Some("Password from the command.".into());
+                        if let Some(other) = crate::login::answer(prompt, secret) {
+                            s.on_prompt(other, cx);
+                        }
+                    }
+                    Err(failure) => {
+                        s.note = Some(failure.line());
+                        s.on_prompt(prompt, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn dial(&mut self, cx: &mut Context<Self>) {
@@ -177,14 +310,9 @@ impl PanelLogin {
                 });
             }
         }
-        let size = TermSize {
-            cols: 80,
-            rows: 24,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
         let rt = SshRuntime::handle(cx);
-        let (handle, events) = tern_ssh::connect(dial, size, &rt);
+        // No shell and no agent forwarding: the panel only needs the connection.
+        let (handle, events) = tern_ssh::connect_files(dial, &rt);
         self.handle = Some(handle);
         // The connection may outlive this login (a copy still using it): its events are read
         // on the runtime until it ends, and passed on only while somebody listens.
@@ -211,12 +339,12 @@ impl PanelLogin {
 
     fn on_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
-            // The shell the connection opens is not shown; its output only has to be let go of.
             SessionEvent::Data(_) | SessionEvent::Latency(_) => {}
             SessionEvent::Prompt(prompt) => self.on_prompt(prompt, cx),
             SessionEvent::Connected => {
                 self.step = Step::Connected;
-                self.offer = self.typed.take().filter(|_| Keeper::exists(cx));
+                self.up = true;
+                self.offer = self.typed.take();
                 cx.emit(LoginEvent::Connected);
                 cx.notify();
             }
@@ -227,7 +355,8 @@ impl PanelLogin {
             } => {
                 let why = closed_reason(error, exit_status, &reason, &self.spec);
                 self.handle = None;
-                if matches!(self.step, Step::Connected) {
+                let was_up = std::mem::replace(&mut self.up, false);
+                if was_up {
                     self.step = Step::Failed(why.clone());
                     cx.emit(LoginEvent::Dropped(why));
                 } else {
@@ -239,6 +368,12 @@ impl PanelLogin {
     }
 
     fn on_prompt(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
+        if let Some(prompt) = self.try_command(prompt, cx) {
+            self.after_command(prompt, cx);
+        }
+    }
+
+    fn after_command(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
         let key = crate::login::key_for(&prompt, &self.spec.host, self.spec.port);
         // Each secret is tried from the vault once per connection, so a stale one falls through
         // to asking instead of failing in a loop.
@@ -358,7 +493,7 @@ impl PanelLogin {
         });
         match need {
             Pending::Waiting => {
-                self.step = Step::Connecting;
+                self.step = self.between();
                 self.note = Some("Asking the Keychain…".into());
                 cx.notify();
             }
@@ -395,7 +530,8 @@ impl PanelLogin {
     /// What waited for the vault goes on, with the keys if it opened.
     fn resume(&mut self, then: Then, opened: bool, cx: &mut Context<Self>) {
         match then {
-            Then::Dial => self.dial(cx),
+            Then::Dial | Then::Proxy => self.dial(cx),
+            Then::Login(prompt) => self.on_prompt(prompt, cx),
             Then::Prompt(prompt) if opened => self.on_prompt(prompt, cx),
             Then::Prompt(prompt) => self.ask_user(prompt, cx),
             Then::Save(key, secret) => {
@@ -470,11 +606,47 @@ impl PanelLogin {
                     }
                 }
             }
+            Kind::NewVault(..) => {
+                let up = self.between();
+                let Step::Asking(Question {
+                    input,
+                    kind: Kind::NewVault(key, secret, first),
+                    ..
+                }) = std::mem::replace(&mut self.step, up)
+                else {
+                    return;
+                };
+                if typed.is_empty() {
+                    self.note = Some("Not saved.".into());
+                    return cx.notify();
+                }
+                let typed = SecretString::from(typed);
+                match first {
+                    None => {
+                        if let Some(input) = &input {
+                            input.update(cx, |i, cx| i.set_text("", cx));
+                        }
+                        self.step = Step::Asking(Question {
+                            lines: vec!["Repeat vault passphrase".to_owned()],
+                            input,
+                            yes_no: false,
+                            skippable: false,
+                            kind: Kind::NewVault(key, secret, Some(typed)),
+                        });
+                    }
+                    Some(first) if first.expose_secret() == typed.expose_secret() => {
+                        Keeper::adopt(Vault::new(first), cx);
+                        self.store(key, secret, cx);
+                    }
+                    Some(_) => self.note = Some("Passphrases differ; not saved.".into()),
+                }
+            }
             Kind::Vault(..) => {
+                let up = self.between();
                 let Step::Asking(Question {
                     kind: Kind::Vault(ask, then),
                     ..
-                }) = std::mem::replace(&mut self.step, Step::Connecting)
+                }) = std::mem::replace(&mut self.step, up)
                 else {
                     return;
                 };
@@ -493,7 +665,7 @@ impl PanelLogin {
                 })
                 .detach();
             }
-            Kind::HostKey(_) => {}
+            Kind::HostKey(_) | Kind::Approve(..) => {}
         }
         cx.notify();
     }
@@ -523,19 +695,27 @@ impl PanelLogin {
         self.resume(then, false, cx);
     }
 
-    /// Yes or No to the host key.
+    /// Yes or No to the host key, or to running a command.
     pub fn answer_yes(&mut self, yes: bool, cx: &mut Context<Self>) {
-        if let Step::Asking(Question {
-            kind: Kind::HostKey(reply),
-            ..
-        }) = &mut self.step
-        {
-            let reply = reply.take();
-            self.step = Step::Connecting;
-            if let Some(reply) = reply {
-                let _ = reply.send(yes);
+        let Step::Asking(question) = &mut self.step else {
+            return;
+        };
+        match &mut question.kind {
+            Kind::HostKey(reply) => {
+                let reply = reply.take();
+                self.step = Step::Connecting;
+                if let Some(reply) = reply {
+                    let _ = reply.send(yes);
+                }
+                cx.notify();
             }
-            cx.notify();
+            Kind::Approve(asked, then) => {
+                if let (Some(asked), Some(then)) = (asked.take(), then.take()) {
+                    self.step = self.between();
+                    self.approval_answered(asked, then, yes, cx);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -555,6 +735,14 @@ impl PanelLogin {
                     let _ = reply.send(None);
                 }
                 Kind::Vault(ask, then) => return self.vault_skipped(ask, then, cx),
+                Kind::Approve(Some(asked), Some(then)) => {
+                    self.step = self.between();
+                    return self.approval_answered(asked, then, false, cx);
+                }
+                Kind::NewVault(..) => {
+                    self.step = self.between();
+                    self.note = Some("Not saved.".into());
+                }
                 _ => {}
             },
             other => self.step = other,
@@ -579,7 +767,15 @@ impl PanelLogin {
         if !save {
             return cx.notify();
         }
-        if Keeper::locked(cx) {
+        if !Keeper::exists(cx) {
+            self.step = Step::Asking(Question {
+                lines: vec!["New vault passphrase".to_owned()],
+                input: Some(self.field(true, cx)),
+                yes_no: false,
+                skippable: false,
+                kind: Kind::NewVault(key, secret, None),
+            });
+        } else if Keeper::locked(cx) {
             self.need_vault(Then::Save(key, secret), cx);
         } else {
             self.store(key, secret, cx);

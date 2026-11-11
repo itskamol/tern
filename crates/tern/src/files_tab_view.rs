@@ -398,7 +398,13 @@ impl FilesView {
                 .text_color(color)
                 .child(text)
         };
+        // A question after the connection is up (a new vault's passphrase) shows over the folder.
+        let asking = self.panels[side]
+            .login
+            .as_ref()
+            .is_some_and(|l| matches!(l.read(cx).step(), Step::Asking(_)));
         match &state {
+            _ if asking => self.connecting(side, window, cx),
             State::Connecting => self.connecting(side, window, cx),
             State::Loading if empty => note("Loading…".into(), t.muted).into_any_element(),
             State::Failed(why) => self.failure(side, why.clone(), "Retry", cx),
