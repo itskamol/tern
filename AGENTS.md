@@ -8,3 +8,17 @@
   server; its header lists what it sets up. Frame cost limits: `docs/perf.md`.
 - Releases: `RELEASING.md`. Decisions not to re-open: `docs/adr/`.
 - Remotes: `fork` (itskamol/tern) is where `main` is pushed; `origin` (your-moon/tern) is upstream.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on itskamol/tern (not upstream your-moon/tern). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default roles, each label named as its role. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the root. See `docs/agents/domain.md`.
