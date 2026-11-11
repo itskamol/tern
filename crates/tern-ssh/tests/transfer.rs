@@ -546,6 +546,118 @@ async fn a_failing_copy_removes_its_part_file_and_the_rest_of_the_batch_goes_on(
     assert_eq!(m.get("fine"), b"fine");
 }
 
+/// A destination whose rename of a finished `.part` file always fails.
+#[derive(Debug)]
+struct RefusesToFinish(Arc<dyn FileSource>);
+
+impl FileSource for RefusesToFinish {
+    fn id(&self) -> &str {
+        self.0.id()
+    }
+    fn home(&self) -> Call<'_, String> {
+        self.0.home()
+    }
+    fn list<'a>(&'a self, dir: &'a str) -> Call<'a, Vec<FileEntry>> {
+        self.0.list(dir)
+    }
+    fn read<'a>(&'a self, path: &'a str) -> Call<'a, Reader> {
+        self.0.read(path)
+    }
+    fn write<'a>(&'a self, path: &'a str) -> Call<'a, Writer> {
+        self.0.write(path)
+    }
+    fn mkdir<'a>(&'a self, path: &'a str) -> Call<'a, ()> {
+        self.0.mkdir(path)
+    }
+    fn rename<'a>(&'a self, from: &'a str, to: &'a str) -> Call<'a, ()> {
+        if from.ends_with(".part") {
+            return Box::pin(async { Err(tern_ssh::FileError::Other("disk said no".into())) });
+        }
+        self.0.rename(from, to)
+    }
+    fn delete<'a>(&'a self, path: &'a str) -> Call<'a, ()> {
+        self.0.delete(path)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replace_that_cannot_finish_keeps_the_old_file_on_the_mac() {
+    let (from, to) = (mac(), mac());
+    from.put("a.txt", b"new");
+    to.put("a.txt", b"old");
+    let dest: Arc<dyn FileSource> = Arc::new(RefusesToFinish(to.source.clone()));
+    let run = queue();
+    let batch = run.queue.submit(vec![
+        job(
+            &from.source,
+            &from.path("a.txt"),
+            &dest,
+            &to.path(""),
+            Some(Conflict::Replace),
+        )
+        .await,
+    ]);
+    let summary = run.done(batch).await;
+    assert_eq!((summary.copied, summary.failed.len()), (0, 1));
+    assert_eq!(to.get("a.txt"), b"old");
+    assert_eq!(to.names(""), ["a.txt"], "no part or aside file is left");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replace_that_cannot_finish_keeps_the_old_file_on_a_host() {
+    let from = mac();
+    let h = host("h").await;
+    from.put("a.txt", b"new");
+    std::fs::write(h.disk("a.txt"), b"old").unwrap();
+    let dest: Arc<dyn FileSource> = Arc::new(RefusesToFinish(h.source.clone()));
+    let run = queue();
+    let batch = run.queue.submit(vec![
+        job(
+            &from.source,
+            &from.path("a.txt"),
+            &dest,
+            "/home",
+            Some(Conflict::Replace),
+        )
+        .await,
+    ]);
+    let summary = run.done(batch).await;
+    assert_eq!((summary.copied, summary.failed.len()), (0, 1));
+    assert_eq!(std::fs::read(h.disk("a.txt")).unwrap(), b"old");
+    assert_eq!(names(&h.disk("")), ["a.txt"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replace_on_a_host_leaves_only_the_new_file() {
+    let from = mac();
+    let h = host("h").await;
+    from.put("a.txt", b"new");
+    std::fs::write(h.disk("a.txt"), b"old").unwrap();
+    let run = queue();
+    let batch = run.queue.submit(vec![
+        job(
+            &from.source,
+            &from.path("a.txt"),
+            &h.source,
+            "/home",
+            Some(Conflict::Replace),
+        )
+        .await,
+    ]);
+    assert_eq!(run.done(batch).await.copied, 1);
+    assert_eq!(std::fs::read(h.disk("a.txt")).unwrap(), b"new");
+    assert_eq!(names(&h.disk("")), ["a.txt"]);
+}
+
+fn names(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    v.sort();
+    v
+}
+
 // ---- limits -------------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
