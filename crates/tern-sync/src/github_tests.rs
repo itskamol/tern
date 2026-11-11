@@ -338,8 +338,9 @@ fn gist_fetch_decodes_valid_bundle() {
     );
     let _g = set_test_http(Box::new(http));
 
+    // Through the sync's Remote seam, which is how a sync reaches the gist.
     let gist = Gist::new("test-token".into());
-    let bundle = gist.fetch().unwrap().unwrap();
+    let bundle = crate::bundle::Remote::fetch(&gist).unwrap().unwrap();
     assert_eq!(bundle.hash, "h789");
     assert_eq!(bundle.updated_at, 1000);
     assert_eq!(bundle.device, "test-mac");
@@ -426,8 +427,7 @@ fn gist_push_patches_existing_gist() {
     let _g = set_test_http(Box::new(http.clone()));
 
     let gist = Gist::new("test-token".into());
-    gist.push("hash-patched", 2, "device-y", b"v2", b"s2")
-        .unwrap();
+    crate::bundle::Remote::push(&gist, "hash-patched", 2, "device-y", b"v2", b"s2").unwrap();
 
     let calls = http.send_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);

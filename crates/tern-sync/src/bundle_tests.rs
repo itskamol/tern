@@ -115,6 +115,10 @@ fn two_macs_converge_through_any_remote_and_a_wrong_passphrase_takes_nothing() {
     std::fs::write(a.join(HOSTS_FILE), hosts(&[("web", "1.1.1.1")])).unwrap();
     let (out, _) = sync(&a, &remote, &va, None, None, &none).unwrap();
     assert!(matches!(out, Outcome::Pushed));
+    assert!(
+        a.join(VAULT_FILE).exists(),
+        "a sync that worked keeps the vault it wrote"
+    );
     // B's vault is under another passphrase: the remote's vault cannot be opened with it.
     let err = sync(&b, &remote, &fake("other"), None, None, &none)
         .map(|_| ())
@@ -444,6 +448,8 @@ fn a_pull_takes_only_a_bundle_whose_parts_belong_together_and_are_not_older() {
     let good = remote_of(&new, 7, &v);
     let (files, seq) = open_bundle(&good, &v, 3).unwrap();
     assert_eq!((files, seq), (new.clone(), 7));
+    // The bundle this Mac already has is not older than itself.
+    assert_eq!(open_bundle(&good, &v, 7).unwrap().1, 7);
 
     // An older vault.age put back beside the newer sealed data.
     let mut swapped = remote_of(&new, 7, &v);
@@ -511,4 +517,67 @@ fn every_push_is_numbered_above_the_last_one_seen() {
     assert_eq!(load_state(&b).seq, 2);
     assert!(matches!(run_sync(&a, &url, &va, &none), Outcome::Pulled));
     assert_eq!(load_state(&a).seq, 2);
+}
+
+#[test]
+fn a_mac_that_never_synced_but_has_its_own_hosts_is_asked_not_overwritten() {
+    let root = tempfile::tempdir().unwrap();
+    let (a, b) = (root.path().join("a"), root.path().join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let remote = Mem::default();
+    let none = Resolutions::new();
+    std::fs::write(a.join(HOSTS_FILE), hosts(&[("web", "1.1.1.1")])).unwrap();
+    sync(&a, &remote, &fake("pw"), None, None, &none).unwrap();
+    // B never synced and its vault is empty, but it has connections of its own.
+    let mine = hosts(&[("db", "2.2.2.2")]);
+    std::fs::write(b.join(HOSTS_FILE), &mine).unwrap();
+    let (out, _) = sync(&b, &remote, &fake("pw"), None, None, &none).unwrap();
+    assert!(
+        matches!(out, Outcome::Conflict { whole: true, .. }),
+        "{out:?}"
+    );
+    assert_eq!(std::fs::read(b.join(HOSTS_FILE)).unwrap(), mine);
+}
+
+#[test]
+fn a_synced_file_that_cannot_be_read_stops_the_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    // A folder where hosts.json should be: reading it fails, which is not "absent".
+    std::fs::create_dir(dir.path().join(HOSTS_FILE)).unwrap();
+    let err = sync(
+        dir.path(),
+        &Mem::default(),
+        &fake("pw"),
+        None,
+        None,
+        &Resolutions::new(),
+    )
+    .map(|_| ())
+    .unwrap_err();
+    assert!(err.starts_with("hosts.json: "), "{err}");
+}
+
+#[test]
+fn the_change_watcher_sees_the_local_hash_and_the_last_synced_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(HOSTS_FILE), hosts(&[("web", "1.1.1.1")])).unwrap();
+    let before = snapshot(dir.path()).unwrap();
+    assert_eq!(before.local, crate::hash(&read_local(dir.path()).unwrap()));
+    assert_eq!(before.last, None, "never synced");
+    sync(
+        dir.path(),
+        &Mem::default(),
+        &fake("pw"),
+        None,
+        None,
+        &Resolutions::new(),
+    )
+    .unwrap();
+    let after = snapshot(dir.path()).unwrap();
+    assert_eq!(
+        after.last.as_deref(),
+        Some(after.local.as_str()),
+        "in step after a push"
+    );
 }
