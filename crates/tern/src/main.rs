@@ -3,6 +3,7 @@
 
 mod alloc;
 mod chrome;
+mod command_history;
 mod connections;
 #[cfg(debug_assertions)]
 mod devkeys;
