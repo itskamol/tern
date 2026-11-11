@@ -40,7 +40,8 @@ actions!(
         FocusPaneUp,
         FocusPaneDown,
         OpenSettings,
-        ShowAbout
+        ShowAbout,
+        CheckForUpdates
     ]
 );
 
@@ -171,6 +172,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 frame: look::FrameState::default(),
                 system_light: false,
                 update_ready: None,
+                update_check: Default::default(),
                 _clock: None,
             };
             shell.refresh_hosts();
@@ -264,6 +266,8 @@ pub struct Shell {
     system_light: bool,
     /// A downloaded, checked update; it is installed when tern quits, or on "Restart now".
     update_ready: Option<std::rc::Rc<update_ui::Staged>>,
+    /// Whether an update check runs, and how the last one ended.
+    update_check: crate::update_outcome::CheckState,
     _clock: Option<gpui::Task<()>>,
 }
 
@@ -653,6 +657,9 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
             .on_action(cx.listener(|s, _: &OpenSettings, w, cx| s.toggle_settings(w, cx)))
             .on_action(cx.listener(|s, _: &ShowAbout, w, cx| s.open_settings_at_about(w, cx)))
+            .when(!self.update_check_running(), |d| {
+                d.on_action(cx.listener(|s, _: &CheckForUpdates, _, cx| s.check_now(cx)))
+            })
             .on_action(cx.listener(|s, _: &UndoHosts, w, cx| s.undo_hosts(w, cx)))
             .on_action(cx.listener(|s, _: &RedoHosts, w, cx| s.redo_hosts(w, cx)))
             // Capture phase: the terminal handles Escape itself, and ending a broadcast must

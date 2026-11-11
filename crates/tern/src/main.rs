@@ -39,6 +39,7 @@ mod text_input;
 mod theme;
 mod theme_tint;
 #[cfg(target_os = "macos")]
+mod update_outcome;
 mod updater;
 mod vault_pin;
 mod wallpaper;
