@@ -14,7 +14,8 @@ use tern_ssh::{ConnectSpec, HostEntry};
 use super::*;
 use crate::keymap::{self, Keymap, ShortcutId};
 use crate::sidebar::DraggedHost;
-use crate::split::{Axis, Direction, Floor, Node, PaneId, Rect, drop_side};
+use crate::split::{Axis, Direction, Floor, Node, PaneId, drop_side};
+use crate::tab_set::Paned as _;
 use crate::theme::{FOCUS_BORDER, UNFOCUSED_OPACITY};
 
 /// What a divider drag carries: a pane at the divider's first side and the side of it the
@@ -28,31 +29,30 @@ pub(super) struct Divider {
 const NO_ROOM: &str = "No room to split: a pane keeps at least 20 columns and 5 rows";
 
 impl Shell {
-    /// The least share of the front tab a pane may take, from the tab's size in cells as the
-    /// focused pane's grid shows it.
+    /// The least share of the front tab a pane may take, from the tab's own area in cells: what
+    /// each pane's grid and its border show, scaled up by its share of the tab.
     fn pane_floor(&self, cx: &gpui::App) -> Floor {
         let Some(tab) = self.tabs.active_tab() else {
             return Floor::cells(1.0, 1.0);
         };
-        let Some(session) = tab.front().session() else {
+        let layout = tab.layout();
+        let mut cell = (0.0, 0.0);
+        let measured: Vec<_> = tab
+            .panes()
+            .iter()
+            .filter_map(|pane| {
+                let terminal = pane.session()?.read(cx).view.read(cx).terminal().read(cx);
+                cell = terminal.cell_px();
+                let (_, share) = layout.iter().find(|(id, _)| *id == pane.pane_id())?;
+                Some((terminal.cols() as f32, terminal.rows() as f32, *share))
+            })
+            .collect();
+        if measured.is_empty() || cell.0 < 1.0 || cell.1 < 1.0 {
             return Floor::cells(1.0, 1.0);
-        };
-        let terminal = session.read(cx).view.read(cx).terminal().read(cx);
-        let (cols, rows) = (terminal.cols() as f32, terminal.rows() as f32);
-        let Rect { w, h, .. } = tab
-            .layout()
-            .into_iter()
-            .find(|(id, _)| *id == tab.focused())
-            .map_or(
-                Rect {
-                    x: 0.,
-                    y: 0.,
-                    w: 1.,
-                    h: 1.,
-                },
-                |(_, r)| r,
-            );
-        Floor::cells(cols / w.max(0.01), rows / h.max(0.01))
+        }
+        // A pane's focus border on both sides and one divider, in cells.
+        let edge = 2.0 * FOCUS_BORDER + 1.0;
+        Floor::of_panes(&measured, (edge / cell.0, edge / cell.1))
     }
 
     pub(crate) fn focused_pane(&self) -> Option<PaneId> {
@@ -203,12 +203,16 @@ impl Shell {
     }
 
     /// While a divider is held the remote is not told of each size the panes pass through; on
-    /// release it hears the last one.
+    /// release it hears the last one. Released in every tab, since a drag can end anywhere: on
+    /// another tab, over the sidebar, or outside the window.
     fn hold_pane_resizes(&self, held: bool, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.active_tab() else {
-            return;
-        };
-        for session in tab.panes().iter().filter_map(Pane::session) {
+        for session in self
+            .tabs
+            .iter()
+            .filter(|tab| !held || self.tabs.active_tab().is_some_and(|a| a.id == tab.id))
+            .flat_map(|tab| tab.panes().iter())
+            .filter_map(Pane::session)
+        {
             let view = session.read(cx).view.clone();
             view.update(cx, |v, cx| v.hold_remote_resize(held, cx));
         }
@@ -467,22 +471,27 @@ fn drop_zone(side: Direction, t: &Theme) -> gpui::Div {
 /// The window's pane actions: split, resize, move focus, close, equalize.
 pub(super) fn pane_actions(root: gpui::Div, cx: &mut Context<Shell>) -> gpui::Div {
     use Direction::{Down, Left, Right, Up};
-    root.on_action(cx.listener(|s, _: &SplitRight, w, cx| s.split_pane(Right, w, cx)))
-        .on_action(cx.listener(|s, _: &SplitDown, w, cx| s.split_pane(Down, w, cx)))
-        .on_action(
-            cx.listener(|s, _: &SplitRightWithHost, w, cx| s.pick_host_for_split(Right, w, cx)),
-        )
-        .on_action(
-            cx.listener(|s, _: &SplitDownWithHost, w, cx| s.pick_host_for_split(Down, w, cx)),
-        )
-        .on_action(cx.listener(|s, _: &ResizePaneLeft, _, cx| s.step_pane(Left, cx)))
-        .on_action(cx.listener(|s, _: &ResizePaneRight, _, cx| s.step_pane(Right, cx)))
-        .on_action(cx.listener(|s, _: &ResizePaneUp, _, cx| s.step_pane(Up, cx)))
-        .on_action(cx.listener(|s, _: &ResizePaneDown, _, cx| s.step_pane(Down, cx)))
-        .on_action(cx.listener(|s, _: &EqualizePanes, _, cx| s.equalize_panes(cx)))
-        .on_action(cx.listener(|s, _: &ClosePane, w, cx| s.close_pane_or_tab(w, cx)))
-        .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| s.move_pane_focus(Left, w, cx)))
-        .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| s.move_pane_focus(Right, w, cx)))
-        .on_action(cx.listener(|s, _: &FocusPaneUp, w, cx| s.move_pane_focus(Up, w, cx)))
-        .on_action(cx.listener(|s, _: &FocusPaneDown, w, cx| s.move_pane_focus(Down, w, cx)))
+    // A divider drag can end anywhere, so its hold on the remote's size ends with any mouse up.
+    root.on_mouse_up(
+        gpui::MouseButton::Left,
+        cx.listener(|s, _, _, cx| s.hold_pane_resizes(false, cx)),
+    )
+    .on_mouse_up_out(
+        gpui::MouseButton::Left,
+        cx.listener(|s, _, _, cx| s.hold_pane_resizes(false, cx)),
+    )
+    .on_action(cx.listener(|s, _: &SplitRight, w, cx| s.split_pane(Right, w, cx)))
+    .on_action(cx.listener(|s, _: &SplitDown, w, cx| s.split_pane(Down, w, cx)))
+    .on_action(cx.listener(|s, _: &SplitRightWithHost, w, cx| s.pick_host_for_split(Right, w, cx)))
+    .on_action(cx.listener(|s, _: &SplitDownWithHost, w, cx| s.pick_host_for_split(Down, w, cx)))
+    .on_action(cx.listener(|s, _: &ResizePaneLeft, _, cx| s.step_pane(Left, cx)))
+    .on_action(cx.listener(|s, _: &ResizePaneRight, _, cx| s.step_pane(Right, cx)))
+    .on_action(cx.listener(|s, _: &ResizePaneUp, _, cx| s.step_pane(Up, cx)))
+    .on_action(cx.listener(|s, _: &ResizePaneDown, _, cx| s.step_pane(Down, cx)))
+    .on_action(cx.listener(|s, _: &EqualizePanes, _, cx| s.equalize_panes(cx)))
+    .on_action(cx.listener(|s, _: &ClosePane, w, cx| s.close_pane_or_tab(w, cx)))
+    .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| s.move_pane_focus(Left, w, cx)))
+    .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| s.move_pane_focus(Right, w, cx)))
+    .on_action(cx.listener(|s, _: &FocusPaneUp, w, cx| s.move_pane_focus(Up, w, cx)))
+    .on_action(cx.listener(|s, _: &FocusPaneDown, w, cx| s.move_pane_focus(Down, w, cx)))
 }

@@ -392,6 +392,11 @@ impl Terminal {
         }
     }
 
+    /// A cell's width and height in pixels, as of the last frame drawn; zero before the first.
+    pub fn cell_px(&self) -> (f32, f32) {
+        self.cell_px
+    }
+
     pub fn cols(&self) -> usize {
         self.term.columns()
     }

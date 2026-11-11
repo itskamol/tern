@@ -43,6 +43,29 @@ impl Floor {
         }
     }
 
+    /// The floor for a tab measured from its panes: each is `(columns, rows, share)` of the tab
+    /// as drawn. `pad` is what a pane's border and one divider take besides its grid, in cells,
+    /// so a pane at the floor still has [`MIN_COLS`] by [`MIN_ROWS`] to show.
+    pub fn of_panes(panes: &[(f32, f32, Rect)], pad: (f32, f32)) -> Self {
+        // A pane's grid and padding are its share of the tab; the biggest estimate is the least
+        // thrown off by the dividers.
+        let tab = |cells: fn(&(f32, f32, Rect)) -> (f32, f32), pad: f32| {
+            panes
+                .iter()
+                .map(|p| {
+                    let (len, share) = cells(p);
+                    (len + pad) / share.max(0.01)
+                })
+                .fold(1.0_f32, f32::max)
+        };
+        let cols = tab(|(c, _, r)| (*c, r.w), pad.0);
+        let rows = tab(|(_, h, r)| (*h, r.h), pad.1);
+        Self {
+            w: (MIN_COLS + pad.0) / cols,
+            h: (MIN_ROWS + pad.1) / rows,
+        }
+    }
+
     fn along(self, axis: Axis) -> f32 {
         match axis {
             Axis::Row => self.w,
@@ -431,6 +454,20 @@ mod tests {
             panic!("a split");
         };
         (*ratio, *inner)
+    }
+
+    #[test]
+    fn the_floor_leaves_a_pane_its_minimum_grid_after_border_and_divider() {
+        let half = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.5,
+            h: 1.0,
+        };
+        // Two panes of 100 columns each, 1 column of border and divider apiece: a tab of 202.
+        let floor = Floor::of_panes(&[(100.0, 30.0, half)], (1.0, 0.5));
+        assert!((floor.w * 202.0 - 1.0 - MIN_COLS).abs() < 1e-3, "{floor:?}");
+        assert!((floor.h * 30.5 - 0.5 - MIN_ROWS).abs() < 1e-3, "{floor:?}");
     }
 
     #[test]
