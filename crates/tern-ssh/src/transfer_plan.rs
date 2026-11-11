@@ -114,7 +114,7 @@ impl Planner {
             if item.is_symlink && item.is_dir && depth > 0 {
                 // A link to a folder inside a folder could lead back to it; copying it as a
                 // folder could never end.
-                return self.inner.note(self.batch, None);
+                return self.inner.note_link(self.batch);
             }
             if item.is_dir
                 && self.same_place()

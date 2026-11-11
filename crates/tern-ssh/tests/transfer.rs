@@ -879,3 +879,24 @@ async fn a_file_onto_itself_or_a_folder_into_itself_is_refused() {
     assert_eq!((s.copied, s.failed.len()), (0, 1));
     assert_eq!(a.names("d"), ["x"]);
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_reached_through_a_link_inside_a_folder_is_left_out_and_counted() {
+    let (a, b) = (mac(), mac());
+    a.put("proj/readme", b"r");
+    a.put("elsewhere/x", b"x");
+    std::os::unix::fs::symlink(
+        a.dir.path().join("elsewhere"),
+        a.dir.path().join("proj/link"),
+    )
+    .unwrap();
+    let run = queue();
+    let batch = run.queue.submit(vec![
+        job(&a.source, &a.path("proj"), &b.source, &b.path(""), None).await,
+    ]);
+    let summary = run.done(batch).await;
+    assert_eq!((summary.copied, summary.skipped, summary.links), (1, 0, 1));
+    assert!(b.has("proj/readme"));
+    assert!(!b.has("proj/link"));
+}

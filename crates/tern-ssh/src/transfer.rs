@@ -81,6 +81,9 @@ pub struct Summary {
     pub dir: String,
     pub copied: usize,
     pub skipped: usize,
+    /// Folders inside a folder that are links to another folder: not followed, since a link
+    /// can lead back and the copy could never end.
+    pub links: usize,
     /// One line for each file or folder that could not be copied.
     pub failed: Vec<String>,
     pub cancelled: bool,
@@ -150,6 +153,7 @@ pub(crate) struct Batch {
     bytes_done: u64,
     copied: usize,
     skipped: usize,
+    links: usize,
     failed: Vec<String>,
     cancelled: bool,
     stop: watch::Sender<bool>,
@@ -244,6 +248,7 @@ impl TransferQueue {
                     bytes_done: 0,
                     copied: 0,
                     skipped: 0,
+                    links: 0,
                     failed: Vec::new(),
                     cancelled: false,
                     stop,
@@ -336,6 +341,7 @@ impl State {
                 dir: batch.dir,
                 copied: batch.copied,
                 skipped: batch.skipped,
+                links: batch.links,
                 failed: batch.failed,
                 cancelled: batch.cancelled,
             }),
@@ -444,6 +450,13 @@ impl Inner {
                 Some(line) => b.failed.push(line),
                 None => b.skipped += 1,
             }
+        }
+    }
+
+    /// Notes a folder link that was not followed.
+    pub(crate) fn note_link(&self, batch: u64) {
+        if let Some(b) = self.lock().batches.get_mut(&batch) {
+            b.links += 1;
         }
     }
 
