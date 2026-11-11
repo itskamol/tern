@@ -3,6 +3,7 @@
 
 mod alloc;
 mod chrome;
+mod command_history;
 mod connections;
 #[cfg(debug_assertions)]
 mod devkeys;
@@ -135,6 +136,9 @@ fn main() {
                 .map(|d| keymap::Keymap::load(&d))
                 .unwrap_or_default();
             cx.set_global(keymap);
+            if let Some(dir) = settings::dir() {
+                cx.set_global(command_history::CommandHistory::new(dir.join("history")));
+            }
             keymap::apply(cx);
             if let Err(e) = platform::SshRuntime::install(cx) {
                 tracing::error!(error = %e, "ssh_runtime_start_failed");

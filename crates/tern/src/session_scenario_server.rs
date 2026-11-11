@@ -1,7 +1,7 @@
 // Adapted from russh 0.64 examples/echoserver.rs (Apache-2.0) for the server handler shape.
 //! The in-process SSH server the session scenario tests log in to: it takes one password, then
 //! gives a shell that echoes what is typed and, for `sudo …`, asks for a password and checks
-//! the line typed back. [`Typed`] records every line the shell received, so a test can say what
+//! the line typed back (`starpass` does the same but shows a `*` for each key). [`Typed`] records every line the shell received, so a test can say what
 //! reached the server, and in which order, without reading the screen.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 
@@ -17,6 +17,8 @@ pub(crate) const PASSWORD: &str = "hunter2";
 pub(super) const PROMPT: &str = "test@demo:~$ ";
 /// What `sudo` asks.
 pub(super) const SUDO_PROMPT: &str = "[sudo] password for test:";
+/// What `starpass` asks: a password prompt that echoes `*` for each key.
+pub(super) const STAR_PROMPT: &str = "Password:";
 
 /// Every line the shell received, passwords included, in order.
 #[derive(Clone, Default)]
@@ -34,6 +36,8 @@ pub(super) struct DemoShell {
     line: String,
     /// `sudo` has asked and the next line is the answer (not echoed).
     asking: bool,
+    /// The question is the kind that shows a `*` for each key, as some programs do.
+    stars: bool,
 }
 
 impl DemoShell {
@@ -51,7 +55,7 @@ impl DemoShell {
                 }
                 0x7f if !self.line.is_empty() => {
                     self.line.pop();
-                    if !self.asking {
+                    if !self.asking || self.stars {
                         out.extend_from_slice(b"\x08 \x08");
                     }
                 }
@@ -59,6 +63,8 @@ impl DemoShell {
                     self.line.push(char::from(b));
                     if !self.asking {
                         out.push(b);
+                    } else if self.stars {
+                        out.push(b'*');
                     }
                 }
                 _ => {}
@@ -74,11 +80,17 @@ impl DemoShell {
 
     fn answer(&mut self, line: &str) -> String {
         if std::mem::take(&mut self.asking) {
+            self.stars = false;
             return if line == PASSWORD {
                 format!("ok\r\n{PROMPT}")
             } else {
                 format!("Sorry, try again.\r\n{PROMPT}")
             };
+        }
+        if line == "starpass" {
+            self.asking = true;
+            self.stars = true;
+            return format!("{STAR_PROMPT} ");
         }
         if line.starts_with("sudo ") {
             self.asking = true;
@@ -224,5 +236,20 @@ mod tests {
         shown(&mut shell, &typed, "sudo x\r");
         assert!(shown(&mut shell, &typed, "wrong\r").contains("Sorry, try again."));
         assert_eq!(typed.lines(), ["sudo true", PASSWORD, "sudo x", "wrong"]);
+    }
+
+    #[test]
+    fn starpass_echoes_a_star_for_each_key() {
+        let (mut shell, typed) = (DemoShell::default(), Typed::default());
+        assert_eq!(
+            shown(&mut shell, &typed, "starpass\r"),
+            format!("starpass\r\n{STAR_PROMPT} ")
+        );
+        assert_eq!(shown(&mut shell, &typed, "ab"), "**");
+        assert_eq!(
+            shown(&mut shell, &typed, "\r"),
+            format!("\r\nSorry, try again.\r\n{PROMPT}")
+        );
+        assert_eq!(shown(&mut shell, &typed, "x"), "x");
     }
 }

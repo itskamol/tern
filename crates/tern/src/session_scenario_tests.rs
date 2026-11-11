@@ -10,8 +10,9 @@ use gpui::{Entity, IntoElement, Render, TestApp};
 use tern_ssh::{ConnectSpec, SecretString};
 use tern_vault::{Key, Vault};
 
-use super::scenario_server::{PASSWORD, PROMPT, SUDO_PROMPT, Typed, serve};
+use super::scenario_server::{PASSWORD, PROMPT, STAR_PROMPT, SUDO_PROMPT, Typed, serve};
 use super::{Launch, Session, Status};
+use crate::command_history::{CommandHistory, Scope};
 use crate::keeper::Keeper;
 use crate::password_command::Auth as LinkAuth;
 use crate::platform::SshRuntime;
@@ -60,6 +61,7 @@ fn scene() -> Scene {
     app.update(|cx| {
         SshRuntime::install(cx).unwrap();
         Keeper::install_at(vault_path, cx);
+        cx.set_global(CommandHistory::new(dir.path().join("history")));
     });
     let window = app.open_window(|window, cx| {
         let theme = crate::theme::Theme::zeron_dark().terminal(13.0, None);
@@ -119,6 +121,42 @@ impl Scene {
                 s.on_terminal_event(&tern_term::TerminalEvent::Output(bytes), cx);
             });
         });
+    }
+
+    /// Keys as the terminal view hands them to the terminal, which is where the session hears
+    /// what the person types.
+    fn keys(&mut self, text: &str) {
+        let terminal = self.app.read(|cx| self.session.read(cx).terminal.clone());
+        let bytes = text.as_bytes().to_vec();
+        self.app
+            .update(|cx| terminal.update(cx, |t, cx| t.write(bytes, cx)));
+    }
+
+    /// A line typed key by key, then Enter once the server has echoed it: how a person types
+    /// (`line` must not be on the screen already).
+    fn run(&mut self, line: &str) {
+        self.keys(line);
+        self.wait_for(line);
+        self.keys("\r");
+        self.settle();
+    }
+
+    /// What the remote wrote, as the session shows it.
+    fn remote_says(&mut self, text: &str) {
+        let (session, bytes) = (self.session.clone(), text.as_bytes().to_vec());
+        self.app
+            .update(|cx| session.update(cx, |s, cx| s.show(&bytes, cx)));
+    }
+
+    /// The command history of the host this session is on, newest first.
+    fn history(&mut self) -> Vec<String> {
+        self.app.read(|cx| {
+            cx.global::<CommandHistory>()
+                .search(Scope::Host("demo"), "")
+                .into_iter()
+                .map(|e| e.line)
+                .collect()
+        })
     }
 
     /// The Fill shortcut on this session.
@@ -232,4 +270,151 @@ fn a_locked_vault_asks_for_its_passphrase_before_the_fill_types_anything() {
     s.type_line("vp1");
     s.wait_for("ok");
     assert_eq!(s.typed.lines(), ["sudo true", PASSWORD]);
+}
+
+#[test]
+fn a_command_typed_at_the_prompt_reaches_the_history_and_the_login_does_not() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    assert!(s.history().is_empty(), "the login answers are not commands");
+    s.run("echo hi");
+    s.run("uptime");
+    assert_eq!(s.history(), ["uptime", "echo hi"]);
+    assert_eq!(s.typed.lines(), ["echo hi", "uptime"]);
+}
+
+#[test]
+fn nothing_typed_at_a_password_prompt_is_recorded_shown_or_not() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.run("sudo true");
+    s.wait_for(SUDO_PROMPT);
+    s.keys(PASSWORD);
+    s.keys("\r");
+    s.wait_for("ok");
+    // A prompt that shows a star per key leaves text on the screen to read: still not kept.
+    s.run("starpass");
+    s.wait_for(STAR_PROMPT);
+    s.keys("abc");
+    s.wait_for("***");
+    s.keys("\r");
+    s.settle();
+    assert_eq!(s.history(), ["starpass", "sudo true"]);
+}
+
+#[test]
+fn lines_that_look_like_secrets_or_start_with_a_space_are_not_recorded() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.run("export DB_TOKEN=abc");
+    s.run(" echo private");
+    s.run("echo public");
+    assert_eq!(s.history(), ["echo public"]);
+}
+
+#[test]
+fn nothing_typed_inside_a_full_screen_program_is_recorded() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.remote_says("\x1b[?1049h");
+    s.keys("ihello\r");
+    s.remote_says("\x1b[?1049l");
+    s.settle();
+    assert!(s.history().is_empty());
+    s.run("echo after");
+    assert_eq!(s.history(), ["echo after"]);
+}
+
+#[test]
+fn nothing_is_recorded_while_this_tab_broadcasts_its_typing() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    // Another tab that gets a copy of what is typed here.
+    let other = s
+        .app
+        .open_window(|window, cx| {
+            let theme = crate::theme::Theme::zeron_dark().terminal(13.0, None);
+            let spec = ConnectSpec {
+                host: "127.0.0.1".into(),
+                port: 1,
+                user: "x".into(),
+                ..Default::default()
+            };
+            let launch = Launch::Ssh(spec);
+            Host(Session::open(
+                launch,
+                LinkAuth::default(),
+                "other".into(),
+                false,
+                theme,
+                window,
+                cx,
+            ))
+        })
+        .read(|host, _| host.0.downgrade());
+    s.app.update(|cx| {
+        s.session
+            .update(cx, |sess, _| sess.set_mirrors(vec![other]))
+    });
+    s.run("echo broadcast");
+    assert!(s.history().is_empty());
+    s.app
+        .update(|cx| s.session.update(cx, |sess, _| sess.set_mirrors(Vec::new())));
+    s.run("echo alone");
+    assert_eq!(s.history(), ["echo alone"]);
+}
+
+#[test]
+fn a_line_put_at_the_prompt_is_recorded_when_the_person_presses_enter() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    let put = s.session.clone();
+    assert!(
+        s.app
+            .update(|cx| put.update(cx, |sess, cx| sess.put_at_prompt("echo placed", false, cx)))
+    );
+    s.wait_for("echo placed");
+    assert!(s.history().is_empty(), "not run yet, so not a command yet");
+    s.keys("\r");
+    s.settle();
+    assert_eq!(s.history(), ["echo placed"]);
+}
+
+#[test]
+fn running_a_history_line_types_it_with_enter_and_moves_it_to_the_newest_place() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.run("echo one");
+    s.run("echo two");
+    let put = s.session.clone();
+    s.app
+        .update(|cx| put.update(cx, |sess, cx| sess.put_at_prompt("echo one", true, cx)));
+    s.settle();
+    assert_eq!(s.typed.lines(), ["echo one", "echo two", "echo one"]);
+    assert_eq!(s.history(), ["echo one", "echo two"]);
+}
+
+#[test]
+fn with_prompt_marks_the_command_is_what_follows_the_mark_even_after_the_line_was_redrawn() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.keys("ec");
+    s.wait_for("ec");
+    // The shell completes by drawing a fresh prompt line; the marks say where the command is.
+    s.remote_says("\r\n\x1b]133;A\x07test@demo:~$ \x1b]133;B\x07echo completed");
+    s.keys("\r");
+    s.settle();
+    assert_eq!(s.history(), ["echo completed"]);
+}
+
+#[test]
+fn without_marks_a_line_redrawn_further_down_is_not_guessed_at() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.keys("ec");
+    s.wait_for("ec");
+    s.remote_says("\r\ntest@demo:~$ echo completed");
+    s.keys("\r");
+    s.settle();
+    assert!(s.history().is_empty());
 }
