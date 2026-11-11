@@ -407,13 +407,8 @@ impl FilesView {
             _ if asking => self.connecting(side, window, cx),
             State::Connecting => self.connecting(side, window, cx),
             State::Loading if empty => note("Loading…".into(), t.muted).into_any_element(),
-            State::Failed(why) => self.failure(side, why.clone(), "Retry", cx),
-            State::Dropped(why) => self.failure(
-                side,
-                format!("The connection dropped. {why}"),
-                "Reconnect",
-                cx,
-            ),
+            State::Failed(why) => self.failure(side, why.text(), "Retry", cx),
+            State::Dropped(why) => self.failure(side, why.text(), "Reconnect", cx),
             _ if empty => div()
                 .flex_1()
                 .flex()

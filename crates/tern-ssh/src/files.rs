@@ -34,8 +34,8 @@ pub enum FileError {
     PermissionDenied(String),
     #[error("{0}: already exists")]
     AlreadyExists(String),
-    /// The connection behind the source has ended.
-    #[error("connection closed")]
+    /// The host behind the source stopped answering.
+    #[error("the host stopped answering")]
     Closed,
     #[error("{0}")]
     Other(String),

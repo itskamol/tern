@@ -447,13 +447,13 @@ mod tests {
 
     /// The two ratios of `Row(1, Row(2, 3))`.
     fn ratios(t: &Node) -> (f32, f32) {
-        let Node::Split { ratio, second, .. } = t else {
-            panic!("a split");
-        };
-        let Node::Split { ratio: inner, .. } = &**second else {
-            panic!("a split");
-        };
-        (*ratio, *inner)
+        match t {
+            Node::Split { ratio, second, .. } => match &**second {
+                Node::Split { ratio: inner, .. } => (*ratio, *inner),
+                Node::Leaf(_) => (*ratio, f32::NAN),
+            },
+            Node::Leaf(_) => (f32::NAN, f32::NAN),
+        }
     }
 
     #[test]

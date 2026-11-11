@@ -15,7 +15,7 @@ use tern_ssh::{
 };
 use tern_vault::{Key, Vault};
 
-use crate::keeper::{Ask as VaultAsk, Keeper, Opening, Pending, Tried, Typed};
+use crate::keeper::{Ask as VaultAsk, Keeper, Tried, Typed};
 use crate::password_command::{self as pc, Approvals, Auth, Purpose};
 use crate::platform::SshRuntime;
 use crate::text_input::{InputColors, TextInput};
@@ -483,86 +483,6 @@ impl PanelLogin {
         }
     }
 
-    // ---- the vault -----------------------------------------------------------------------
-
-    /// The vault is needed for `then` (a server question, a save), or to dial.
-    fn need_vault(&mut self, then: Then, cx: &mut Context<Self>) {
-        let this = cx.weak_entity();
-        let need = Keeper::need_vault(cx, then, move |then, cx| {
-            let _ = this.update(cx, |s, cx| s.vault_resolved(then, cx));
-        });
-        match need {
-            Pending::Waiting => {
-                self.step = self.between();
-                self.note = Some("Asking the Keychain…".into());
-                cx.notify();
-            }
-            Pending::Now(Opening::Open, then) => self.vault_resolved(then, cx),
-            Pending::Now(Opening::Ask(ask), then) => self.ask_vault(ask, then, cx),
-        }
-    }
-
-    /// The Keychain attempt is over: the vault is open, or the usual question follows.
-    fn vault_resolved(&mut self, then: Then, cx: &mut Context<Self>) {
-        self.note = None;
-        if Keeper::locked(cx) {
-            return self.need_vault(then, cx);
-        }
-        self.resume(then, true, cx);
-    }
-
-    fn ask_vault(&mut self, ask: VaultAsk, then: Then, cx: &mut Context<Self>) {
-        let (title, skippable) = match (&then, ask) {
-            (_, VaultAsk::Pin) => ("Vault PIN (Enter to use the passphrase)", true),
-            (Then::Save(..), _) => ("Vault passphrase", false),
-            _ => ("Vault passphrase (Enter to skip)", true),
-        };
-        self.step = Step::Asking(Question {
-            lines: vec![title.to_owned()],
-            input: Some(self.field(true, cx)),
-            yes_no: false,
-            skippable,
-            kind: Kind::Vault(ask, then),
-        });
-        cx.notify();
-    }
-
-    /// What waited for the vault goes on, with the keys if it opened.
-    fn resume(&mut self, then: Then, opened: bool, cx: &mut Context<Self>) {
-        match then {
-            Then::Dial | Then::Proxy => self.dial(cx),
-            Then::Login(prompt) => self.on_prompt(prompt, cx),
-            Then::Prompt(prompt) if opened => self.on_prompt(prompt, cx),
-            Then::Prompt(prompt) => self.ask_user(prompt, cx),
-            Then::Save(key, secret) => {
-                if opened {
-                    self.store(key, secret, cx);
-                }
-            }
-        }
-    }
-
-    fn store(&mut self, key: Key, secret: SecretString, cx: &mut Context<Self>) {
-        let Some(task) = Keeper::store(key, secret, cx) else {
-            self.note = Some("Not saved: the vault is locked.".into());
-            return cx.notify();
-        };
-        self.offer = None;
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |s, cx| {
-                s.note = Some(match result {
-                    Ok(()) => "Saved in the vault.".to_owned(),
-                    Err(e) => format!("Could not save the vault: {e}"),
-                });
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    // ---- the person's answers ------------------------------------------------------------
-
     /// Enter in the field.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
         let Step::Asking(question) = &mut self.step else {
@@ -784,7 +704,7 @@ impl PanelLogin {
     }
 }
 
-/// Why a connection ended, in the panel's words. A changed host key says how to forget the old
+/// Why a login ended, in the panel's words. A changed host key says how to forget the old
 /// one and leaves that to the person.
 fn closed_reason(
     error: Option<String>,
@@ -795,7 +715,7 @@ fn closed_reason(
     let base = match (error, exit_status) {
         (Some(e), _) => e,
         (None, Some(code)) => format!("exit status {code}"),
-        (None, None) => "connection closed".into(),
+        (None, None) => "the host closed the session".into(),
     };
     match reason {
         Disconnect::HostKeyChanged { hop } => {
@@ -808,12 +728,15 @@ fn closed_reason(
                 format!("'[{host}]:{port}'")
             };
             format!(
-                "{base}. If the server was reinstalled, run ssh-keygen -R {target} and try again."
+                "{base}. If the host was reinstalled, run ssh-keygen -R {target} and try again."
             )
         }
         _ => base,
     }
 }
+
+#[path = "panel_login_vault.rs"]
+mod vault;
 
 #[cfg(test)]
 #[path = "panel_login_tests.rs"]

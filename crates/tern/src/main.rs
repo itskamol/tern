@@ -10,6 +10,8 @@ mod devkeys;
 mod empty_state;
 mod files_model;
 mod files_tab;
+mod files_tab_copy;
+mod files_tab_edit;
 mod files_tab_parts;
 mod files_tab_view;
 mod files_text;

@@ -447,8 +447,6 @@ impl Shell {
         Some(overlay(card.into_any_element(), viewport, t))
     }
 
-    // ---- Settings → Command history ------------------------------------------------------
-
     pub(super) fn history_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;
         let hosts = if cx.has_global::<CommandHistory>() {
