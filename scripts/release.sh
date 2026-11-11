@@ -103,6 +103,25 @@ cask="$out/tern.rb"
 sed -e "s|@REPO@|$repo|g" -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" \
   packaging/homebrew/tern.rb > "$cask"
 
+# The filled cask passes Homebrew's own linter before it goes to the tap: a cask Homebrew cannot
+# read breaks `brew install` for everyone using the tap.
+if command -v brew >/dev/null; then
+  check_tap=local/tern-release-check
+  brew untap "$check_tap" >/dev/null 2>&1 || true
+  brew tap-new --no-git "$check_tap" >/dev/null
+  mkdir -p "$(brew --repository)/Library/Taps/local/homebrew-tern-release-check/Casks"
+  cp "$cask" "$(brew --repository)/Library/Taps/local/homebrew-tern-release-check/Casks/tern.rb"
+  if ! brew style --cask "$check_tap/tern"; then
+    brew untap "$check_tap" >/dev/null 2>&1 || true
+    echo "the cask fails brew style; fix packaging/homebrew/tern.rb" >&2
+    exit 1
+  fi
+  brew untap "$check_tap" >/dev/null 2>&1 || true
+  echo "cask passes brew style"
+else
+  echo "cask not checked (no brew)"
+fi
+
 echo
 echo "dmg:    $dmg"
 echo "zip:    $zip"

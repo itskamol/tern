@@ -19,15 +19,14 @@ cask "tern" do
   # does not race it.
   auto_updates true
   depends_on arch: :arm64
-  depends_on macos: :big_sur
+  depends_on :macos
 
   app "tern.app"
 
   # Built and signed on its maintainer's Mac with a local certificate, not notarised: without
   # this, Gatekeeper refuses to open the downloaded app.
-  installed = "#{appdir}/tern.app"
   postflight_steps do
-    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", installed]
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/tern.app"]
   end
 
   zap trash: [

@@ -22,4 +22,11 @@ for c in crates/*/Cargo.toml; do
     || { echo "missing [lints] workspace = true: $c"; fail=1; }
 done
 
+# 4. The workspace's own crates are pinned at the workspace version: a release bump that misses
+#    one fails in cargo far from the cause.
+ws=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+while read -r name pin; do
+  [ "$pin" = "$ws" ] || { echo "$name is pinned at $pin, the workspace is at $ws (Cargo.toml)"; fail=1; }
+done < <(sed -n 's/^\(tern-[a-z]*\) = { path = "[^"]*", version = "\([^"]*\)" }/\1 \2/p' Cargo.toml)
+
 exit $fail

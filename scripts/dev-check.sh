@@ -12,6 +12,7 @@
 # - config/: TERN_CONFIG_DIR with hosts `demo` (password hunter2) and `demo-cmd` (a password
 #   command, asked about before it first runs), both reopened as idle tabs;
 # - known_hosts: TERN_KNOWN_HOSTS, so ~/.ssh/known_hosts is never touched.
+# The window opens at 80,80 on the main display, 1100x700, so screenshots find it whole.
 # A debug build keeps its Keychain items apart too ("tern vault (debug)").
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -69,7 +70,7 @@ if ! lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 
 open -n --env TERN_CONFIG_DIR="$config" --env TERN_KNOWN_HOSTS="$PWD/$root/known_hosts" \
-  --env TERN_DEV_WINDOW=1100x700 "$app"
+  --env TERN_DEV_WINDOW=1100x700 --env TERN_DEV_WINDOW_AT=80,80 "$app"
 
 echo "app:       $app (bundle id dev.tern.check)"
 echo "config:    $config"

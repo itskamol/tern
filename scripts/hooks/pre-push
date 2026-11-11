@@ -2,10 +2,41 @@
 # Refuses a push that would fail CI. Enable once per clone: git config core.hooksPath scripts/hooks
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+# Git gives "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref on stdin; read it
+# before anything else can.
+refs=$(cat)
 export CARGO_INCREMENTAL=0
 echo "pre-push: fmt"     && cargo fmt --all --check
 echo "pre-push: clippy"  && cargo clippy -q --workspace --all-targets -- -D warnings
 echo "pre-push: test"    && cargo test -q --workspace >/dev/null
 echo "pre-push: craft"   && scripts/check-craft.sh
 if command -v cargo-deny >/dev/null; then echo "pre-push: deny" && cargo deny check -s 2>/dev/null; fi
+
+# The critical crates' changed lines must have tests that can fail (docs/testing.md). Only the
+# lines this push changes in tern-vault and tern-sync are mutated, so it stays quick.
+if command -v cargo-mutants >/dev/null; then
+  zero=0000000000000000000000000000000000000000
+  diff=target/pre-push-mutants.diff
+  : > "$diff"
+  while read -r _ local_sha _ remote_sha; do
+    [ -n "${local_sha:-}" ] && [ "$local_sha" != "$zero" ] || continue
+    base=$remote_sha
+    [ "$base" != "$zero" ] || base=$(git merge-base "$local_sha" main)
+    git diff "$base" "$local_sha" -- crates/tern-vault crates/tern-sync >> "$diff"
+  done <<< "$refs"
+  if [ -s "$diff" ]; then
+    echo "pre-push: mutants (changed lines in tern-vault, tern-sync)"
+    log=target/pre-push-mutants.log
+    set +e
+    cargo mutants -p tern-vault -p tern-sync --in-diff "$diff" --output target/pre-push-mutants >"$log" 2>&1
+    rc=$?
+    set -e
+    grep -E "MISSED|TIMEOUT|mutants tested" "$log" || true
+    case $rc in
+      0) ;;
+      2) echo "pre-push: a changed line has no test that fails when it breaks ($log)"; exit 1 ;;
+      *) echo "pre-push: cargo mutants failed (exit $rc, $log)"; exit 1 ;;
+    esac
+  fi
+fi
 echo "pre-push: all gates passed"
