@@ -196,7 +196,11 @@ mod tests {
     fn a_dark_scheme_keeps_its_lightness_under_either_appearance() {
         let scheme = crate::theme::themes::find("12-bit Rainbow").unwrap();
         for light in [false, true] {
-            let t = Theme::zeron(light).tinted([245, 236, 214]);
+            let t = Theme::resolve(crate::theme::Look {
+                light,
+                ..Default::default()
+            })
+            .tinted([245, 236, 214]);
             let term = t.terminal(13.0, Some(scheme));
             let bg = rgb_of(term.background);
             assert!(bg.iter().all(|c| *c < 0x20), "light={light}: {bg:?}");
@@ -209,7 +213,10 @@ mod tests {
     #[test]
     fn borders_are_never_tinted() {
         for light in [false, true] {
-            let base = Theme::zeron(light);
+            let base = Theme::resolve(crate::theme::Look {
+                light,
+                ..Default::default()
+            });
             for color in WALLPAPERS {
                 assert_eq!(base.tinted(color).border, base.border);
                 assert_eq!(base.tinted(color).hairline, base.hairline);

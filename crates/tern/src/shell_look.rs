@@ -22,6 +22,7 @@ use gpui::{
 };
 
 use super::*;
+use crate::theme::Look;
 
 impl Shell {
     /// The scheme a host's tabs use: its own, else the default, else zeron's (`None`).
@@ -39,40 +40,32 @@ impl Shell {
             .map(String::as_str)
     }
 
-    /// Switches the palette when the chosen appearance (or the system's, for System) differs
-    /// from the one showing, and restyles everything that holds a colour: open terminals, text
-    /// fields, the wallpaper tint.
-    pub(crate) fn apply_appearance(&mut self, cx: &mut Context<Self>) {
-        let light = self.settings.appearance.is_light(self.system_light);
-        if light == self.theme.light {
-            return;
-        }
-        self.theme = Theme::zeron(light);
-        self.refresh_theme(cx);
-        self.install_input_colors(cx);
-        self.restyle_tabs(cx);
-        cx.notify();
+    /// Rebuilds the palette after one of its inputs changed (appearance, a display
+    /// preference, the wallpaper or its settings). When it is different, everything that holds
+    /// a colour is restyled once: open terminals, text fields, the window.
+    pub(crate) fn retheme(&mut self, cx: &mut Context<Self>) {
+        self.retheme_with(self.look(), cx);
     }
 
-    /// Reads macOS's Increase contrast and Reduce transparency and applies what changed: the
-    /// palette is rebuilt (stronger edges and secondary text), and open terminals restyled
-    /// (their see-through background under a wallpaper goes opaque).
-    pub(crate) fn sync_display_preferences(&mut self, cx: &mut Context<Self>) {
-        let contrast = crate::platform::system_increase_contrast();
-        let transparency = crate::platform::system_reduce_transparency();
-        let moved = (contrast, transparency)
-            != (
-                crate::theme::increase_contrast(),
-                crate::theme::reduce_transparency(),
-            );
-        if !moved {
-            return;
+    fn retheme_with(&mut self, look: Look, cx: &mut Context<Self>) {
+        let next = Theme::resolve(look);
+        if next != self.theme {
+            self.theme = next;
+            self.install_input_colors(cx);
+            self.restyle_tabs(cx);
+            cx.notify();
         }
-        crate::theme::set_increase_contrast(contrast);
-        crate::theme::set_reduce_transparency(transparency);
-        self.refresh_theme(cx);
-        self.restyle_tabs(cx);
-        cx.notify();
+    }
+
+    /// Reads macOS's Increase contrast and Reduce transparency; a change rebuilds the palette
+    /// (stronger edges and secondary text; opaque panels).
+    pub(crate) fn sync_display_preferences(&mut self, cx: &mut Context<Self>) {
+        let look = Look {
+            increase_contrast: crate::platform::system_increase_contrast(),
+            reduce_transparency: crate::platform::system_reduce_transparency(),
+            ..self.look()
+        };
+        self.retheme_with(look, cx);
     }
 
     /// Standard-density mode for this frame, from the monitor the window is on right now.
@@ -84,13 +77,7 @@ impl Shell {
 
     /// Text fields read their colours from this global, so open ones follow the theme.
     pub(crate) fn install_input_colors(&self, cx: &mut Context<Self>) {
-        let t = self.theme;
-        cx.set_global(crate::text_input::InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        });
+        cx.set_global(self.theme.input_colors());
     }
 
     pub(super) fn terminal_theme(&self, alias: &str) -> tern_term::TerminalTheme {
@@ -223,9 +210,8 @@ impl Shell {
     /// nothing behind the window may show). Reduce transparency forces the opaque one.
     pub(super) fn sync_frame(&mut self, window: &mut Window) {
         self.frame.scale = window.scale_factor();
-        let blurred = crate::theme::BLURS_BEHIND
-            && !self.has_wallpaper()
-            && !crate::theme::reduce_transparency();
+        let blurred =
+            crate::theme::BLURS_BEHIND && !self.has_wallpaper() && !self.theme.reduce_transparency;
         if self.frame.blurred != Some(blurred) {
             self.frame.blurred = Some(blurred);
             window.set_background_appearance(if blurred {

@@ -11,7 +11,7 @@ use super::Shell;
 use crate::connections::{self, Connection};
 use crate::picker;
 use crate::sidebar;
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 use crate::theme::Theme;
 use std::io;
 use std::path::Path;
@@ -34,12 +34,7 @@ pub(super) struct HostList {
 
 impl HostList {
     pub fn new(t: &Theme, recent: Recent, cx: &mut Context<Shell>) -> Self {
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let search = cx.new(|cx| TextInput::new("Search hosts", false, colors, cx));
         // The list under the box re-filters on every keystroke.
         let repaint = cx.observe(&search, |shell: &mut Shell, search, cx| {

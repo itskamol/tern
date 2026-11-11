@@ -14,7 +14,7 @@ use tern_vault::{ExposeSecret, Key, Vault, VaultError};
 use super::{Shell, Toast, ToastKind};
 use crate::keeper::{self, Ask, Keeper, Tried, Typed};
 use crate::lock_on_sleep::{self, Cause};
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 
 /// How often the idle lock looks at the clock.
 const IDLE_CHECK: Duration = Duration::from_secs(10);
@@ -100,12 +100,7 @@ impl Shell {
             return;
         }
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let mut input = |placeholder: &'static str, masked: bool| {
             cx.new(|cx| TextInput::new(placeholder, masked, colors, cx))
         };

@@ -19,7 +19,7 @@ use crate::empty_state::{self, Listing};
 use crate::picker::{self, Key};
 use crate::settings_widgets as w;
 use crate::snippets::{self, Snippet};
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 
 actions!(tern, [ToggleSnippets]);
 
@@ -421,12 +421,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let current = editing.and_then(|ix| self.snippets.items.get(ix).cloned());
         let mut field = |placeholder: &str, value: String| {
             cx.new(|cx| {

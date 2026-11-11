@@ -16,7 +16,7 @@ use tern_ssh::{Progress, Sftp, SftpEntry, SftpError};
 use super::broadcast_ui::TabId;
 use super::{Shell, Toast, ToastKind};
 use crate::sftp_paths;
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 
 actions!(tern, [ToggleSftp]);
 
@@ -87,12 +87,7 @@ impl Shell {
             cx.spawn(async move |_, _| old.close().await).detach();
         }
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let path = cx.new(|cx| TextInput::new("/".to_owned(), false, colors, cx));
         cx.observe(&path, |_, _, cx| cx.notify()).detach();
         self.panels.sftp = Some(SftpPanel {

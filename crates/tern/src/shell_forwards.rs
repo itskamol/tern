@@ -16,7 +16,7 @@ use crate::forward_spec;
 use crate::keymap::{self, Keymap, ShortcutId};
 use crate::session::Status;
 use crate::session::{Session, SessionNote};
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 
 actions!(tern, [FillPassword, ClearTerminal]);
 
@@ -61,12 +61,7 @@ impl Shell {
             return;
         };
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let input = cx.new(|cx| {
             TextInput::new(
                 "-L 8080:db:5432  (-R, -D too)".to_owned(),

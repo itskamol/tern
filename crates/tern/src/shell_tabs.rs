@@ -6,7 +6,7 @@ use tern_ssh::ConnectSpec;
 use super::Shell;
 use crate::session::Launch;
 use crate::tabs_store::{SavedKind, SavedTabs};
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 
 /// A title being edited: which tab, and the field holding the text.
 pub(super) struct Rename {
@@ -26,12 +26,7 @@ impl Shell {
         };
         let current = tab.title().map_or_else(|| tab.alias.clone(), str::to_owned);
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let input = cx.new(|cx| {
             let mut input = TextInput::new(tab.alias.clone(), false, colors, cx);
             input.set_text(current, cx);

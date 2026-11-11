@@ -192,12 +192,12 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
         })
         .detach();
         shell.system_light = is_light(window.appearance());
-        shell.apply_appearance(cx);
+        shell.retheme(cx);
         shell.install_input_colors(cx);
         shell.start_clock(cx);
         cx.observe_window_appearance(window, |shell, window, cx| {
             shell.system_light = is_light(window.appearance());
-            shell.apply_appearance(cx);
+            shell.retheme(cx);
         })
         .detach();
         shell.check_for_updates(cx);
@@ -578,7 +578,6 @@ impl Render for Shell {
         self.sync_density(window);
         self.sync_wallpaper(cx);
         self.sync_frame(window);
-        crate::theme::set_see_through(self.window_fill().is_some());
         let t = self.theme;
         let infos = self.tab_infos(cx);
         let active_alias = infos.get(self.tabs.active()).map(|i| i.alias.clone());

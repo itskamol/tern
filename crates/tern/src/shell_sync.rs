@@ -16,7 +16,7 @@ use tern_sync::{Plan, TokenSource};
 use super::{Shell, ToastKind};
 use crate::keeper::Keeper;
 use crate::settings_widgets as w;
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 
 #[path = "shell_sync_engine.rs"]
 mod engine;
@@ -106,12 +106,7 @@ impl Shell {
             return;
         }
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let token_input =
             cx.new(|cx| TextInput::new("ghp_… with the gist scope", true, colors, cx));
         let pass_input = cx.new(|cx| TextInput::new("Vault passphrase", true, colors, cx));
@@ -480,8 +475,7 @@ impl Shell {
         self.settings = crate::settings::Settings::load(&dir);
         self.tabs.set_saving(self.settings.reopen_tabs);
         crate::platform::apply_reduce_motion(self.settings.reduce_motion, cx);
-        self.apply_appearance(cx);
-        self.refresh_theme(cx);
+        self.retheme(cx);
         cx.set_global(crate::keymap::Keymap::load(&dir));
         crate::keymap::apply(cx);
         match crate::connections::load(&dir) {

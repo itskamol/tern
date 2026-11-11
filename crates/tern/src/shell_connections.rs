@@ -15,7 +15,7 @@ use super::{Shell, Toast, ToastKind};
 use crate::connections::{self, Connection, DEFAULT_KEEP_ALIVE, Draft};
 use crate::keeper::{Keeper, Tried, Typed};
 use crate::sidebar;
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 use crate::theme::Theme;
 
 #[path = "shell_connection_advanced.rs"]
@@ -102,12 +102,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let mut field = |placeholder: &str, masked: bool, value: String| {
             cx.new(|cx| {
                 let mut input = TextInput::new(placeholder.to_owned(), masked, colors, cx);
@@ -212,12 +207,7 @@ impl Shell {
     /// A blank port-forward row, focused.
     fn add_forward_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let input = cx.new(|cx| TextInput::new(FORWARD_HINT.to_owned(), false, colors, cx));
         window.focus(&input.focus_handle(cx), cx);
         if let Some(form) = self.form.as_mut() {

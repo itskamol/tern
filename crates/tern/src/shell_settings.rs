@@ -204,7 +204,7 @@ impl Shell {
                     })
                     .on_click(cx.listener(move |s, _, _, cx| {
                         s.update_settings(|st| st.appearance = mode, cx);
-                        s.apply_appearance(cx);
+                        s.retheme(cx);
                     })),
             );
         }

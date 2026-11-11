@@ -90,7 +90,7 @@ impl Shell {
                 self.wp.fade = None;
                 // The accent is restored outside this frame: it restyles the open terminals.
                 cx.spawn(async move |this, cx| {
-                    this.update(cx, |s, cx| s.refresh_theme(cx)).ok();
+                    this.update(cx, |s, cx| s.retheme(cx)).ok();
                 })
                 .detach();
             }
@@ -153,26 +153,25 @@ impl Shell {
                 self.wp.failed = Some(want);
             }
         }
-        self.refresh_theme(cx);
+        self.retheme(cx);
         self.restyle_tabs(cx);
         cx.notify();
     }
 
-    /// Rebuilds the palette: tern's own, or leaning toward the wallpaper's dominant colour when
-    /// asked to. Restyles open terminals and text fields when it changed.
-    pub(super) fn refresh_theme(&mut self, cx: &mut Context<Self>) {
-        let base = Theme::zeron(self.theme.light);
-        let tint = self
-            .settings
-            .wallpaper_theme_colors
-            .then(|| self.wp.shown.as_ref().and_then(|s| s.prepared.accent))
-            .flatten();
-        let next = tint.map_or(base, |color| base.tinted(color));
-        if next != self.theme {
-            self.theme = next;
-            self.install_input_colors(cx);
-            self.restyle_tabs(cx);
-            cx.notify();
+    /// What the palette is built from now: the appearance setting (or the system's, for
+    /// System), the display preferences last read, and the wallpaper.
+    pub(super) fn look(&self) -> crate::theme::Look {
+        let shown = self.wp.shown.as_ref();
+        crate::theme::Look {
+            light: self.settings.appearance.is_light(self.system_light),
+            increase_contrast: self.theme.increase_contrast,
+            reduce_transparency: self.theme.reduce_transparency,
+            wallpaper_fills: self.settings.wallpaper_fills_window && shown.is_some(),
+            tint: self
+                .settings
+                .wallpaper_theme_colors
+                .then(|| shown.and_then(|s| s.prepared.accent))
+                .flatten(),
         }
     }
 
@@ -201,7 +200,7 @@ impl Shell {
     /// terminal's own text) keep 4.5:1 over the picture's brightest and darkest regions. `None`
     /// under Reduce transparency: the panels stay opaque and the picture never shows through.
     pub(crate) fn window_fill(&self) -> Option<f32> {
-        if !self.settings.wallpaper_fills_window || crate::theme::reduce_transparency() {
+        if !self.settings.wallpaper_fills_window || self.theme.reduce_transparency {
             return None;
         }
         let shown = self.wp.shown.as_ref()?;
@@ -427,6 +426,7 @@ impl Shell {
                         |st| st.wallpaper_fills_window = !st.wallpaper_fills_window,
                         cx,
                     );
+                    s.retheme(cx);
                     s.restyle_tabs(cx);
                 }))
                 .child(w::toggle(&t, fills, "wallpaper-fills")),
@@ -447,7 +447,7 @@ impl Shell {
                         |st| st.wallpaper_theme_colors = !st.wallpaper_theme_colors,
                         cx,
                     );
-                    s.refresh_theme(cx);
+                    s.retheme(cx);
                 }))
                 .child(w::toggle(&t, on, "wallpaper-colours")),
         ))
