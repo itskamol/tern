@@ -3,11 +3,10 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, MouseUpEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, point, px,
-    size,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
+    MouseButton, MouseUpEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowOptions, actions, div, point, px, size,
 };
 #[cfg(debug_assertions)]
 use tern_ssh::ConnectSpec;
@@ -19,8 +18,8 @@ use crate::indicator::Dot;
 use crate::picker::{self, Picker, ToggleHostPicker};
 use crate::session::{Launch, Session, Status};
 use crate::settings::{self, SIDEBAR_DEFAULT, Settings};
-use crate::split::{self, PaneId};
-use crate::tab_set::{Paned, TabSet};
+use crate::split;
+use crate::tab_set::TabSet;
 use crate::tabs::{self, ActivateTab, CloseTab, NextTab, PrevTab, TabInfo};
 use crate::tabs_store::DiskTabs;
 use crate::theme::{Theme, UI_FONT};
@@ -50,12 +49,12 @@ actions!(
 mod broadcast_ui;
 #[path = "shell_files.rs"]
 mod files_ui;
+#[path = "shell_pane.rs"]
+mod pane_ui;
+use pane_ui::{Content, Pane, Tab, TermPane};
 #[path = "shell_forwards.rs"]
 mod forwards_ui;
-#[path = "shell_sftp.rs"]
-mod sftp_ui;
 pub(crate) use forwards_ui::{ClearTerminal, FillPassword};
-pub(crate) use sftp_ui::ToggleSftp;
 #[path = "shell_wallpaper_gallery.rs"]
 mod gallery_ui;
 #[path = "shell_look.rs"]
@@ -309,67 +308,6 @@ pub(crate) fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
             .map(Into::into)
             .or(spec.known_hosts),
         ..spec
-    }
-}
-
-/// One pane in a tab: a terminal on a connection, or the Files tab's two panels.
-struct Pane {
-    id: PaneId,
-    content: Content,
-}
-
-enum Content {
-    Session(TermPane),
-    Files(Entity<crate::files_tab::FilesView>),
-}
-
-/// A terminal: a connection.
-struct TermPane {
-    session: Entity<Session>,
-    _repaint: Subscription,
-    _bell: Subscription,
-    _notes: Subscription,
-}
-
-type Tab = crate::tab_set::Tab<Pane>;
-
-impl Paned for Pane {
-    fn pane_id(&self) -> PaneId {
-        self.id
-    }
-
-    fn is_session(&self) -> bool {
-        matches!(self.content, Content::Session(_))
-    }
-}
-
-impl Pane {
-    /// The pane's session; a Files tab has none.
-    fn session(&self) -> Option<&Entity<Session>> {
-        match &self.content {
-            Content::Session(t) => Some(&t.session),
-            Content::Files(_) => None,
-        }
-    }
-
-    /// What the keyboard goes to when the pane is in front.
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match &self.content {
-            Content::Session(t) => t.session.read(cx).view.focus_handle(cx),
-            Content::Files(f) => f.read(cx).focus.clone(),
-        }
-    }
-}
-
-impl Tab {
-    /// The focused pane's session: what the strip shows and what typing reaches. A Files tab
-    /// has none.
-    fn session(&self) -> Option<&Entity<Session>> {
-        self.front().session()
-    }
-
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.front().focus_handle(cx)
     }
 }
 
@@ -715,7 +653,6 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &FocusHostSearch, w, cx| s.focus_search(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSnippets, w, cx| s.toggle_snippet_picker(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
-            .on_action(cx.listener(|s, _: &ToggleSftp, w, cx| s.toggle_sftp(w, cx)))
             .on_action(cx.listener(|s, _: &OpenFiles, w, cx| s.open_files_tab(None, w, cx)))
             .on_action(cx.listener(|s, _: &FillPassword, _, cx| s.fill_password(cx)))
             .on_action(cx.listener(|s, _: &ClearTerminal, _, cx| s.clear_terminal(cx)))
@@ -800,7 +737,7 @@ impl Render for Shell {
             .when_some(theme_picker, |el, p| el.child(p))
             .when_some(context_menu, |el, m| el.child(m))
             .when_some(self.render_broadcast_picker(cx), |el, p| el.child(p))
-            .children(self.render_panels(window, cx))
+            .children(self.render_panels(cx))
             .children(self.render_conflict_sheet(window, cx))
             .children(self.render_quit_sheet(window, cx))
             .when_some(toast, |el, t| el.child(t))

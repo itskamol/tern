@@ -24,7 +24,6 @@ actions!(tern, [FillPassword, ClearTerminal]);
 #[derive(Default)]
 pub(super) struct Panels {
     pub forwards: Option<ForwardsPanel>,
-    pub sftp: Option<super::sftp_ui::SftpPanel>,
 }
 
 pub(super) struct ForwardsPanel {
@@ -131,18 +130,8 @@ impl Shell {
         cx.stop_propagation();
     }
 
-    pub(super) fn render_panels(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        [
-            self.render_forwards_panel(cx),
-            self.render_sftp_panel(window, cx),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+    pub(super) fn render_panels(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.render_forwards_panel(cx).into_iter().collect()
     }
 
     fn render_forwards_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

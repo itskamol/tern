@@ -467,7 +467,7 @@ impl FilesView {
     /// Up and down keys: move the pick by `delta` rows from the last one clicked.
     pub fn step(&mut self, side: usize, delta: isize, cx: &mut Context<Self>) {
         let p = &mut self.panels[side];
-        if let Some(next) = crate::sftp_paths::step(p.selection.anchor(), delta, p.entries.len()) {
+        if let Some(next) = crate::files_text::step(p.selection.anchor(), delta, p.entries.len()) {
             p.selection.only(next);
             cx.notify();
         }

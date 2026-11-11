@@ -75,8 +75,8 @@ pub fn init_menus(cx: &mut App) {
 #[cfg(target_os = "macos")]
 fn app_menus() -> Vec<Menu> {
     use crate::shell::{
-        DecreaseFontSize, IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize, ShowAbout,
-        SplitDown, SplitRight, ToggleSftp, ToggleSidebar, ToggleSnippets,
+        DecreaseFontSize, IncreaseFontSize, NewConnection, OpenFiles, OpenSettings, ResetFontSize,
+        ShowAbout, SplitDown, SplitRight, ToggleSidebar, ToggleSnippets,
     };
     use crate::shell::{RedoHosts, UndoHosts};
     use crate::tabs::{CloseTab, NextTab, PrevTab};
@@ -131,7 +131,7 @@ fn app_menus() -> Vec<Menu> {
             "View",
             vec![
                 MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
-                MenuItem::action("Browse Files", ToggleSftp),
+                MenuItem::action("Files Tab", OpenFiles),
                 MenuItem::separator(),
                 MenuItem::action("Bigger Text", IncreaseFontSize),
                 MenuItem::action("Smaller Text", DecreaseFontSize),

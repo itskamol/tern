@@ -37,7 +37,7 @@ pub use files::{
 pub use forward::{Forward, ForwardHandle, ForwardInfo};
 pub use futures::channel::oneshot;
 pub use secrecy::{self, ExposeSecret, SecretString};
-pub use sftp::{Progress, Sftp, SftpError};
+pub use sftp::{Sftp, SftpError};
 pub use transfer::{
     Conflict, CopyJob, Event, MAX_RUNNING, Progress as TransferProgress, Question, Summary,
     TransferQueue,

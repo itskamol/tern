@@ -122,7 +122,7 @@ impl Transfers {
 
 /// `1.5 MB/s`.
 pub fn speed(bytes_per_sec: u64) -> String {
-    format!("{}/s", crate::sftp_paths::human_size(bytes_per_sec))
+    format!("{}/s", crate::files_text::human_size(bytes_per_sec))
 }
 
 /// `2 min left`, `45 s left`, `1 h 05 min left`.
@@ -139,8 +139,8 @@ pub fn time_left(left: Duration) -> String {
 pub fn detail(p: &Progress) -> String {
     let mut parts = vec![format!(
         "{} of {}",
-        crate::sftp_paths::human_size(p.done),
-        crate::sftp_paths::human_size(p.total)
+        crate::files_text::human_size(p.done),
+        crate::files_text::human_size(p.total)
     )];
     if p.speed > 0 {
         parts.push(speed(p.speed));

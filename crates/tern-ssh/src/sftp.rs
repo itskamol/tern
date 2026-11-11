@@ -1,6 +1,7 @@
 // Adapted from russh russh/examples/sftp_client.rs (Apache-2.0): open a session channel, request
 // the `sftp` subsystem, give the channel's stream to russh-sftp's `SftpSession::new`.
-//! SFTP over a session: list, download, upload, and the login directory. No UI; the app drives it.
+//! SFTP over a session: the calls the file source adapter (`files_sftp`) is made of. No UI; the
+//! app drives it through the file source.
 //!
 //! The protocol work is `russh-sftp` (Apache-2.0), used as its `examples/sftp_client.rs` in the
 //! russh repository does: open a session channel, request the `sftp` subsystem, and hand the
@@ -8,7 +9,6 @@
 //! futures here may be awaited from any executor.
 use std::fmt;
 use std::future::Future;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -19,13 +19,9 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as SftpWireError;
 use russh_sftp::client::fs::File;
 use russh_sftp::protocol::StatusCode;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::files::{FileEntry, sort_entries};
 use crate::hostkey::Handler;
-
-/// Bytes moved per read or write; also how often progress is reported.
-const CHUNK: usize = 64 * 1024;
 
 /// Why an SFTP call failed, worded for the person using the app.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -42,19 +38,9 @@ pub enum SftpError {
     PermissionDenied(String),
     #[error("{0}: already exists")]
     AlreadyExists(String),
-    /// A problem on this machine's side of a transfer.
-    #[error("{path}: {reason}")]
-    Local { path: String, reason: String },
     /// Anything else the server or the protocol reported.
     #[error("{0}")]
     Other(String),
-}
-
-/// How far a transfer has got.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Progress {
-    pub done: u64,
-    pub total: u64,
 }
 
 /// An SFTP connection on one SSH session. Cheap to clone.
@@ -110,13 +96,6 @@ fn wire(path: &str, e: &SftpWireError) -> SftpError {
     }
 }
 
-fn local(path: &Path, e: &std::io::Error) -> SftpError {
-    SftpError::Local {
-        path: path.display().to_string(),
-        reason: e.to_string(),
-    }
-}
-
 impl Sftp {
     /// Runs `fut` on the session's runtime and waits for it from wherever the caller runs.
     async fn on_rt<T, F>(&self, fut: F) -> Result<T, SftpError>
@@ -169,103 +148,6 @@ impl Sftp {
                 .collect();
             sort_entries(&mut out);
             Ok(out)
-        })
-        .await
-    }
-
-    /// Copies a remote file to `local`, replacing it. The data lands in `<local>.part` first and
-    /// is renamed on success, so a failed transfer never leaves a half-written `local`.
-    /// `progress` is called after every chunk. Returns the bytes copied.
-    ///
-    /// # Errors
-    ///
-    /// The remote file's errors as in [`Self::list`], or [`SftpError::Local`].
-    pub async fn download(
-        &self,
-        remote: &str,
-        local_path: &Path,
-        mut progress: impl FnMut(Progress) + Send + 'static,
-    ) -> Result<u64, SftpError> {
-        let (s, remote, dest) = (
-            self.inner.clone(),
-            remote.to_string(),
-            local_path.to_path_buf(),
-        );
-        self.on_rt(async move {
-            let total = s
-                .metadata(remote.clone())
-                .await
-                .map_err(|e| wire(&remote, &e))?
-                .len();
-            let mut src = s
-                .open(remote.clone())
-                .await
-                .map_err(|e| wire(&remote, &e))?;
-            let part = part_path(&dest);
-            let copied = copy_down(&mut src, &part, total, &mut progress).await;
-            let _ = src.shutdown().await;
-            match copied {
-                Ok(n) => {
-                    tokio::fs::rename(&part, &dest)
-                        .await
-                        .map_err(|e| local(&dest, &e))?;
-                    Ok(n)
-                }
-                Err(e) => {
-                    let _ = tokio::fs::remove_file(&part).await;
-                    Err(match e {
-                        Down::Local(io) => local(&dest, &io),
-                        Down::Remote(io) => SftpError::Other(format!("{remote}: {io}")),
-                    })
-                }
-            }
-        })
-        .await
-    }
-
-    /// Copies `local` to a remote file, replacing it. `progress` is called after every chunk.
-    /// Returns the bytes copied.
-    ///
-    /// # Errors
-    ///
-    /// [`SftpError::Local`] for the local file, or the remote path's errors as in [`Self::list`].
-    pub async fn upload(
-        &self,
-        local_path: &Path,
-        remote: &str,
-        mut progress: impl FnMut(Progress) + Send + 'static,
-    ) -> Result<u64, SftpError> {
-        let (s, remote, src) = (
-            self.inner.clone(),
-            remote.to_string(),
-            local_path.to_path_buf(),
-        );
-        self.on_rt(async move {
-            let mut file = tokio::fs::File::open(&src)
-                .await
-                .map_err(|e| local(&src, &e))?;
-            let total = file.metadata().await.map_err(|e| local(&src, &e))?.len();
-            let mut dest = s
-                .create(remote.clone())
-                .await
-                .map_err(|e| wire(&remote, &e))?;
-            let mut buf = vec![0u8; CHUNK];
-            let mut done = 0u64;
-            loop {
-                let n = file.read(&mut buf).await.map_err(|e| local(&src, &e))?;
-                if n == 0 {
-                    break;
-                }
-                dest.write_all(&buf[..n])
-                    .await
-                    .map_err(|e| SftpError::Other(format!("{remote}: {e}")))?;
-                done += n as u64;
-                progress(Progress { done, total });
-            }
-            dest.shutdown()
-                .await
-                .map_err(|e| SftpError::Other(format!("{remote}: {e}")))?;
-            Ok(done)
         })
         .await
     }
@@ -393,37 +275,4 @@ fn remove_tree(
             .await
             .map_err(|e| wire(&path, &e))
     })
-}
-
-enum Down {
-    Local(std::io::Error),
-    Remote(std::io::Error),
-}
-
-async fn copy_down(
-    src: &mut russh_sftp::client::fs::File,
-    part: &Path,
-    total: u64,
-    progress: &mut (impl FnMut(Progress) + Send),
-) -> Result<u64, Down> {
-    let mut out = tokio::fs::File::create(part).await.map_err(Down::Local)?;
-    let mut buf = vec![0u8; CHUNK];
-    let mut done = 0u64;
-    loop {
-        let n = src.read(&mut buf).await.map_err(Down::Remote)?;
-        if n == 0 {
-            break;
-        }
-        out.write_all(&buf[..n]).await.map_err(Down::Local)?;
-        done += n as u64;
-        progress(Progress { done, total });
-    }
-    out.flush().await.map_err(Down::Local)?;
-    Ok(done)
-}
-
-fn part_path(dest: &Path) -> PathBuf {
-    let mut name = dest.as_os_str().to_owned();
-    name.push(".part");
-    PathBuf::from(name)
 }

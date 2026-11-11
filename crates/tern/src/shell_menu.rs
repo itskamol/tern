@@ -157,7 +157,7 @@ impl Shell {
                 s.start_logging(ix, cx)
             }));
         }
-        items.push(action(icons::FOLDER, "Browse files", move |s, w, cx| {
+        items.push(action(icons::FOLDER, "Open Files tab", move |s, w, cx| {
             s.open_files_tab(Some(ix), w, cx)
         }));
         items.push(action(icons::GLOBE, "Port forwards…", move |s, w, cx| {
