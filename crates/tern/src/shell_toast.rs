@@ -43,6 +43,8 @@ pub(crate) struct Toast {
     message: SharedString,
     action: Option<(SharedString, Action)>,
     duration: Duration,
+    /// Follows a transfer: stays until [`Shell::end_progress_toast`], its text replaced in place.
+    progress: bool,
 }
 
 impl Toast {
@@ -52,12 +54,20 @@ impl Toast {
             message: message.into(),
             action: None,
             duration: DEFAULT_DURATION,
+            progress: false,
         }
     }
 
     /// Stays up for `secs` instead of the usual few seconds.
     pub(crate) fn staying(mut self, secs: u64) -> Self {
         self.duration = Duration::from_secs(secs);
+        self
+    }
+
+    /// Stays up for as long as the transfer it reports runs.
+    pub(crate) fn lasting(mut self) -> Self {
+        self.duration = Duration::from_secs(3600);
+        self.progress = true;
         self
     }
 
@@ -169,6 +179,33 @@ impl Shell {
         if self.toasts.showing.is_none() {
             self.next_toast(cx);
         }
+    }
+
+    /// Shows or updates the one snackbar that follows a transfer ("Downloading a.txt… 40%").
+    pub(crate) fn progress_toast(
+        &mut self,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message.into();
+        if let Some((toast, _)) = self.toasts.showing.as_mut().filter(|(t, _)| t.progress) {
+            toast.message = message;
+            return cx.notify();
+        }
+        if let Some(queued) = self.toasts.queue.iter_mut().find(|t| t.progress) {
+            queued.message = message;
+            return;
+        }
+        self.toast(Toast::new(Kind::Default, message).lasting(), cx);
+    }
+
+    /// Takes the transfer snackbar down, so its result can be shown next.
+    pub(crate) fn end_progress_toast(&mut self, cx: &mut Context<Self>) {
+        self.toasts.queue.retain(|t| !t.progress);
+        if let Some((_, clock)) = self.toasts.showing.as_mut().filter(|(t, _)| t.progress) {
+            clock.dismiss(Instant::now());
+        }
+        cx.notify();
     }
 
     pub(crate) fn notify_toast(

@@ -7,7 +7,7 @@
 //! more can be added or stopped while it is open. What was added stays in the spec, so an
 //! automatic reconnect brings it back; what was stopped is dropped from it.
 
-use gpui::{AppContext, Context, EventEmitter};
+use gpui::{App, AppContext, Context, EventEmitter};
 use tern_ssh::{ExposeSecret, Forward, ForwardInfo, SecretString};
 use tern_vault::Key;
 
@@ -82,7 +82,7 @@ pub fn source(sudo: Option<&str>, password: Option<&str>, vault: bool) -> Source
 
 impl Session {
     /// Whether a password could be filled here, as far as can be told without unlocking.
-    fn fill_source(&self, cx: &Context<Self>) -> Source {
+    fn fill_source(&self, cx: &App) -> Source {
         let key = self.password_key();
         // An open vault is looked in; a locked one may hold it, so say yes and ask later.
         let vault = Keeper::lookup(&key, cx).is_some() || Keeper::locked(cx);
@@ -102,12 +102,20 @@ impl Session {
     }
 
     /// The text left of the cursor, when it is a password prompt.
-    fn at_password_prompt(&self, cx: &Context<Self>) -> bool {
+    fn at_password_prompt(&self, cx: &App) -> bool {
         self.prompt_guard(cx).is_ok()
     }
 
-    fn prompt_guard(&self, cx: &Context<Self>) -> Result<(), &'static str> {
+    fn prompt_guard(&self, cx: &App) -> Result<(), &'static str> {
         guard(self.terminal.read(cx).cursor_line_text().as_deref())
+    }
+
+    /// Whether this session is at a password prompt that Fill could answer: connected with no
+    /// login question open, a prompt on the cursor line, and a password to type. The pane's
+    /// "password asked" badge and Fill's choice of pane both follow it; it is read, not stored,
+    /// so it stops being true the moment the prompt is answered.
+    pub fn waiting_for_fill(&self, cx: &App) -> bool {
+        self.accepts_input() && self.at_password_prompt(cx) && self.fill_source(cx) != Source::None
     }
 
     /// After the remote wrote: if it now asks for a password and one could be filled, tells

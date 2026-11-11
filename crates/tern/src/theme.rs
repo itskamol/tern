@@ -23,6 +23,10 @@ pub const SPACE_LG: f32 = 16.0;
 pub const UI_FONT: &str = "Geist";
 pub const MONO_FONT: &str = "Geist Mono";
 pub const CONTROL_RADIUS: f32 = 6.0;
+/// The accent border around the focused pane of a split tab, in points.
+pub const FOCUS_BORDER: f32 = 2.0;
+/// How much of its strength a pane without the keyboard keeps in a split tab.
+pub const UNFOCUSED_OPACITY: f32 = 0.85;
 
 /// Whether the window is on a standard-density display (scale factor below 1.5) with sharper
 /// text on. Set once per frame by `Shell::render`, so moving the window to another monitor

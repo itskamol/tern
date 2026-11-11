@@ -15,7 +15,7 @@ use crate::shell::Shell;
 /// pointer.
 #[derive(Clone)]
 pub struct DraggedHost {
-    pub(super) ix: usize,
+    pub(crate) ix: usize,
     pub(super) label: SharedString,
     pub(super) background: Hsla,
     pub(super) color: Hsla,

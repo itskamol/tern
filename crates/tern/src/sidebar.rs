@@ -21,7 +21,8 @@ use crate::shell::Shell;
 use crate::tabs::{self, TabInfo};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
-use drag::{DraggedHost, drop_line, spring_load};
+pub(crate) use drag::DraggedHost;
+use drag::{drop_line, spring_load};
 
 /// `hosts[i]` is `connections[i].entry()`: the sidebar lists tern's own connections only.
 pub struct SidebarState<'a> {

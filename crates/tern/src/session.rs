@@ -670,8 +670,12 @@ fn wants_reconnect(input: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+#[path = "session_scenario_server.rs"]
+pub(crate) mod scenario_server;
+
+#[cfg(test)]
 #[path = "session_scenario_tests.rs"]
-pub(crate) mod scenario_tests;
+mod scenario_tests;
 
 #[cfg(test)]
 mod tests {

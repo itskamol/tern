@@ -1,111 +1,20 @@
-// Adapted from russh 0.64 examples/echoserver.rs (Apache-2.0) for the server handler shape.
 //! A real `Session` in a test window, logging in to an in-process SSH server that takes one
 //! password: the server's questions, tern's own (vault passphrase, save offer) and the order
 //! they come in, as a person at the terminal meets them. No GUI, network or Keychain beyond
 //! 127.0.0.1; the vault is a file in a temp dir.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{Entity, IntoElement, Render, TestApp};
-use russh::keys::{Algorithm, PrivateKey};
-use russh::server::{self, Auth, Msg};
-use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use tern_ssh::{ConnectSpec, SecretString};
 use tern_vault::{Key, Vault};
 
+use super::scenario_server::{PASSWORD, PROMPT, SUDO_PROMPT, Typed, serve};
 use super::{Launch, Session, Status};
 use crate::keeper::Keeper;
 use crate::password_command::Auth as LinkAuth;
 use crate::platform::SshRuntime;
-
-pub(crate) const PASSWORD: &str = "hunter2";
-const PROMPT: &str = "test@demo:~$ ";
-
-#[derive(Clone)]
-struct OnePassword;
-
-impl server::Handler for OnePassword {
-    type Error = russh::Error;
-
-    async fn auth_password(&mut self, _: &str, password: &str) -> Result<Auth, Self::Error> {
-        Ok(if password == PASSWORD {
-            Auth::Accept
-        } else {
-            Auth::Reject {
-                proceed_with_methods: Some(MethodSet::from(&[MethodKind::Password][..])),
-                partial_success: false,
-            }
-        })
-    }
-
-    async fn channel_open_session(
-        &mut self,
-        _: Channel<Msg>,
-        reply: server::ChannelOpenHandle,
-        _: &mut server::Session,
-    ) -> Result<(), Self::Error> {
-        reply.accept().await;
-        Ok(())
-    }
-
-    async fn pty_request(
-        &mut self,
-        ch: ChannelId,
-        _: &str,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: &[(russh::Pty, u32)],
-        s: &mut server::Session,
-    ) -> Result<(), Self::Error> {
-        s.channel_success(ch)?;
-        Ok(())
-    }
-
-    async fn shell_request(
-        &mut self,
-        ch: ChannelId,
-        s: &mut server::Session,
-    ) -> Result<(), Self::Error> {
-        s.channel_success(ch)?;
-        s.data(ch, PROMPT.as_bytes().to_vec())?;
-        Ok(())
-    }
-}
-
-/// A server on 127.0.0.1 taking only [`PASSWORD`], on its own runtime (kept alive by the caller).
-pub(crate) fn serve() -> (tokio::runtime::Runtime, u16) {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    let config = Arc::new(server::Config {
-        methods: MethodSet::from(&[MethodKind::Password][..]),
-        auth_rejection_time: Duration::ZERO,
-        auth_rejection_time_initial: Some(Duration::ZERO),
-        keys: vec![PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()],
-        ..Default::default()
-    });
-    let listener = rt
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
-    let port = listener.local_addr().unwrap().port();
-    rt.spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let config = config.clone();
-            tokio::spawn(async move {
-                if let Ok(running) = server::run_stream(config, stream, OnePassword).await {
-                    let _ = running.await;
-                }
-            });
-        }
-    });
-    (rt, port)
-}
 
 struct Host(Entity<Session>);
 
@@ -119,13 +28,15 @@ impl Render for Host {
 struct Scene {
     app: TestApp,
     session: Entity<Session>,
+    /// What the server's shell was typed.
+    typed: Typed,
     _server: tokio::runtime::Runtime,
     _dir: tempfile::TempDir,
 }
 
 /// A session to the test server whose vault (locked, passphrase `vp1`) holds the password.
 fn scene() -> Scene {
-    let (server, port) = serve();
+    let (server, port, typed) = serve();
     let dir = tempfile::tempdir().unwrap();
     let vault_path = dir.path().join("vault.age");
     let mut vault = Vault::new(SecretString::from("vp1".to_owned()));
@@ -166,6 +77,7 @@ fn scene() -> Scene {
     Scene {
         app,
         session,
+        typed,
         _server: server,
         _dir: dir,
     }
@@ -209,6 +121,36 @@ impl Scene {
         });
     }
 
+    /// The Fill shortcut on this session.
+    fn fill(&mut self) {
+        let session = self.session.clone();
+        self.app
+            .update(|cx| session.update(cx, |s, cx| s.fill_password(cx)));
+    }
+
+    /// Whether the session would offer Fill now: the pane's "password asked" state.
+    fn waiting(&mut self) -> bool {
+        self.app
+            .read(|cx| self.session.read(cx).waiting_for_fill(cx))
+    }
+
+    /// Lets the app and the server settle, so what a press sent has had time to arrive.
+    fn settle(&mut self) {
+        for _ in 0..15 {
+            self.app.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Logs in with the vault's passphrase and gets to the shell prompt.
+    fn log_in_with_vault(&mut self) {
+        self.wait_for("continue connecting (yes/no)?");
+        self.type_line("yes");
+        self.wait_for("Vault passphrase (Enter to skip):");
+        self.type_line("vp1");
+        self.wait_for(PROMPT.trim_end());
+    }
+
     fn status(&mut self) -> Status {
         self.app.read(|cx| self.session.read(cx).status())
     }
@@ -243,4 +185,51 @@ fn a_wrong_vault_passphrase_falls_through_to_the_server_s_own_question() {
     s.type_line(PASSWORD);
     s.wait_for(PROMPT.trim_end());
     assert_eq!(s.status(), Status::Connected);
+}
+
+#[test]
+fn one_fill_at_a_sudo_prompt_types_the_vault_password_once_and_the_server_accepts_it() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    assert!(!s.waiting(), "no prompt yet, so no badge");
+    s.type_line("sudo true");
+    s.wait_for(SUDO_PROMPT);
+    assert!(s.waiting(), "the sudo prompt is waiting for a fill");
+    s.fill();
+    s.wait_for("ok");
+    assert_eq!(s.typed.lines(), ["sudo true", PASSWORD]);
+    assert!(!s.waiting(), "the answered prompt is not waiting");
+    // Pressed again with no prompt on the line: nothing is typed.
+    s.fill();
+    s.settle();
+    assert_eq!(s.typed.lines(), ["sudo true", PASSWORD]);
+}
+
+#[test]
+fn a_locked_vault_asks_for_its_passphrase_before_the_fill_types_anything() {
+    let mut s = scene();
+    // Log in by hand, so the vault stays locked.
+    s.wait_for("continue connecting (yes/no)?");
+    s.type_line("yes");
+    s.wait_for("Vault passphrase (Enter to skip):");
+    s.type_line("not-it");
+    s.wait_for("test@127.0.0.1's password:");
+    s.type_line(PASSWORD);
+    s.wait_for(PROMPT.trim_end());
+    s.type_line("sudo true");
+    s.wait_for(SUDO_PROMPT);
+    assert!(
+        s.waiting(),
+        "a locked vault may hold the password, so it is offered"
+    );
+    s.fill();
+    s.wait_for("Vault passphrase (Enter to skip):");
+    assert_eq!(
+        s.typed.lines(),
+        ["sudo true"],
+        "nothing is typed while it is locked"
+    );
+    s.type_line("vp1");
+    s.wait_for("ok");
+    assert_eq!(s.typed.lines(), ["sudo true", PASSWORD]);
 }

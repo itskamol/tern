@@ -5,14 +5,15 @@
 
 use std::ops::Index;
 
-use crate::split::{Axis, Direction, Node, PaneId};
+use crate::split::{Direction, Floor, Node, PaneId, Rect};
 use crate::tabs::reorder;
 use crate::tabs_store::{SavedKind, SavedTab, SavedTabs};
 
 /// A tab's identity for as long as it is open; unlike its slot it survives reordering.
 pub type TabId = u64;
 
-/// What the tab set needs from a pane: its id in the layout tree.
+/// What the tab set needs from a pane: its id in the layout tree and the host it is connected
+/// to, which a split tab's title follows.
 pub trait Paned {
     fn pane_id(&self) -> PaneId;
 
@@ -21,6 +22,28 @@ pub trait Paned {
     fn is_session(&self) -> bool {
         true
     }
+    fn host(&self) -> &str;
+}
+
+/// A tab's title as the strip shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heading {
+    /// The name the person gave the tab, else the focused pane's host.
+    pub text: String,
+    /// How many other panes the tab holds: the "+N" badge.
+    pub others: usize,
+}
+
+/// The pane Fill acts on, chosen from the front tab's panes that are waiting at a password
+/// prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillTarget {
+    /// The focused pane if it is waiting, else the only pane that is.
+    Pane(PaneId),
+    /// Two or more unfocused panes are waiting and the focused one is not: tern does not guess.
+    Several,
+    /// No pane is waiting.
+    None,
 }
 
 /// Where the tab list is saved: `tabs.json` in the app, a recorder in tests.
@@ -68,6 +91,26 @@ impl<P: Paned> Tab<P> {
 
     pub fn panes(&self) -> &[P] {
         &self.panes
+    }
+
+    /// Where each pane sits in the tab, as fractions of its area.
+    pub fn layout(&self) -> Vec<(PaneId, Rect)> {
+        self.tree.layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        })
+    }
+
+    pub fn heading(&self) -> Heading {
+        Heading {
+            text: self
+                .title
+                .clone()
+                .unwrap_or_else(|| self.front().host().to_owned()),
+            others: self.panes.len() - 1,
+        }
     }
 
     pub fn pane(&self, id: PaneId) -> Option<&P> {
@@ -218,26 +261,63 @@ impl<P: Paned> TabSet<P> {
         }
     }
 
-    /// The front tab's focused pane can be split: check before making the pane, so a pane
-    /// (and the connection it dials) is never made for a split that cannot happen.
-    pub fn can_split(&self) -> bool {
+    /// Pane `pane` of the front tab can be split on `side` and leave both halves at least
+    /// `floor`: check before making the new pane, so a pane (and the connection it dials) is
+    /// never made for a split that cannot happen.
+    pub fn can_split(&self, pane: PaneId, side: Direction, floor: Floor) -> bool {
         self.active_tab()
-            .is_some_and(|tab| tab.is_session() && tab.tree.contains(tab.focused))
+            .is_some_and(|tab| tab.is_session() && tab.tree.can_split(pane, side, floor))
     }
 
-    /// Splits the front tab's focused pane along `axis`; the new pane goes second and takes
-    /// the keyboard. Hands `pane` back when it cannot (see [`TabSet::can_split`]).
-    pub fn split(&mut self, axis: Axis, pane: P) -> Result<(), P> {
+    /// Splits pane `target` of the front tab on `side`; the new pane goes first for left and up,
+    /// second for right and down, and takes the keyboard. Hands `pane` back when it cannot
+    /// (see [`TabSet::can_split`]).
+    pub fn split(
+        &mut self,
+        target: PaneId,
+        side: Direction,
+        pane: P,
+        floor: Floor,
+    ) -> Result<(), P> {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return Err(pane);
         };
         let id = pane.pane_id();
-        if !tab.tree.split(tab.focused, axis, id) {
+        if !tab.tree.can_split(target, side, floor) || !tab.tree.split(target, side, id) {
             return Err(pane);
         }
         tab.panes.push(pane);
         tab.focused = id;
         Ok(())
+    }
+
+    /// Moves the divider beside `pane` of the front tab, on its `side`, so the split's first
+    /// side has share `ratio`, held to `floor`. False when there is no divider there.
+    pub fn resize(&mut self, pane: PaneId, side: Direction, ratio: f32, floor: Floor) -> bool {
+        self.tabs
+            .get_mut(self.active)
+            .is_some_and(|tab| tab.tree.set_ratio(pane, side, ratio, floor))
+    }
+
+    /// Moves the divider next to the focused pane 5% toward `dir`.
+    pub fn step_focused(&mut self, dir: Direction, floor: Floor) -> bool {
+        self.tabs
+            .get_mut(self.active)
+            .is_some_and(|tab| tab.tree.step_ratio(tab.focused, dir, floor))
+    }
+
+    /// Puts the divider beside `pane` on `side` back to half and half.
+    pub fn reset_divider(&mut self, pane: PaneId, side: Direction, floor: Floor) -> bool {
+        self.tabs
+            .get_mut(self.active)
+            .is_some_and(|tab| tab.tree.reset_ratio(pane, side, floor))
+    }
+
+    /// Every split of the front tab half and half.
+    pub fn equalize(&mut self, floor: Floor) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.tree.equalize(floor);
+        }
     }
 
     /// Closes the front tab's focused pane and hands it back; the pane before it, or the one
@@ -275,6 +355,23 @@ impl<P: Paned> TabSet<P> {
     pub fn neighbour(&self, dir: Direction) -> Option<PaneId> {
         let tab = self.active_tab()?;
         tab.tree.neighbour(tab.focused, dir)
+    }
+
+    /// Which pane of the front tab Fill acts on: see [`FillTarget`]. `waiting` says whether a
+    /// pane is at a password prompt that could be filled.
+    pub fn fill_target(&self, waiting: impl Fn(&P) -> bool) -> FillTarget {
+        let Some(tab) = self.active_tab() else {
+            return FillTarget::None;
+        };
+        if waiting(tab.front()) {
+            return FillTarget::Pane(tab.focused);
+        }
+        let mut others = tab.panes.iter().filter(|p| waiting(p));
+        match (others.next(), others.next()) {
+            (Some(only), None) => FillTarget::Pane(only.pane_id()),
+            (Some(_), Some(_)) => FillTarget::Several,
+            (None, _) => FillTarget::None,
+        }
     }
 
     /// The "Reopen tabs" setting, as it is now; turned on, the list is saved at once.
@@ -358,197 +455,5 @@ impl<'a, P> IntoIterator for &'a TabSet<P> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    use super::*;
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct P(PaneId);
-
-    impl Paned for P {
-        fn pane_id(&self) -> PaneId {
-            self.0
-        }
-
-        /// Ids from 1000 up stand for a Files tab's pane.
-        fn is_session(&self) -> bool {
-            self.0 < 1000
-        }
-    }
-
-    /// Records every save as "alias,alias|active".
-    #[derive(Clone, Default)]
-    struct Saves(Rc<RefCell<Vec<String>>>);
-
-    impl TabStore for Saves {
-        fn save(&self, tabs: &SavedTabs) {
-            let names: Vec<_> = tabs
-                .tabs
-                .iter()
-                .map(|t| match &t.kind {
-                    SavedKind::Ssh { alias } => alias.clone(),
-                    SavedKind::Unknown => "?".into(),
-                })
-                .collect();
-            self.0
-                .borrow_mut()
-                .push(format!("{}|{}", names.join(","), tabs.active));
-        }
-    }
-
-    impl Saves {
-        fn take(&self) -> Vec<String> {
-            std::mem::take(&mut self.0.borrow_mut())
-        }
-    }
-
-    fn set(names: &[&str]) -> (TabSet<P>, Saves) {
-        let saves = Saves::default();
-        let mut tabs = TabSet::new(Box::new(saves.clone()), true);
-        for name in names {
-            let id = tabs.new_pane_id();
-            tabs.open((*name).into(), P(id));
-        }
-        saves.take();
-        (tabs, saves)
-    }
-
-    fn aliases(tabs: &TabSet<P>) -> Vec<&str> {
-        tabs.iter().map(|t| t.alias.as_str()).collect()
-    }
-
-    #[test]
-    fn closing_keeps_the_front_tab_in_front_or_falls_back_to_the_one_before() {
-        let (mut tabs, saves) = set(&["a", "b", "c", "d"]);
-        tabs.activate(2);
-        // A tab before the front one: the front tab moves down a slot with it.
-        tabs.close(0);
-        assert_eq!((aliases(&tabs), tabs.active()), (vec!["b", "c", "d"], 1));
-        // A tab after it: nothing moves.
-        tabs.close(2);
-        assert_eq!((aliases(&tabs), tabs.active()), (vec!["b", "c"], 1));
-        // The front tab, last in the strip: the one before comes to the front.
-        tabs.close(1);
-        assert_eq!((aliases(&tabs), tabs.active()), (vec!["b"], 0));
-        tabs.close(0);
-        assert!(tabs.is_empty());
-        assert_eq!(tabs.active(), 0);
-        assert!(tabs.close(0).is_none());
-        assert_eq!(
-            saves.take(),
-            ["a,b,c,d|2", "b,c,d|1", "b,c|1", "b|0", "|0"],
-            "one save per change"
-        );
-    }
-
-    #[test]
-    fn closing_the_front_tab_first_in_the_strip_brings_the_next() {
-        let (mut tabs, _) = set(&["a", "b", "c"]);
-        tabs.activate(0);
-        tabs.close(0);
-        assert_eq!((aliases(&tabs), tabs.active()), (vec!["b", "c"], 0));
-    }
-
-    #[test]
-    fn close_others_saves_once() {
-        let (mut tabs, saves) = set(&["a", "b", "c"]);
-        let closed = tabs.close_others(1);
-        assert_eq!(closed.len(), 2);
-        assert_eq!((aliases(&tabs), tabs.active()), (vec!["b"], 0));
-        assert_eq!(saves.take(), ["b|0"]);
-    }
-
-    #[test]
-    fn a_restore_saves_once_and_only_whole() {
-        let saves = Saves::default();
-        let mut tabs: TabSet<P> = TabSet::new(Box::new(saves.clone()), true);
-        let restored: Vec<_> = ["a", "b", "c"]
-            .into_iter()
-            .map(|n| (n.to_owned(), None, P(tabs.new_pane_id())))
-            .collect();
-        tabs.restore(restored, 9);
-        assert_eq!(tabs.active(), 2, "an out-of-range slot is the last tab");
-        assert_eq!(saves.take(), ["a,b,c|2"]);
-        tabs.restore(Vec::new(), 0);
-        assert!(saves.take().is_empty());
-    }
-
-    #[test]
-    fn nothing_is_saved_with_reopen_tabs_off_and_turning_it_on_saves_now() {
-        let saves = Saves::default();
-        let mut tabs: TabSet<P> = TabSet::new(Box::new(saves.clone()), false);
-        let id = tabs.new_pane_id();
-        tabs.open("a".into(), P(id));
-        tabs.set_title(0, Some("prod".into()));
-        assert!(saves.take().is_empty());
-        tabs.set_saving(true);
-        assert_eq!(saves.take(), ["a|0"]);
-        tabs.set_saving(true);
-        assert!(saves.take().is_empty(), "already on: nothing new to save");
-        assert_eq!(tabs[0].title(), Some("prod"));
-    }
-
-    #[test]
-    fn activating_the_front_tab_again_or_an_unchanged_title_saves_nothing() {
-        let (mut tabs, saves) = set(&["a", "b"]);
-        assert!(tabs.activate(1));
-        assert!(!tabs.activate(5));
-        tabs.set_title(0, None);
-        assert!(saves.take().is_empty());
-        tabs.reorder(0, 1);
-        assert_eq!((aliases(&tabs), tabs.active()), (vec!["b", "a"], 0));
-        assert_eq!(saves.take(), ["b,a|0"]);
-    }
-
-    #[test]
-    fn a_split_focuses_the_new_pane_and_closing_it_gives_the_keyboard_back() {
-        let (mut tabs, _) = set(&["a"]);
-        let first = tabs[0].focused();
-        assert!(tabs.can_split());
-        let second = tabs.new_pane_id();
-        tabs.split(Axis::Row, P(second)).unwrap();
-        assert_eq!(tabs[0].focused(), second);
-        assert_eq!(tabs[0].tree().leaves(), [first, second]);
-        assert!(tabs.focus_pane(first));
-        assert!(!tabs.focus_pane(first), "already focused");
-        assert!(!tabs.focus_pane(99), "not in this tab");
-        // The first pane closes: the one after it takes the keyboard.
-        assert_eq!(tabs.close_pane(), Some(P(first)));
-        assert_eq!(tabs[0].focused(), second);
-        assert_eq!(tabs[0].tree().leaves(), [second]);
-        assert_eq!(tabs[0].panes(), [P(second)]);
-        assert_eq!(tabs.close_pane(), None, "the last pane closes with its tab");
-    }
-
-    #[test]
-    fn a_files_tab_is_not_saved_and_the_saved_slot_skips_it() {
-        let (mut tabs, saves) = set(&["a", "b"]);
-        tabs.open("Files".into(), P(1000));
-        assert_eq!(
-            saves.take(),
-            ["a,b|1"],
-            "in front, it is saved as the tab before it"
-        );
-        tabs.open("c".into(), P(7));
-        assert_eq!(
-            saves.take(),
-            ["a,b,c|2"],
-            "slot 3 here, the third of the saved"
-        );
-        tabs.activate(0);
-        assert_eq!(saves.take(), ["a,b,c|0"]);
-        tabs.activate(2);
-        assert!(!tabs.can_split(), "a Files tab does not split");
-        assert!(!tabs[2].is_session() && tabs[1].is_session());
-    }
-
-    #[test]
-    fn a_split_with_no_tab_hands_the_pane_back() {
-        let mut tabs: TabSet<P> = TabSet::new(Box::new(Saves::default()), true);
-        assert!(!tabs.can_split());
-        assert_eq!(tabs.split(Axis::Column, P(1)), Err(P(1)));
-    }
-}
+#[path = "tab_set_tests.rs"]
+mod tests;

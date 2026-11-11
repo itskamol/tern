@@ -18,7 +18,7 @@ use crate::indicator::Dot;
 use crate::picker::{self, Picker, ToggleHostPicker};
 use crate::session::{Launch, Session, Status};
 use crate::settings::{self, SIDEBAR_DEFAULT, Settings};
-use crate::split;
+use crate::split::{self, PaneId};
 use crate::tab_set::TabSet;
 use crate::tabs::{self, ActivateTab, CloseTab, NextTab, PrevTab, TabInfo};
 use crate::tabs_store::DiskTabs;
@@ -36,12 +36,21 @@ actions!(
         NewConnection,
         SplitRight,
         SplitDown,
+        SplitRightWithHost,
+        SplitDownWithHost,
+        ResizePaneLeft,
+        ResizePaneRight,
+        ResizePaneUp,
+        ResizePaneDown,
+        EqualizePanes,
+        ClosePane,
         FocusPaneLeft,
         FocusPaneRight,
         FocusPaneUp,
         FocusPaneDown,
         OpenSettings,
-        ShowAbout
+        ShowAbout,
+        CheckForUpdates
     ]
 );
 
@@ -65,6 +74,8 @@ mod menu;
 mod open;
 #[path = "shell_settings.rs"]
 mod settings_ui;
+#[path = "shell_split.rs"]
+mod split_ui;
 #[path = "shell_sync.rs"]
 mod sync_ui;
 #[path = "shell_tabs.rs"]
@@ -141,6 +152,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
             let mut shell = Shell {
                 focus: cx.focus_handle(),
                 tabs: TabSet::new(Box::new(DiskTabs), settings.reopen_tabs),
+                drop_hint: None,
                 settings,
                 theme,
                 hosts: Vec::new(),
@@ -180,6 +192,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 frame: look::FrameState::default(),
                 system_light: false,
                 update_ready: None,
+                update_check: Default::default(),
                 _clock: None,
             };
             shell.refresh_hosts();
@@ -257,6 +270,8 @@ pub struct Shell {
     form: Option<connections_ui::ConnectionForm>,
     confirm_delete: Option<usize>,
     tabs: TabSet<Pane>,
+    /// A host being dragged over a pane: the pane and the side it would take.
+    drop_hint: Option<(PaneId, split::Direction)>,
     /// The tab whose title is being edited in the strip.
     renaming: Option<tabs_ui::Rename>,
     /// Input typed in one tab also going to others, and the list that picks them.
@@ -297,6 +312,8 @@ pub struct Shell {
     system_light: bool,
     /// A downloaded, checked update; it is installed when tern quits, or on "Restart now".
     update_ready: Option<std::rc::Rc<update_ui::Staged>>,
+    /// Whether an update check runs, and how the last one ended.
+    update_check: crate::update_outcome::CheckState,
     _clock: Option<gpui::Task<()>>,
 }
 
@@ -442,6 +459,8 @@ impl Shell {
             .enumerate()
             .map(|(ix, tab)| TabInfo {
                 alias: tab.alias.clone(),
+                host: tab.front().host.clone(),
+                others: tab.panes().len() - 1,
                 title: tab.title().map(str::to_owned),
                 logging: tab.session().is_some_and(|s| s.read(cx).is_logging()),
                 broadcast: self.is_broadcasting(tab.id),
@@ -624,24 +643,7 @@ impl Render for Shell {
             .font_family(UI_FONT)
             .text_color(t.text)
             .on_action(cx.listener(|s, _: &CloseTab, w, cx| s.close_pane_or_tab(w, cx)))
-            .on_action(
-                cx.listener(|s, _: &SplitRight, w, cx| s.split_pane(split::Axis::Row, w, cx)),
-            )
-            .on_action(
-                cx.listener(|s, _: &SplitDown, w, cx| s.split_pane(split::Axis::Column, w, cx)),
-            )
-            .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| {
-                s.move_pane_focus(split::Direction::Left, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| {
-                s.move_pane_focus(split::Direction::Right, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneUp, w, cx| {
-                s.move_pane_focus(split::Direction::Up, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneDown, w, cx| {
-                s.move_pane_focus(split::Direction::Down, w, cx)
-            }))
+            .map(|el| split_ui::pane_actions(el, cx))
             .on_action(cx.listener(|s, _: &NextTab, w, cx| {
                 s.show_tab(tabs::step(s.tabs.active(), s.tabs.len(), 1), w, cx)
             }))
@@ -654,11 +656,14 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &ToggleSnippets, w, cx| s.toggle_snippet_picker(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
             .on_action(cx.listener(|s, _: &OpenFiles, w, cx| s.open_files_tab(None, w, cx)))
-            .on_action(cx.listener(|s, _: &FillPassword, _, cx| s.fill_password(cx)))
+            .on_action(cx.listener(|s, _: &FillPassword, w, cx| s.fill_password(w, cx)))
             .on_action(cx.listener(|s, _: &ClearTerminal, _, cx| s.clear_terminal(cx)))
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
             .on_action(cx.listener(|s, _: &OpenSettings, w, cx| s.toggle_settings(w, cx)))
             .on_action(cx.listener(|s, _: &ShowAbout, w, cx| s.open_settings_at_about(w, cx)))
+            .when(!self.update_check_running(), |d| {
+                d.on_action(cx.listener(|s, _: &CheckForUpdates, _, cx| s.check_now(cx)))
+            })
             .on_action(cx.listener(|s, _: &UndoHosts, w, cx| s.undo_hosts(w, cx)))
             .on_action(cx.listener(|s, _: &RedoHosts, w, cx| s.redo_hosts(w, cx)))
             // Capture phase: the terminal handles Escape itself, and ending a broadcast must

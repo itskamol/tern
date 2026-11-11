@@ -16,6 +16,7 @@ use crate::forward_spec;
 use crate::keymap::{self, Keymap, ShortcutId};
 use crate::session::Status;
 use crate::session::{Session, SessionNote};
+use crate::tab_set::FillTarget;
 use crate::text_input::TextInput;
 
 actions!(tern, [FillPassword, ClearTerminal]);
@@ -263,12 +264,26 @@ impl Shell {
 // `session_fill.rs`.
 
 impl Shell {
-    /// ⌘\ (by default): fill the password into the focused pane, if it is at a prompt.
-    pub(super) fn fill_password(&mut self, cx: &mut Context<Self>) {
+    /// ⌘\ (by default): fills the password where one is asked. The focused pane comes first; if
+    /// it is not at a prompt, the one pane that is gets the focus and the password. Two such
+    /// panes are not guessed between. One press types once, and nothing types without it.
+    pub(super) fn fill_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A form or the Settings page has the keyboard; the pane behind it is not the target.
         if self.settings_page.is_some() || self.form.is_some() {
             return;
         }
+        let target = self.tabs.fill_target(|pane| pane.waiting_for_fill(cx));
+        if target == FillTarget::Several {
+            return self.notify_toast(
+                ToastKind::Default,
+                "Two panes are asking for a password: click the one to fill",
+                cx,
+            );
+        }
+        if let FillTarget::Pane(id) = target {
+            self.focus_pane(id, window, cx);
+        }
+        // With no pane waiting, the focused pane's own answer says why nothing is typed.
         let Some(tab) = self.tabs.active_tab() else {
             return;
         };
@@ -276,6 +291,34 @@ impl Shell {
             return;
         };
         session.update(cx, |s, cx| s.fill_password(cx));
+    }
+
+    /// A pane asked for a password that could be filled: the toast naming the shortcut, and the
+    /// pane's host when it is not the focused one. Only the front tab gets it, and only when
+    /// that pane is where the shortcut would fill.
+    fn hint_fill(&mut self, session: &Entity<Session>, cx: &mut Context<Self>) {
+        let combo = cx.global::<Keymap>().combo(ShortcutId::FillPassword);
+        // Unbound, there is no shortcut to name.
+        if self.settings_page.is_some() || combo.is_empty() {
+            return;
+        }
+        let Some(tab) = self.tabs.active_tab() else {
+            return;
+        };
+        let Some(pane) = tab.panes().iter().find(|p| p.session() == Some(session)) else {
+            return;
+        };
+        let target = self.tabs.fill_target(|p| p.waiting_for_fill(cx));
+        if target != FillTarget::Pane(pane.id) {
+            return;
+        }
+        let key = keymap::badge(combo);
+        let text = if tab.focused() == pane.id {
+            format!("{key} fills the password")
+        } else {
+            format!("{key} fills the password for {}", pane.host)
+        };
+        self.notify_toast(ToastKind::Default, text, cx);
     }
 
     /// ⌘K: clears the focused pane's scrollback and screen, keeping the prompt line.
@@ -310,19 +353,7 @@ impl Shell {
                 format!("Port forward {forward} failed: {error}"),
                 cx,
             ),
-            SessionNote::PasswordPrompt => {
-                let in_front = self.settings_page.is_none()
-                    && self
-                        .tabs
-                        .get(self.tabs.active())
-                        .is_some_and(|t| t.session() == Some(session));
-                let combo = cx.global::<Keymap>().combo(ShortcutId::FillPassword);
-                // Unbound, there is no shortcut to name.
-                if in_front && !combo.is_empty() {
-                    let text = format!("{} fills the password", keymap::badge(combo));
-                    self.notify_toast(ToastKind::Default, text, cx);
-                }
-            }
+            SessionNote::PasswordPrompt => self.hint_fill(session, cx),
             SessionNote::Message(text) => self.notify_toast(ToastKind::Default, text.clone(), cx),
             SessionNote::Problem(text) => self.notify_toast(ToastKind::Critical, text.clone(), cx),
         }

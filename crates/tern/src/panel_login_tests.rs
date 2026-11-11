@@ -13,7 +13,7 @@ use super::{LoginEvent, PanelLogin, Step};
 use crate::keeper::Keeper;
 use crate::password_command::Auth;
 use crate::platform::SshRuntime;
-use crate::session::scenario_tests::{PASSWORD, serve};
+use crate::session::scenario_server::{PASSWORD, serve};
 
 struct Scene {
     app: TestApp,
@@ -26,7 +26,7 @@ struct Scene {
 /// A panel login to the test server; with `vault`, a locked vault (passphrase `vp1`) holds the
 /// password.
 fn scene(vault: bool) -> Scene {
-    let (server, port) = serve();
+    let (server, port, _typed) = serve();
     let dir = tempfile::tempdir().unwrap();
     let vault_path = dir.path().join("vault.age");
     if vault {

@@ -46,6 +46,7 @@ impl Shell {
         let view = cx.new(|cx| FilesView::new(hosts, right, transfers, shell, theme, cx));
         let pane = Pane {
             id: self.tabs.new_pane_id(),
+            host: FILES_ALIAS.into(),
             content: Content::Files(view),
         };
         self.tabs.open(FILES_ALIAS.into(), pane);

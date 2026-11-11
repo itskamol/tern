@@ -9,6 +9,8 @@ use crate::tab_set::Paned;
 /// One pane in a tab: a terminal on a connection, or the Files tab's two panels.
 pub(super) struct Pane {
     pub(super) id: PaneId,
+    /// The host this pane is connected to; a split tab's title follows the focused pane's.
+    pub(super) host: String,
     pub(super) content: Content,
 }
 
@@ -32,6 +34,10 @@ impl Paned for Pane {
         self.id
     }
 
+    fn host(&self) -> &str {
+        &self.host
+    }
+
     fn is_session(&self) -> bool {
         matches!(self.content, Content::Session(_))
     }
@@ -44,6 +50,12 @@ impl Pane {
             Content::Session(t) => Some(&t.session),
             Content::Files(_) => None,
         }
+    }
+
+    /// A terminal waiting at a password prompt that Fill could answer; a Files tab never is.
+    pub(super) fn waiting_for_fill(&self, cx: &App) -> bool {
+        self.session()
+            .is_some_and(|s| s.read(cx).waiting_for_fill(cx))
     }
 
     /// What the keyboard goes to when the pane is in front.
