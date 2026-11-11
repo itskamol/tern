@@ -58,6 +58,12 @@ impl Toast {
         }
     }
 
+    /// Stays up for `secs` instead of the usual few seconds.
+    pub(crate) fn staying(mut self, secs: u64) -> Self {
+        self.duration = Duration::from_secs(secs);
+        self
+    }
+
     /// Stays up for as long as the transfer it reports runs.
     pub(crate) fn lasting(mut self) -> Self {
         self.duration = Duration::from_secs(3600);

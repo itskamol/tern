@@ -599,15 +599,28 @@ impl Shell {
                         &t,
                         true,
                         "Version",
-                        Some(env!("CARGO_PKG_VERSION").into()),
-                        div(),
+                        Some(match self.update_waiting() {
+                            Some(next) => format!(
+                                "{}; {next} is downloaded and installs when tern quits",
+                                env!("CARGO_PKG_VERSION")
+                            )
+                            .into(),
+                            None => env!("CARGO_PKG_VERSION").into(),
+                        }),
+                        div().when(self.update_waiting().is_some(), |el| {
+                            el.child(
+                                w::button(&t, "update-restart", "Restart now")
+                                    .on_click(cx.listener(|s, _, _, cx| s.restart_to_update(cx))),
+                            )
+                        }),
                     ))
                     .child(w::row(
                         &t,
                         true,
                         "Check for updates",
                         Some(
-                            "Once a day, ask GitHub for a newer release; tern never installs one"
+                            "Once a day, ask GitHub for a newer release and download it; it is \
+                             installed only when you choose to restart"
                                 .into(),
                         ),
                         div()

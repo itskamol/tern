@@ -38,6 +38,8 @@ mod tabs_store;
 mod text_input;
 mod theme;
 mod theme_tint;
+#[cfg(target_os = "macos")]
+mod updater;
 mod vault_pin;
 mod wallpaper;
 mod wallpaper_fx;

@@ -28,4 +28,11 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "tern $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+        # The macOS zip and dmg are built and signed on the maintainer's Mac (RELEASING.md), which
+        # may create the release first; then only its notes are set here.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --title "tern $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+          fi

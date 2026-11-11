@@ -34,7 +34,7 @@ actions!(
     ]
 );
 
-const HELP_URL: &str = "https://github.com/your-moon/tern#readme";
+const HELP_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#readme");
 
 pub fn init_menus(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());

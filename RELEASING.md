@@ -4,7 +4,7 @@ Releases are cut from `main` by pushing a `vX.Y.Z` tag. The [release workflow](.
 
 1. Check that `main` is green in CI and that every issue in the milestone is closed.
 2. Pick the version per [SemVer](https://semver.org/): before 1.0, bump the minor for anything breaking or notable, the patch for fixes.
-3. Set `version` under `[workspace.package]` in `Cargo.toml`, then run `cargo check --workspace` so `Cargo.lock` follows.
+3. Set `version` under `[workspace.package]` in `Cargo.toml`, and the same version on the four `tern-*` entries under `[workspace.dependencies]`, then run `cargo check --workspace` so `Cargo.lock` follows.
 4. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above it, and update the compare links at the bottom.
 5. Record the release's idle RSS in `docs/perf.md`; a regression of more than 10% blocks the release.
 6. Commit as `Release vX.Y.Z`, then tag and push:

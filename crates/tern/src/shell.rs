@@ -170,6 +170,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 wp: wallpaper_ui::State::default(),
                 frame: look::FrameState::default(),
                 system_light: false,
+                update_ready: None,
                 _clock: None,
             };
             shell.refresh_hosts();
@@ -261,6 +262,8 @@ pub struct Shell {
     frame: look::FrameState,
     /// Whether macOS is in its light appearance; what `Appearance: System` follows.
     system_light: bool,
+    /// A downloaded, checked update; it is installed when tern quits, or on "Restart now".
+    update_ready: Option<std::rc::Rc<update_ui::Staged>>,
     _clock: Option<gpui::Task<()>>,
 }
 

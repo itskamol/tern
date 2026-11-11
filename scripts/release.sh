@@ -19,6 +19,8 @@ cd "$(dirname "$0")/.."
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 [ -n "$version" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
 tag="v$version"
+repo=$(sed -n 's|^repository = "https://github.com/\(.*\)"|\1|p' Cargo.toml | head -n 1)
+[ -n "$repo" ] || { echo "no GitHub repository in Cargo.toml" >&2; exit 1; }
 
 scripts/bundle-app.sh
 
@@ -94,7 +96,8 @@ else
 fi
 
 cask="$out/tern.rb"
-sed -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" packaging/homebrew/tern.rb > "$cask"
+sed -e "s|@REPO@|$repo|g" -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" \
+  packaging/homebrew/tern.rb > "$cask"
 
 echo
 echo "dmg:    $dmg"
@@ -104,4 +107,4 @@ echo "cask:   $cask (copy to the tap's Casks/tern.rb)"
 echo
 echo "Not run. When ready, with $tag tagged and pushed:"
 echo
-echo "  gh release create $tag \"$dmg\" \"$zip\" --repo your-moon/tern --title \"tern $version\" --notes-file <(awk '/^## \\[$version\\]/{f=1;next} /^## \\[/{f=0} f' CHANGELOG.md)"
+echo "  gh release create $tag \"$dmg\" \"$zip\" --repo $repo --title \"tern $version\" --notes-file <(awk '/^## \\[$version\\]/{f=1;next} /^## \\[/{f=0} f' CHANGELOG.md)"
