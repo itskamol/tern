@@ -13,9 +13,9 @@ use tern_vault::Key;
 
 use super::Session;
 use super::Status;
-use super::vault::{After, Flow};
+use super::vault::{After, Then};
 use crate::keeper::Keeper;
-use crate::password_command::{self as pc, Approved};
+use crate::password_command::{self as pc, Purpose};
 
 /// Whether the text left of the cursor is a password prompt: `[sudo] password for me:`,
 /// `Password:`, `me@host's password:`, `Enter passphrase for key '/x':`. The line must END at
@@ -162,39 +162,15 @@ impl Session {
                 ))),
             },
             Source::Sudo(command) | Source::Password(command) => {
-                let approved = crate::settings::dir()
-                    .is_some_and(|d| Approved::load(&d).contains(&command));
-                if approved {
-                    self.run_fill_command(command, seq, cx);
-                } else {
-                    let text = format!(
-                        "\r\nThis connection runs `{}` to get a password. Run it? (yes/no) ",
-                        command.replace(char::is_control, " ")
-                    );
-                    self.ask_local(&text, true, Flow::ApproveFill(command, seq), cx);
+                match self.link.approvals.ask(Purpose::Fill, &command) {
+                    None => self.run_fill_command(command, seq, cx),
+                    Some(question) => self.ask_approval(question, Then::Fill(seq), cx),
                 }
             }
         }
     }
 
-    /// The answer to the approval question for a fill command.
-    pub(super) fn fill_approved(
-        &mut self,
-        command: String,
-        seq: u64,
-        yes: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if !yes {
-            return self.note("Not run.", cx);
-        }
-        if let Some(dir) = crate::settings::dir() {
-            let _ = Approved::approve(&dir, &command);
-        }
-        self.run_fill_command(command, seq, cx);
-    }
-
-    fn run_fill_command(&mut self, command: String, seq: u64, cx: &mut Context<Self>) {
+    pub(super) fn run_fill_command(&mut self, command: String, seq: u64, cx: &mut Context<Self>) {
         self.filling = true;
         let work = cx.background_spawn(async move { pc::run(&command, pc::TIMEOUT) });
         cx.spawn(async move |this, cx| {

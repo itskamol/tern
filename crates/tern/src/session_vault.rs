@@ -16,7 +16,7 @@ use tern_vault::{Key, Vault, VaultError};
 use super::Session;
 use crate::keeper::{self, Keeper};
 use crate::login::Login;
-use crate::password_command::{self as pc, Approved, Step};
+use crate::password_command::{self as pc, Purpose, Question, Step};
 use crate::vault_pin::{self, Outcome};
 
 const QUIET: Duration = Duration::from_millis(500);
@@ -42,16 +42,22 @@ pub(super) enum Flow {
     /// dialling because the connection names a vault key; skipping dials anyway and falls
     /// back to the usual prompts.
     Unlock(After),
-    /// "This connection runs `…` to get its password. Run it? (yes/no)".
-    ApproveCommand(Prompt),
-    /// "This connection reaches the server through `…`. Run it? (yes/no)", before dialling.
-    ApproveProxy(String),
-    /// The same for a password fill; the number is the screen it was asked on.
-    ApproveFill(String, u64),
+    /// "Run `…` on this Mac? (yes/no)" for a password command, ProxyCommand or fill command.
+    Approve(Question, Then),
     /// "Save … in tern's vault? (yes/no)".
     OfferSave(Key, SecretString),
     NewPassphrase(Key, SecretString),
     RepeatPassphrase(Key, SecretString, SecretString),
+}
+
+/// What an approved command was asked for.
+pub(super) enum Then {
+    /// The server's password prompt, answered by the command's output.
+    Login(Prompt),
+    /// Dialling, through the ProxyCommand.
+    Proxy,
+    /// A password fill; the number is the screen it was asked on.
+    Fill(u64),
 }
 
 /// How the person is opening the vault.
@@ -262,14 +268,8 @@ impl Session {
                 Some(passphrase) => self.unlock(Opener::Passphrase(passphrase), after, cx),
                 None => self.skipped(after, cx),
             },
-            Flow::ApproveProxy(command) => {
-                self.proxy_approved(&command, keeper::is_yes(typed.as_ref()), cx)
-            }
-            Flow::ApproveCommand(prompt) => {
-                self.command_approved(prompt, keeper::is_yes(typed.as_ref()), cx)
-            }
-            Flow::ApproveFill(command, seq) => {
-                self.fill_approved(command, seq, keeper::is_yes(typed.as_ref()), cx)
+            Flow::Approve(question, then) => {
+                self.approval_answered(question, then, keeper::is_yes(typed.as_ref()), cx)
             }
             Flow::OfferSave(key, secret) => {
                 if !keeper::is_yes(typed.as_ref()) {
@@ -437,66 +437,60 @@ impl Session {
             return Some(prompt);
         }
         let command = self.link.password_command.clone();
-        let approved = command.as_deref().is_some_and(|c| {
-            crate::settings::dir().is_some_and(|d| Approved::load(&d).contains(c))
-        });
-        match pc::plan(command.as_deref(), self.command_tried, approved) {
-            Step::Skip => Some(prompt),
-            Step::Approve => {
-                let text = format!(
-                    "This connection runs `{}` to get its password. Run it? (yes/no) ",
-                    command.unwrap_or_default().replace(char::is_control, " ")
+        let question = command
+            .as_deref()
+            .and_then(|c| self.link.approvals.ask(Purpose::Login, c));
+        match (
+            pc::plan(command.as_deref(), self.command_tried, question.is_none()),
+            question,
+            command,
+        ) {
+            (Step::Approve, Some(question), _) => {
+                self.ask_approval(question, Then::Login(prompt), cx);
+                None
+            }
+            (Step::Run, _, Some(command)) => {
+                self.run_command(command, prompt, cx);
+                None
+            }
+            _ => Some(prompt),
+        }
+    }
+
+    /// Asks before a command first runs on this Mac: it came from `hosts.json`, which sync and
+    /// imports also write.
+    pub(super) fn ask_approval(&mut self, question: Question, then: Then, cx: &mut Context<Self>) {
+        let text = question.text();
+        self.ask_local(&text, true, Flow::Approve(question, then), cx);
+    }
+
+    /// The answer to an approval question. A no goes on as each use needs: the login prompt
+    /// goes to the vault, a proxy leaves the tab closed, a fill is not run.
+    fn approval_answered(
+        &mut self,
+        question: Question,
+        then: Then,
+        yes: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match (then, self.link.approvals.answer(question, yes)) {
+            (Then::Login(prompt), Some(command)) => self.run_command(command, prompt, cx),
+            (Then::Login(prompt), None) => {
+                self.command_tried = true;
+                self.on_prompt(prompt, cx);
+            }
+            (Then::Proxy, Some(_)) => self.dial(cx),
+            (Then::Proxy, None) => {
+                self.note(
+                    "Not connected: the proxy command was not run. Enter asks again.",
+                    cx,
                 );
-                self.ask_local(&text, true, Flow::ApproveCommand(prompt), cx);
-                None
+                self.status = super::Status::Closed;
+                cx.notify();
             }
-            Step::Run => {
-                self.run_command(command.unwrap_or_default(), prompt, cx);
-                None
-            }
+            (Then::Fill(seq), Some(command)) => self.run_fill_command(command, seq, cx),
+            (Then::Fill(_), None) => self.note("Not run.", cx),
         }
-    }
-
-    /// Asks before a saved ProxyCommand runs for the first time on this Mac: it came from
-    /// `hosts.json`, which sync and imports also write.
-    pub(super) fn ask_proxy(&mut self, command: String, cx: &mut Context<Self>) {
-        let text = format!(
-            "This connection reaches the server by running `{}` on this Mac. Run it? (yes/no) ",
-            command.replace(char::is_control, " ")
-        );
-        self.ask_local(&text, true, Flow::ApproveProxy(command), cx);
-    }
-
-    fn proxy_approved(&mut self, command: &str, yes: bool, cx: &mut Context<Self>) {
-        if !yes {
-            self.note(
-                "Not connected: the proxy command was not run. Enter asks again.",
-                cx,
-            );
-            self.status = super::Status::Closed;
-            return cx.notify();
-        }
-        if let Some(dir) = crate::settings::dir()
-            && let Err(e) = Approved::approve(&dir, command)
-        {
-            // Run it this once anyway: the person said yes.
-            tracing::warn!(error = %e, "proxy_command_approval_not_saved");
-            self.link.proxy_command = None;
-        }
-        self.dial(cx);
-    }
-
-    /// The answer to the approval question.
-    pub(super) fn command_approved(&mut self, prompt: Prompt, yes: bool, cx: &mut Context<Self>) {
-        let Some(command) = self.link.password_command.clone().filter(|_| yes) else {
-            // Declined: the command is not run, and the prompt goes the usual way.
-            self.command_tried = true;
-            return self.on_prompt(prompt, cx);
-        };
-        if let Some(dir) = crate::settings::dir() {
-            let _ = Approved::approve(&dir, &command);
-        }
-        self.run_command(command, prompt, cx);
     }
 
     fn run_command(&mut self, command: String, prompt: Prompt, cx: &mut Context<Self>) {

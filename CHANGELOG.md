@@ -37,6 +37,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- A yes to running a saved password, fill or proxy command now holds for the rest of that tab's session even when `approved-commands.json` cannot be written, so an automatic reconnect does not stop at the question again; before, only the proxy question behaved this way. The password command that runs is always the text the question showed, even if the connection was edited while it was on screen.
 - A sync pull checks what it downloaded before using it. Each push now seals a manifest beside the files (every item's hash, the vault's included, and a bundle number), so a remote whose `vault.age` was swapped for another, whose `tern-meta.json` was edited, or that was rolled back to a bundle older than one this Mac already synced is refused with a message and nothing is written. A bundle pushed by an older tern is still taken when it matches its meta, but cannot be dated.
 - The log folder (`~/Library/Logs/tern`) is readable by you only, and an older log or folder another user could read is made private at launch; `panic.log` is created 0600 like session logs. App logs name hosts and users.
 - A keyboard-interactive login (a code or OTP prompt) shows the server's name, instructions and prompt text with control characters escaped (`^[`), so a server cannot move the cursor, retitle the tab, write the clipboard or draw a fake prompt there.
