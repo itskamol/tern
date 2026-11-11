@@ -1,7 +1,8 @@
 //! What the session hands to the command history: the command line the person finished typing.
 //!
 //! With OSC 133 prompt marks the command starts at the shell's "command start" mark. Without
-//! them it starts where the cursor stood at the person's first keystroke of the line. Either
+//! them it starts where the cursor stood at the person's first keystroke after the remote last
+//! printed a line. Either
 //! way it is read off the screen when Enter is sent, so completion and recall are in it. A
 //! line typed in the same write as its Enter (a paste without bracketed paste) has not reached
 //! the screen yet and is missed; the history window records what it runs itself.
@@ -15,6 +16,17 @@ use crate::command_history::CommandHistory;
 
 /// Bracketed paste begins: a pasted newline is not Enter.
 const PASTE_START: &[u8] = b"\x1b[200~";
+
+/// What [`Session::put_at_prompt`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Put {
+    Typed,
+    NotConnected,
+    /// An editor or pager has the screen: a line typed there would be keystrokes for it.
+    FullScreen,
+    /// The line asks for a password: whatever is typed would be the answer.
+    PasswordPrompt,
+}
 
 /// The line being typed, as far as the history needs to know.
 #[derive(Default)]
@@ -76,25 +88,46 @@ impl Session {
         }
     }
 
+    /// The remote printed: with no prompt marks, a line it started is no longer where the
+    /// command began, so the next keystroke starts a new one.
+    pub(super) fn remote_printed(&mut self, bytes: &[u8]) {
+        if !self.typing.marks && bytes.contains(&b'\n') {
+            self.typing.start = None;
+        }
+    }
+
     /// Types `line` at the prompt as the person would, and with `run` also presses Enter, which
-    /// is then a command run like any other. False when nothing could take it.
-    pub fn put_at_prompt(&mut self, line: &str, run: bool, cx: &mut Context<Self>) -> bool {
+    /// is then a command run like any other. What is kept is what the shell will run: the text
+    /// already at the prompt followed by `line`. Nothing is typed into a full-screen program or
+    /// at a password prompt.
+    pub fn put_at_prompt(&mut self, line: &str, run: bool, cx: &mut Context<Self>) -> Put {
         if !self.accepts_input() {
-            return false;
+            return Put::NotConnected;
+        }
+        if self.terminal.read(cx).on_alt_screen() {
+            return Put::FullScreen;
+        }
+        if self.on_password_prompt(cx) {
+            return Put::PasswordPrompt;
         }
         let may = self.may_record(cx);
         if may && self.typing.start.is_none() && !self.typing.marks {
             self.typing.start = Some(self.start_here(cx));
         }
+        let at_prompt = self
+            .typing
+            .start
+            .and_then(|s| self.terminal.read(cx).text_from(s.at))
+            .unwrap_or_default();
         self.send(line.as_bytes().to_vec());
         if run {
             self.send(b"\r".to_vec());
             let secret = self.typing.start.take().is_some_and(|s| s.secret);
-            if may && !secret && !self.on_password_prompt(cx) {
-                self.record_command(line, cx);
+            if may && !secret {
+                self.record_command(&format!("{at_prompt}{line}"), cx);
             }
         }
-        true
+        Put::Typed
     }
 
     /// Typing here may be kept: not while broadcast input is on, and not inside a full-screen

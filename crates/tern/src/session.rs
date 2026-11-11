@@ -385,6 +385,7 @@ impl Session {
         match event {
             SessionEvent::Latency(rtt) => self.latency = Some(rtt),
             SessionEvent::Data(bytes) => {
+                self.remote_printed(&bytes);
                 self.last_output = std::time::Instant::now();
                 self.ends_line = bytes.last().is_some_and(|b| *b == b'\n');
                 self.output_seq += 1;
@@ -659,6 +660,7 @@ mod history;
 mod vault;
 
 pub use actions::SessionNote;
+pub use history::Put;
 
 /// A closed tab reconnects on Enter only, so a stray keystroke into a dead tab does not dial
 /// the server again. Enter arrives as CR from both the main and the keypad key.

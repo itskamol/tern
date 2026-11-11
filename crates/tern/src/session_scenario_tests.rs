@@ -11,7 +11,7 @@ use tern_ssh::{ConnectSpec, SecretString};
 use tern_vault::{Key, Vault};
 
 use super::scenario_server::{PASSWORD, PROMPT, STAR_PROMPT, SUDO_PROMPT, Typed, serve};
-use super::{Launch, Session, Status};
+use super::{Launch, Put, Session, Status};
 use crate::command_history::{CommandHistory, Scope};
 use crate::keeper::Keeper;
 use crate::password_command::Auth as LinkAuth;
@@ -146,6 +146,16 @@ impl Scene {
         let (session, bytes) = (self.session.clone(), text.as_bytes().to_vec());
         self.app
             .update(|cx| session.update(cx, |s, cx| s.show(&bytes, cx)));
+    }
+
+    /// What the remote wrote, as it arrives from the connection.
+    fn remote_prints(&mut self, text: &str) {
+        let (session, bytes) = (self.session.clone(), text.as_bytes().to_vec());
+        self.app.update(|cx| {
+            session.update(cx, |s, cx| {
+                s.on_session_event(tern_ssh::SessionEvent::Data(bytes), cx)
+            })
+        });
     }
 
     /// The command history of the host this session is on, newest first.
@@ -369,15 +379,63 @@ fn a_line_put_at_the_prompt_is_recorded_when_the_person_presses_enter() {
     let mut s = scene();
     s.log_in_with_vault();
     let put = s.session.clone();
-    assert!(
+    assert_eq!(
         s.app
-            .update(|cx| put.update(cx, |sess, cx| sess.put_at_prompt("echo placed", false, cx)))
+            .update(|cx| put.update(cx, |sess, cx| sess.put_at_prompt("echo placed", false, cx))),
+        Put::Typed
     );
     s.wait_for("echo placed");
     assert!(s.history().is_empty(), "not run yet, so not a command yet");
     s.keys("\r");
     s.settle();
     assert_eq!(s.history(), ["echo placed"]);
+}
+
+#[test]
+fn a_line_put_after_text_already_at_the_prompt_is_recorded_as_the_shell_will_run_it() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.keys("echo half");
+    s.wait_for("echo half");
+    let put = s.session.clone();
+    s.app
+        .update(|cx| put.update(cx, |sess, cx| sess.put_at_prompt(" joined", true, cx)));
+    s.settle();
+    assert_eq!(s.history(), ["echo half joined"]);
+}
+
+#[test]
+fn nothing_is_put_into_a_full_screen_program_or_at_a_password_prompt() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    let put = s.session.clone();
+    s.remote_says("\x1b[?1049h");
+    let typed = |s: &mut Scene, line: &str| {
+        s.app
+            .update(|cx| put.update(cx, |sess, cx| sess.put_at_prompt(line, true, cx)))
+    };
+    assert_eq!(typed(&mut s, "echo no"), Put::FullScreen);
+    s.remote_says("\x1b[?1049l");
+    s.remote_says("\r\n[sudo] password for test: ");
+    assert_eq!(typed(&mut s, "echo no"), Put::PasswordPrompt);
+    s.settle();
+    assert!(s.typed.lines().is_empty(), "{:?}", s.typed.lines());
+    assert!(s.history().is_empty());
+}
+
+#[test]
+fn a_start_from_before_the_remote_printed_a_new_line_is_not_used() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.keys("echo stale");
+    s.wait_for("echo stale");
+    // Output of something else, then a fresh prompt; what was half typed is no longer there.
+    s.remote_prints("\r\nbackground job done\r\n\r\ntest@demo:~$ ");
+    s.keys("echo fresh");
+    s.wait_for("echo fresh");
+    s.keys("\r");
+    s.settle();
+    assert_eq!(s.history(), ["echo fresh"]);
 }
 
 #[test]
