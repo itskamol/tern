@@ -1,7 +1,9 @@
 //! The app's one vault: where it lives and, once unlocked, the open [`Vault`] every tab reads.
 //! Unlocking and saving run scrypt (about a second), so both happen off the UI thread.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -9,7 +11,7 @@ use gpui::{App, AppContext, Global, Task};
 use tern_ssh::SecretString;
 use tern_vault::{Key, Vault, VaultError};
 
-pub use crate::keeper_gate::{Ask, Opening, Tried, Typed};
+pub use crate::keeper_gate::{Ask, Opening, Pending, Tried, Typed};
 use crate::keeper_gate::{
     Gate, Need, Read, Waiter, adopt, open_typed, open_with, store_due, tried,
 };
@@ -70,22 +72,43 @@ impl Keeper {
         });
     }
 
-    /// The vault is needed. With the Keychain opt-in on, the first need in this run reads the
-    /// passphrase off the UI thread and opens the vault, then runs `then` (`Waiting`). Otherwise
-    /// the person is asked for the PIN when one is set, else the passphrase, and `then` is
-    /// dropped. A need while the Keychain read runs waits for it too.
-    pub fn need_vault(cx: &mut App, then: impl FnOnce(&mut App) + 'static) -> Opening {
+    /// The vault is needed for `work`. With the Keychain opt-in on, the first need in this run
+    /// reads the passphrase off the UI thread and opens the vault; `work` is held meanwhile and
+    /// handed to `then` when the read answers, open or not (`Waiting`). A need while that read
+    /// runs waits for it too. Otherwise `work` comes straight back with what to do: go on (the
+    /// vault is open) or ask for the PIN when one is set, else the passphrase.
+    pub fn need_vault<T: 'static>(
+        cx: &mut App,
+        work: T,
+        then: impl FnOnce(T, &mut App) + 'static,
+    ) -> Pending<T> {
         if cx.global::<Self>().open.is_some() {
-            return Opening::Open;
+            return Pending::Now(Opening::Open, work);
         }
-        if Self::keychain_then(cx, then) {
-            return Opening::Waiting;
+        let slot = Rc::new(RefCell::new(Some(work)));
+        let held = slot.clone();
+        let waiting = Self::keychain_then(cx, move |cx| {
+            if let Some(work) = held.borrow_mut().take() {
+                then(work, cx);
+            }
+        });
+        // Not waiting, the closure (and `held`) was dropped: the work is only in `slot`.
+        let work = slot.borrow_mut().take();
+        match work {
+            Some(work) if !waiting => Pending::Now(
+                Opening::Ask(if Self::pin_set(cx) {
+                    Ask::Pin
+                } else {
+                    Ask::Passphrase
+                }),
+                work,
+            ),
+            Some(work) => {
+                *slot.borrow_mut() = Some(work);
+                Pending::Waiting
+            }
+            None => Pending::Waiting,
         }
-        Opening::Ask(if Self::pin_set(cx) {
-            Ask::Pin
-        } else {
-            Ask::Passphrase
-        })
     }
 
     /// Tries a typed PIN or passphrase off the UI thread and takes the result in. The vault it

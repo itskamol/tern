@@ -5,16 +5,14 @@
 //! The password-command side of logging in: when a server asks for a password, run the
 //! connection's command before the vault, and ask first if this Mac never approved it.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context};
+use gpui::{AppContext, Context};
 use tern_ssh::{ExposeSecret, Prompt, SecretString};
 use tern_vault::{Key, Vault};
 
 use super::Session;
-use crate::keeper::{Ask, Keeper, Opening, Tried, Typed};
+use crate::keeper::{Ask, Keeper, Opening, Pending, Tried, Typed};
 use crate::login::Login;
 use crate::password_command::{self as pc, Purpose, Question, Step};
 
@@ -104,25 +102,17 @@ impl Session {
     /// Opens the vault: the Keychain first, once per run, then the PIN when one is set, else the
     /// passphrase. A Keychain that cannot open it falls through without a word.
     pub(super) fn ask_unlock(&mut self, after: After, cx: &mut Context<Self>) {
-        let slot = Rc::new(RefCell::new(Some(after)));
-        let wake = {
-            let (slot, this) = (slot.clone(), cx.weak_entity());
-            move |cx: &mut App| {
-                let Some(after) = slot.borrow_mut().take() else {
-                    return;
-                };
-                let _ = this.update(cx, |s, cx| s.keychain_resolved(after, cx));
-            }
-        };
-        let opening = Keeper::need_vault(cx, wake);
-        let after = slot.borrow_mut().take();
-        match (opening, after) {
-            (Opening::Waiting, _) => {
+        let this = cx.weak_entity();
+        let need = Keeper::need_vault(cx, after, move |after, cx| {
+            let _ = this.update(cx, |s, cx| s.keychain_resolved(after, cx));
+        });
+        match need {
+            Pending::Waiting => {
                 self.attempt.vault_busy = true;
                 self.note("Asking the Keychain…", cx);
             }
-            (Opening::Open, after) => self.keychain_resolved(after.unwrap_or_default(), cx),
-            (Opening::Ask(ask), after) => self.ask_for(ask, after.unwrap_or_default(), cx),
+            Pending::Now(Opening::Open, after) => self.keychain_resolved(after, cx),
+            Pending::Now(Opening::Ask(ask), after) => self.ask_for(ask, after, cx),
         }
     }
 

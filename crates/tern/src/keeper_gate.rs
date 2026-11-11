@@ -24,10 +24,17 @@ pub enum Ask {
 pub enum Opening {
     /// It is open already.
     Open,
-    /// The Keychain is being read; the need runs again when it answers.
-    Waiting,
     /// Ask the person.
     Ask(Ask),
+}
+
+/// A need for the vault, and the work that waits on it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pending<T> {
+    /// The Keychain is being read; the work is held and handed to `then` when it answers.
+    Waiting,
+    /// Go on now: the work comes back with what to do.
+    Now(Opening, T),
 }
 
 /// A secret the person typed to open the vault.

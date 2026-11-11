@@ -144,7 +144,7 @@ impl Shell {
     /// Keychain's one try this run. The fields show as before when it cannot open the vault.
     pub(super) fn unlock_from_keychain(&mut self, cx: &mut Context<Self>) {
         let this = cx.weak_entity();
-        let _ = Keeper::need_vault(cx, move |cx| {
+        let _ = Keeper::need_vault(cx, (), move |(), cx| {
             let _ = this.update(cx, |_, cx| cx.notify());
         });
     }

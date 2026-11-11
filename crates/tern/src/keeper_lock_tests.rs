@@ -127,15 +127,21 @@ fn passphrase(p: &str) -> Typed {
 fn a_need_asks_for_the_pin_while_one_is_set_else_the_passphrase() {
     let (mut app, dir) = keeper(None);
     vault_with("a").save(&dir.path().join("vault.age")).unwrap();
-    let need = |app: &mut gpui::TestApp| app.update(|cx| Keeper::need_vault(cx, |_| {}));
-    assert_eq!(need(&mut app), Opening::Ask(Ask::Passphrase));
+    let need = |app: &mut gpui::TestApp| app.update(|cx| Keeper::need_vault(cx, 7, |_, _| {}));
+    assert_eq!(
+        need(&mut app),
+        Pending::Now(Opening::Ask(Ask::Passphrase), 7)
+    );
     app.update(|cx| cx.global_mut::<Keeper>().pin = true);
-    assert_eq!(need(&mut app), Opening::Ask(Ask::Pin));
+    assert_eq!(need(&mut app), Pending::Now(Opening::Ask(Ask::Pin), 7));
     // A wiped PIN is forgotten: the next need goes straight to the passphrase.
     app.update(|cx| Keeper::unlock_done(vault_pin::Outcome::Wiped, 0, cx));
-    assert_eq!(need(&mut app), Opening::Ask(Ask::Passphrase));
+    assert_eq!(
+        need(&mut app),
+        Pending::Now(Opening::Ask(Ask::Passphrase), 7)
+    );
     app.update(|cx| Keeper::adopt(vault_with("a"), cx));
-    assert_eq!(need(&mut app), Opening::Open);
+    assert_eq!(need(&mut app), Pending::Now(Opening::Open, 7));
 }
 
 #[test]
@@ -176,4 +182,43 @@ fn an_unlock_that_outlives_a_lock_leaves_the_vault_shut() {
     app.run_until_parked();
     assert!(matches!(said.borrow().as_ref(), Some(Tried::Failed(_))));
     assert!(!has(&mut app, "a"));
+}
+
+/// A need that arrives while the Keychain read runs must keep its work (a server's password
+/// prompt, whose reply closes the login if dropped) and get it back when the read answers,
+/// also when the read did not open the vault and the person is asked next.
+#[test]
+fn work_waiting_on_a_keychain_read_is_handed_back_when_it_answers() {
+    use crate::keeper_gate::{Need, Read};
+    let (mut app, dir) = keeper(None);
+    vault_with("a").save(&dir.path().join("vault.age")).unwrap();
+    let got = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = got.clone();
+    app.update(|cx| {
+        // A read is already running, as the first need of the run started it.
+        let k = cx.global_mut::<Keeper>();
+        k.keychain = true;
+        assert_eq!(
+            k.gate.need(true, true, Box::new(|_: &mut gpui::App| {})),
+            Need::Start
+        );
+        let need = Keeper::need_vault(cx, "prompt", move |work, cx| {
+            sink.borrow_mut().push((work, Keeper::locked(cx)));
+        });
+        assert_eq!(need, Pending::Waiting);
+        assert!(
+            got.borrow().is_empty(),
+            "held, not run, while the read runs"
+        );
+        let since = cx.global::<Keeper>().locks;
+        Keeper::keychain_done(
+            Read {
+                vault: None,
+                refused: true,
+            },
+            since,
+            cx,
+        );
+    });
+    assert_eq!(*got.borrow(), [("prompt", true)]);
 }
