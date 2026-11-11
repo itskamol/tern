@@ -25,6 +25,9 @@ pub struct Keeper {
     ticket: u64,
     /// A PIN is set: the Keychain holds the passphrase sealed to it (see `vault_pin`).
     pin: bool,
+    /// How many times a lock was asked for, open vault or not: an open that began before one
+    /// is stale and must not reopen the vault.
+    locks: u64,
 }
 
 impl Global for Keeper {}
@@ -60,6 +63,7 @@ impl Keeper {
             ticket: 0,
             // From the local mark, not the Keychain item: reading that asks macOS first.
             pin: crate::settings::dir().is_some_and(|d| crate::vault_pin::marked(&d)),
+            locks: 0,
         });
     }
 
@@ -79,11 +83,12 @@ impl Keeper {
             Need::Skip => false,
             Need::Wait => true,
             Need::Start => {
+                let since = k.locks;
                 let work =
                     cx.background_spawn(async move { open_with(&keychain::Passphrase, &path) });
                 cx.spawn(async move |cx| {
                     let read = work.await;
-                    cx.update(|cx| Self::keychain_done(read, cx));
+                    cx.update(|cx| Self::keychain_done(read, since, cx));
                 })
                 .detach();
                 true
@@ -91,9 +96,12 @@ impl Keeper {
         }
     }
 
-    fn keychain_done(read: Read, cx: &mut App) {
+    /// `since` is the lock count when the read began; a lock after it (the Mac slept while the
+    /// Keychain dialog was up) keeps the vault shut, and the copy read is dropped, which wipes it.
+    fn keychain_done(read: Read, since: u64, cx: &mut App) {
         let k = cx.global_mut::<Self>();
-        if adopt(&mut k.open, read.vault) {
+        let found = read.vault.filter(|_| k.locks == since);
+        if adopt(&mut k.open, found) {
             k.keychain_current = true;
         }
         for waiter in k.gate.finish(read.refused) {
@@ -132,11 +140,12 @@ impl Keeper {
     }
 
     /// Forgets the unlocked vault, zeroing its secrets; the next use asks for the passphrase
-    /// again. Open sessions are untouched: they hold no vault data.
-    pub fn lock(cx: &mut App) {
-        if let Some(mut vault) = cx.global_mut::<Self>().open.take() {
-            vault.wipe();
-        }
+    /// again. Open sessions are untouched: they hold no vault data. An open still running
+    /// (a Keychain read) does not reopen it. Returns whether a vault was open.
+    pub fn lock(cx: &mut App) -> bool {
+        let k = cx.global_mut::<Self>();
+        k.locks += 1;
+        k.open.take().map(|mut vault| vault.wipe()).is_some()
     }
 
     /// Hands an unlocked vault back. With the Keychain opt-in on, the passphrase is stored
@@ -686,6 +695,7 @@ mod tests {
                 keychain_current: false,
                 ticket: 0,
                 pin: false,
+                locks: 0,
             })
         });
         (app, dir)

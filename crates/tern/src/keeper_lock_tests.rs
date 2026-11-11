@@ -68,3 +68,39 @@ fn locking_during_a_store_does_not_lose_the_write() {
     let reopened = reopened.unwrap();
     assert!(reopened.get(&login("a")).is_some() && reopened.get(&login("b")).is_some());
 }
+
+/// The Mac sleeps while a Keychain read is still running (its system dialog may be on screen
+/// for minutes): the read must not open the vault once it returns, as the lock asked for it to
+/// stay shut. What waited for it still runs, and finds the vault locked.
+#[test]
+fn a_keychain_read_running_when_the_mac_sleeps_does_not_reopen_the_vault() {
+    use crate::keeper_gate::{Need, Read};
+    use crate::lock_on_sleep;
+    let (mut app, dir) = keeper(None);
+    vault_with("a").save(&dir.path().join("vault.age")).unwrap();
+    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = ran.clone();
+    app.update(|cx| {
+        let k = cx.global_mut::<Keeper>();
+        let need = k.gate.need(
+            true,
+            true,
+            Box::new(move |cx: &mut gpui::App| {
+                seen.set(Keeper::locked(cx));
+            }),
+        );
+        assert_eq!(need, Need::Start);
+        let since = cx.global::<Keeper>().locks;
+        lock_on_sleep::lock(true, cx);
+        Keeper::keychain_done(
+            Read {
+                vault: Some(vault_with("a")),
+                refused: false,
+            },
+            since,
+            cx,
+        );
+    });
+    assert!(!has(&mut app, "a"));
+    assert!(ran.get(), "the waiter ran and saw the vault locked");
+}

@@ -56,11 +56,7 @@ pub(crate) fn listen(
 /// handed to the disk (`Keeper::persist` took its copy before returning) is not lost. Returns
 /// `true` when a vault was open and is now locked; `enabled` is the setting.
 pub fn lock(enabled: bool, cx: &mut App) -> bool {
-    if !enabled || Keeper::len(cx).is_none() {
-        return false;
-    }
-    Keeper::lock(cx);
-    true
+    enabled && Keeper::lock(cx)
 }
 
 #[cfg(target_os = "macos")]
