@@ -35,9 +35,13 @@ ditto -c -k --keepParent "$app" "$zip"
 sha=$(shasum -a 256 "$zip" | awk '{print $1}')
 
 # dmgbuild lives in a venv under target/ at a pinned version, so the system Python is untouched.
+# dmgbuild 1.6.7 needs Python 3.10+; macOS's own python3 is 3.9, so take the newest found.
 venv=target/dmgbuild-venv
 if ! "$venv/bin/python" -c 'import dmgbuild' 2>/dev/null; then
-  python3 -m venv "$venv"
+  py=$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3.10 || true)
+  [ -n "$py" ] || { echo "dmgbuild needs Python 3.10 or newer (brew install python)" >&2; exit 1; }
+  rm -rf "$venv"
+  "$py" -m venv "$venv"
   "$venv/bin/pip" install --quiet "dmgbuild==1.6.7"
 fi
 
