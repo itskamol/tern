@@ -1,6 +1,7 @@
 //! The panes of one tab as a binary tree: a leaf is a pane, a split holds two subtrees side
 //! by side or one above the other. Closing a pane collapses its parent, so the sibling takes
-//! the space. Pure data, so the rules are tested without a window.
+//! the space. Each split keeps the first side's share of its length (its ratio), and no pane
+//! may be given less than a [`Floor`]. Pure data, so the rules are tested without a window.
 
 /// How a split lays out its two halves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,52 @@ pub enum Direction {
     Down,
 }
 
+/// Fewest columns and rows a pane may be left with.
+pub const MIN_COLS: f32 = 20.0;
+pub const MIN_ROWS: f32 = 5.0;
+
+/// Epsilon for comparing shares of the unit square.
+const EPS: f32 = 1e-4;
+
+/// Smallest share of the tab a pane may take, as fractions of its width and height.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Floor {
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Floor {
+    /// The floor for a tab `cols` columns wide and `rows` rows high (as measured, so fractional).
+    pub fn cells(cols: f32, rows: f32) -> Self {
+        Self {
+            w: MIN_COLS / cols.max(1.0),
+            h: MIN_ROWS / rows.max(1.0),
+        }
+    }
+
+    fn along(self, axis: Axis) -> f32 {
+        match axis {
+            Axis::Row => self.w,
+            Axis::Column => self.h,
+        }
+    }
+}
+
+impl Direction {
+    /// The axis a divider on this side of a pane lies across.
+    pub fn axis(self) -> Axis {
+        match self {
+            Direction::Left | Direction::Right => Axis::Row,
+            Direction::Up | Direction::Down => Axis::Column,
+        }
+    }
+
+    /// Whether a pane with a divider on this side is the first child of that split.
+    fn pane_is_first(self) -> bool {
+        matches!(self, Direction::Right | Direction::Down)
+    }
+}
+
 pub type PaneId = u32;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,10 +73,53 @@ pub enum Node {
     Leaf(PaneId),
     Split {
         axis: Axis,
+        /// The first child's share of the split's length.
+        ratio: f32,
         first: Box<Node>,
         second: Box<Node>,
     },
 }
+
+/// Where a divider is looked for: next to a pane on one side, or on whichever side there is one.
+#[derive(Clone, Copy)]
+enum Beside {
+    Side(bool),
+    Any,
+}
+
+fn halves(axis: Axis, ratio: f32, area: Rect) -> (Rect, Rect) {
+    match axis {
+        Axis::Row => {
+            let w = area.w * ratio;
+            (
+                Rect { w, ..area },
+                Rect {
+                    x: area.x + w,
+                    w: area.w - w,
+                    ..area
+                },
+            )
+        }
+        Axis::Column => {
+            let h = area.h * ratio;
+            (
+                Rect { h, ..area },
+                Rect {
+                    y: area.y + h,
+                    h: area.h - h,
+                    ..area
+                },
+            )
+        }
+    }
+}
+
+const UNIT: Rect = Rect {
+    x: 0.0,
+    y: 0.0,
+    w: 1.0,
+    h: 1.0,
+};
 
 /// A pane's place in the unit square, as fractions of the tab's area.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,22 +150,144 @@ impl Node {
         }
     }
 
-    /// Splits pane `target` in two along `axis`; `new` goes second (right or below). False
-    /// when `target` is not in the tree.
-    pub fn split(&mut self, target: PaneId, axis: Axis, new: PaneId) -> bool {
+    /// Splits pane `target` in two on `side`, half and half; `new` goes first for left and up,
+    /// second for right and down. False when `target` is not in the tree.
+    pub fn split(&mut self, target: PaneId, side: Direction, new: PaneId) -> bool {
         match self {
             Node::Leaf(id) if *id == target => {
+                let (first, second) = if side.pane_is_first() {
+                    (target, new)
+                } else {
+                    (new, target)
+                };
                 *self = Node::Split {
-                    axis,
-                    first: Box::new(Node::Leaf(target)),
-                    second: Box::new(Node::Leaf(new)),
+                    axis: side.axis(),
+                    ratio: 0.5,
+                    first: Box::new(Node::Leaf(first)),
+                    second: Box::new(Node::Leaf(second)),
                 };
                 true
             }
             Node::Leaf(_) => false,
             Node::Split { first, second, .. } => {
-                first.split(target, axis, new) || second.split(target, axis, new)
+                first.split(target, side, new) || second.split(target, side, new)
             }
+        }
+    }
+
+    /// Whether splitting `target` on `side` leaves both halves at least `floor`.
+    pub fn can_split(&self, target: PaneId, side: Direction, floor: Floor) -> bool {
+        self.layout(UNIT)
+            .into_iter()
+            .find(|(id, _)| *id == target)
+            .is_some_and(|(_, r)| {
+                let len = match side.axis() {
+                    Axis::Row => r.w,
+                    Axis::Column => r.h,
+                };
+                len / 2.0 >= floor.along(side.axis()) - EPS
+            })
+    }
+
+    /// The fewest of the tab's length along `axis` this subtree may take.
+    fn min_len(&self, axis: Axis, floor: Floor) -> f32 {
+        match self {
+            Node::Leaf(_) => floor.along(axis),
+            Node::Split {
+                axis: a,
+                first,
+                second,
+                ..
+            } => {
+                let (x, y) = (first.min_len(axis, floor), second.min_len(axis, floor));
+                if *a == axis { x + y } else { x.max(y) }
+            }
+        }
+    }
+
+    /// Moves the divider beside `pane` on `side` so the first child has share `ratio`, as far
+    /// as `floor` allows. False when there is no divider there.
+    pub fn set_ratio(&mut self, pane: PaneId, side: Direction, ratio: f32, floor: Floor) -> bool {
+        let beside = Beside::Side(side.pane_is_first());
+        self.adjust(pane, side.axis(), beside, UNIT, floor, &|_| ratio)
+    }
+
+    /// Moves the nearest divider across `dir`'s axis around `pane` by 5% of its split, toward
+    /// `dir`. False when the pane has no such divider.
+    pub fn step_ratio(&mut self, pane: PaneId, dir: Direction, floor: Floor) -> bool {
+        let delta = if dir.pane_is_first() { 0.05 } else { -0.05 };
+        self.adjust(pane, dir.axis(), Beside::Any, UNIT, floor, &|r| r + delta)
+    }
+
+    /// Puts the divider beside `pane` on `side` back to half and half.
+    pub fn reset_ratio(&mut self, pane: PaneId, side: Direction, floor: Floor) -> bool {
+        self.set_ratio(pane, side, 0.5, floor)
+    }
+
+    /// Every split half and half, where `floor` allows.
+    pub fn equalize(&mut self, floor: Floor) {
+        self.equalize_in(UNIT, floor);
+    }
+
+    fn equalize_in(&mut self, area: Rect, floor: Floor) {
+        let Node::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return;
+        };
+        *ratio = clamp_ratio(*axis, 0.5, area, first, second, floor).unwrap_or(0.5);
+        let (a, b) = halves(*axis, *ratio, area);
+        first.equalize_in(a, floor);
+        second.equalize_in(b, floor);
+    }
+
+    /// Applies `to` to the ratio of the deepest split across `axis` that holds `pane` (on the
+    /// given side of it) and clamps the result to the floors of both subtrees.
+    fn adjust(
+        &mut self,
+        pane: PaneId,
+        axis: Axis,
+        beside: Beside,
+        area: Rect,
+        floor: Floor,
+        to: &dyn Fn(f32) -> f32,
+    ) -> bool {
+        let Node::Split {
+            axis: own,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        let (a, b) = halves(*own, *ratio, area);
+        let in_first = first.contains(pane);
+        let deeper = if in_first {
+            first.adjust(pane, axis, beside, a, floor, to)
+        } else {
+            second.adjust(pane, axis, beside, b, floor, to)
+        };
+        if deeper {
+            return true;
+        }
+        let here = match beside {
+            Beside::Side(want_first) => want_first == in_first,
+            Beside::Any => true,
+        };
+        if *own != axis || !here || !(in_first || second.contains(pane)) {
+            return false;
+        }
+        match clamp_ratio(axis, to(*ratio), area, first, second, floor) {
+            Some(r) => {
+                *ratio = r;
+                true
+            }
+            None => false,
         }
     }
 
@@ -87,6 +299,7 @@ impl Node {
             leaf @ Node::Leaf(_) => Some(leaf),
             Node::Split {
                 axis,
+                ratio,
                 first,
                 second,
             } => match (first.remove(id), second.remove(id)) {
@@ -95,6 +308,7 @@ impl Node {
                 (None, Some(rest)) | (Some(rest), None) => Some(rest),
                 (Some(first), Some(second)) => Some(Node::Split {
                     axis,
+                    ratio,
                     first: Box::new(first),
                     second: Box::new(second),
                 }),
@@ -103,39 +317,17 @@ impl Node {
         }
     }
 
-    /// Where each pane sits when the whole tree fills `area`, every split cut in half.
+    /// Where each pane sits when the whole tree fills `area`, every split cut by its ratio.
     pub fn layout(&self, area: Rect) -> Vec<(PaneId, Rect)> {
         match self {
             Node::Leaf(id) => vec![(*id, area)],
             Node::Split {
                 axis,
+                ratio,
                 first,
                 second,
             } => {
-                let (a, b) = match axis {
-                    Axis::Row => {
-                        let w = area.w / 2.0;
-                        (
-                            Rect { w, ..area },
-                            Rect {
-                                x: area.x + w,
-                                w,
-                                ..area
-                            },
-                        )
-                    }
-                    Axis::Column => {
-                        let h = area.h / 2.0;
-                        (
-                            Rect { h, ..area },
-                            Rect {
-                                y: area.y + h,
-                                h,
-                                ..area
-                            },
-                        )
-                    }
-                };
+                let (a, b) = halves(*axis, *ratio, area);
                 let mut all = first.layout(a);
                 all.extend(second.layout(b));
                 all
@@ -146,13 +338,7 @@ impl Node {
     /// The pane next to `from` in `dir`: the one that touches its edge and shares the most of
     /// it. `None` at the edge of the tab.
     pub fn neighbour(&self, from: PaneId, dir: Direction) -> Option<PaneId> {
-        const EPS: f32 = 1e-4;
-        let all = self.layout(Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 1.0,
-            h: 1.0,
-        });
+        let all = self.layout(UNIT);
         let (_, me) = all.iter().find(|(id, _)| *id == from)?;
         let overlap = |a0: f32, a1: f32, b0: f32, b1: f32| (a1.min(b1) - a0.max(b0)).max(0.0);
         all.iter()
@@ -187,6 +373,37 @@ impl Node {
     }
 }
 
+/// The side of a pane a host dropped at (`x`, `y`), as fractions of the pane, would take: the
+/// nearest edge, the corners split along the diagonals.
+pub fn drop_side(x: f32, y: f32) -> Direction {
+    let (dx, dy) = (x - 0.5, y - 0.5);
+    match (dx.abs() > dy.abs(), dx < 0.0, dy < 0.0) {
+        (true, true, _) => Direction::Left,
+        (true, false, _) => Direction::Right,
+        (false, _, true) => Direction::Up,
+        (false, _, false) => Direction::Down,
+    }
+}
+
+/// `want` held to what both subtrees of a split filling `area` need; `None` when they need
+/// more than there is.
+fn clamp_ratio(
+    axis: Axis,
+    want: f32,
+    area: Rect,
+    first: &Node,
+    second: &Node,
+    floor: Floor,
+) -> Option<f32> {
+    let len = match axis {
+        Axis::Row => area.w,
+        Axis::Column => area.h,
+    };
+    let lo = first.min_len(axis, floor) / len;
+    let hi = 1.0 - second.min_len(axis, floor) / len;
+    (lo <= hi + EPS).then(|| want.clamp(lo.min(hi), hi))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -195,8 +412,8 @@ mod tests {
     /// Pane 1 on the left; 2 top right; 3 bottom right.
     fn l_shape() -> Node {
         let mut t = Node::Leaf(1);
-        assert!(t.split(1, Axis::Row, 2));
-        assert!(t.split(2, Axis::Column, 3));
+        assert!(t.split(1, Direction::Right, 2));
+        assert!(t.split(2, Direction::Down, 3));
         t
     }
 
@@ -208,9 +425,11 @@ mod tests {
             t,
             Node::Split {
                 axis: Axis::Row,
+                ratio: 0.5,
                 first: Box::new(Node::Leaf(1)),
                 second: Box::new(Node::Split {
                     axis: Axis::Column,
+                    ratio: 0.5,
                     first: Box::new(Node::Leaf(2)),
                     second: Box::new(Node::Leaf(3)),
                 }),
@@ -221,7 +440,7 @@ mod tests {
     #[test]
     fn splitting_a_missing_pane_changes_nothing() {
         let mut t = l_shape();
-        assert!(!t.split(9, Axis::Row, 4));
+        assert!(!t.split(9, Direction::Right, 4));
         assert_eq!(t.leaves(), [1, 2, 3]);
     }
 
@@ -233,6 +452,7 @@ mod tests {
             t,
             Node::Split {
                 axis: Axis::Row,
+                ratio: 0.5,
                 first: Box::new(Node::Leaf(1)),
                 second: Box::new(Node::Leaf(2)),
             }
@@ -243,6 +463,7 @@ mod tests {
             t,
             Node::Split {
                 axis: Axis::Column,
+                ratio: 0.5,
                 first: Box::new(Node::Leaf(2)),
                 second: Box::new(Node::Leaf(3)),
             }
@@ -280,6 +501,17 @@ mod tests {
         assert_eq!(Node::Leaf(1).neighbour(1, Direction::Right), None);
     }
 
+    #[test]
+    fn a_drop_takes_the_nearest_edge() {
+        assert_eq!(drop_side(0.1, 0.5), Direction::Left);
+        assert_eq!(drop_side(0.9, 0.4), Direction::Right);
+        assert_eq!(drop_side(0.5, 0.1), Direction::Up);
+        assert_eq!(drop_side(0.3, 0.95), Direction::Down);
+        // Near a corner the longer way from the middle decides.
+        assert_eq!(drop_side(0.05, 0.2), Direction::Left);
+        assert_eq!(drop_side(0.2, 0.05), Direction::Up);
+    }
+
     fn leaf(id: PaneId) -> Box<Node> {
         Box::new(Node::Leaf(id))
     }
@@ -287,6 +519,7 @@ mod tests {
     fn pair(axis: Axis, first: Box<Node>, second: Box<Node>) -> Box<Node> {
         Box::new(Node::Split {
             axis,
+            ratio: 0.5,
             first,
             second,
         })
@@ -303,7 +536,7 @@ mod tests {
         assert_eq!(t.neighbour(3, Direction::Left), Some(1));
         // Cut pane 1 into two stacked halves: from 5 only the lower one touches; from 3 only
         // the upper one does.
-        assert!(t.split(1, Axis::Column, 2));
+        assert!(t.split(1, Direction::Down, 2));
         assert_eq!(t.neighbour(5, Direction::Left), Some(2));
         assert_eq!(t.neighbour(3, Direction::Left), Some(1));
     }

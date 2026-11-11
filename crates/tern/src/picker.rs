@@ -23,6 +23,9 @@ use crate::theme::Theme;
 actions!(tern, [ToggleHostPicker]);
 
 pub struct Picker {
+    /// Set when the host chosen opens in a new pane on this side of the focused one, instead
+    /// of in its own tab.
+    split: Option<crate::split::Direction>,
     query: String,
     active: usize,
     focus: FocusHandle,
@@ -30,8 +33,16 @@ pub struct Picker {
 }
 
 impl Picker {
+    pub fn for_split(side: crate::split::Direction, cx: &mut App) -> Self {
+        Self {
+            split: Some(side),
+            ..Self::new(cx)
+        }
+    }
+
     pub fn new(cx: &mut App) -> Self {
         Self {
+            split: None,
             query: String::new(),
             active: 0,
             focus: cx.focus_handle(),
@@ -179,10 +190,24 @@ impl Shell {
                 picker.active = 0;
             }
             Key::Pick => {
+                let split = picker.split;
                 let chosen = matches
                     .get(picker.active)
                     .map(|&ix| self.hosts()[ix].clone());
                 self.close_picker(window, cx);
+                if let Some(side) = split {
+                    let target = self.focused_pane();
+                    match (chosen, target) {
+                        (Some(host), Some(pane)) => {
+                            self.split_with_host(pane, side, &host, window, cx)
+                        }
+                        (None, Some(pane)) if !query.trim().is_empty() => {
+                            self.split_with_target(pane, side, query.trim(), window, cx)
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 match chosen {
                     Some(host) => self.connect_host(host, window, cx),
                     // Nothing listed matches: treat the text as a target, so `user@host:port`

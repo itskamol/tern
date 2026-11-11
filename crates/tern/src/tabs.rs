@@ -57,6 +57,10 @@ pub fn bindings() -> Vec<KeyBinding> {
 /// What the strip needs to know about one tab.
 pub struct TabInfo {
     pub alias: String,
+    /// The host of the tab's focused pane: what the tab is called when it has no name.
+    pub host: String,
+    /// How many panes the tab holds besides the focused one.
+    pub others: usize,
     /// The name the user gave the tab; it shows instead of the alias.
     pub title: Option<String>,
     /// The session's output is being written to a file.
@@ -70,7 +74,7 @@ pub struct TabInfo {
 
 impl TabInfo {
     pub fn label(&self) -> &str {
-        self.title.as_deref().unwrap_or(&self.alias)
+        self.title.as_deref().unwrap_or(&self.host)
     }
 }
 
@@ -324,6 +328,19 @@ fn tab_pill(
                 .child(SharedString::from(middle_ellipsis(tab.label(), 18)))
                 .into_any_element(),
         })
+        .when(tab.others > 0, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(3.))
+                    .bg(t.row_active)
+                    .text_color(t.muted)
+                    .text_size(px(10.))
+                    .child(format!("+{}", tab.others)),
+            )
+        })
         .when(tab.broadcast, |el| {
             el.child(
                 div()
@@ -387,7 +404,9 @@ pub fn status_words(dot: Dot) -> Option<&'static str> {
 /// A tab as VoiceOver reads it: the title, then what the badges and the dot show.
 fn tab_label(tab: &TabInfo) -> String {
     let mut label = tab.label().to_owned();
+    let more = format!("{} more panes", tab.others);
     for (on, words) in [
+        (tab.others > 0, more.as_str()),
         (tab.broadcast, "broadcasting"),
         (tab.logging, "logging"),
         (true, status_words(tab.dot).unwrap_or_default()),
@@ -478,6 +497,8 @@ mod tests {
     fn info(dot: Dot) -> TabInfo {
         TabInfo {
             alias: "web".into(),
+            host: "web".into(),
+            others: 0,
             title: None,
             logging: false,
             broadcast: false,
@@ -492,6 +513,9 @@ mod tests {
         let mut tab = info(Dot::Connected);
         tab.title = Some("deploy".into());
         assert_eq!(tab_label(&tab), "deploy, Connected");
+        tab.others = 2;
+        assert_eq!(tab_label(&tab), "deploy, 2 more panes, Connected");
+        tab.others = 0;
         tab.broadcast = true;
         tab.logging = true;
         assert_eq!(tab_label(&tab), "deploy, broadcasting, logging, Connected");

@@ -56,8 +56,10 @@ pub fn init_menus(cx: &mut App) {
 #[cfg(target_os = "macos")]
 fn app_menus() -> Vec<Menu> {
     use crate::shell::{
-        DecreaseFontSize, IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize, ShowAbout,
-        SplitDown, SplitRight, ToggleSftp, ToggleSidebar, ToggleSnippets,
+        ClosePane, DecreaseFontSize, EqualizePanes, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+        FocusPaneUp, IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize, ShowAbout,
+        SplitDown, SplitDownWithHost, SplitRight, SplitRightWithHost, ToggleSftp, ToggleSidebar,
+        ToggleSnippets,
     };
     use crate::shell::{RedoHosts, UndoHosts};
     use crate::tabs::{CloseTab, NextTab, PrevTab};
@@ -126,6 +128,15 @@ fn app_menus() -> Vec<Menu> {
             vec![
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),
+                MenuItem::action("Split Right with Host…", SplitRightWithHost),
+                MenuItem::action("Split Down with Host…", SplitDownWithHost),
+                MenuItem::separator(),
+                MenuItem::action("Focus Pane Left", FocusPaneLeft),
+                MenuItem::action("Focus Pane Right", FocusPaneRight),
+                MenuItem::action("Focus Pane Up", FocusPaneUp),
+                MenuItem::action("Focus Pane Down", FocusPaneDown),
+                MenuItem::action("Close Pane", ClosePane),
+                MenuItem::action("Equalize Panes", EqualizePanes),
                 MenuItem::separator(),
                 MenuItem::action("Snippets…", ToggleSnippets),
                 MenuItem::action("Fill Password", crate::shell::FillPassword),

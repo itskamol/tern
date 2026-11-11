@@ -1,15 +1,11 @@
 //! Opening, switching and closing tabs: a host becomes a tab with one or more panes, each its
 //! own SSH session.
 //!
-//! Splits: a tab holds one or more panes laid out as a tree (see `split.rs`). A split opens
-//! another session like the focused one; ⌘W closes a pane before it closes the tab.
+//! Splits: a tab holds one or more panes laid out as a tree (see `split.rs`; the verbs that make
+//! them are in `shell_split.rs`). ⌘W closes a pane before it closes the tab.
 
-use crate::split::{Axis, Direction, Node, PaneId};
-use gpui::prelude::FluentBuilder;
-use gpui::{
-    AnyElement, Context, Focusable, InteractiveElement, IntoElement, ParentElement, Styled, Window,
-    div, px, transparent_black,
-};
+use crate::split::{Direction, PaneId};
+use gpui::{Context, Focusable, Window};
 use tern_ssh::{ConnectSpec, HostEntry};
 
 use super::*;
@@ -131,6 +127,7 @@ impl Shell {
         );
         Pane {
             id: self.tabs.new_pane_id(),
+            host: alias.to_owned(),
             session,
             _repaint: repaint,
             _bell: bell,
@@ -212,19 +209,6 @@ pub(super) fn start_bounds(cx: &gpui::App) -> gpui::Bounds<gpui::Pixels> {
 }
 
 impl Shell {
-    /// Splits the focused pane of the front tab; the new pane has the keyboard.
-    pub(crate) fn split_pane(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.active_tab().filter(|_| self.tabs.can_split()) else {
-            return;
-        };
-        let launch = tab.session().read(cx).launch_again();
-        let alias = tab.alias.clone();
-        let pane = self.make_pane(launch, &alias, window, cx);
-        if self.tabs.split(axis, pane).is_ok() {
-            self.focus_front_pane(window, cx);
-        }
-    }
-
     /// ⌘W: a split tab loses the focused pane (its session ends, and the pane before it takes
     /// the keyboard); a tab with one pane closes.
     pub(crate) fn close_pane_or_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -253,75 +237,12 @@ impl Shell {
     }
 
     /// Gives the keyboard to the focused pane of the front tab, and points a broadcast at it.
-    fn focus_front_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_front_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.active_tab() {
             let focus = tab.session().read(cx).view.focus_handle(cx);
             window.focus(&focus, cx);
         }
         self.apply_broadcast(cx);
         cx.notify();
-    }
-
-    /// The tab's terminals, in their split layout.
-    pub(super) fn render_panes(&self, tab: &Tab, cx: &mut Context<Self>) -> AnyElement {
-        self.render_node(tab, tab.tree(), tab.panes().len() > 1, cx)
-    }
-
-    fn render_node(
-        &self,
-        tab: &Tab,
-        node: &Node,
-        split: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = self.theme;
-        match node {
-            Node::Leaf(id) => {
-                let Some(pane) = tab.panes().iter().find(|p| p.id == *id) else {
-                    return div().into_any_element();
-                };
-                let id = *id;
-                let focused = tab.focused() == id;
-                div()
-                    .id(("pane", id))
-                    .size_full()
-                    // Only a split tab marks its focus; a lone pane would just wear a frame.
-                    .when(split, |el| {
-                        el.border_1().border_color(if focused {
-                            t.accent.opacity(0.55)
-                        } else {
-                            transparent_black()
-                        })
-                    })
-                    // Before the terminal sees the click, so selecting text in a pane also
-                    // gives it the keyboard.
-                    .capture_any_mouse_down(cx.listener(move |s, _, w, cx| s.focus_pane(id, w, cx)))
-                    .child(tern_term::TerminalView::cached_child(
-                        &pane.session.read(cx).view,
-                    ))
-                    .into_any_element()
-            }
-            Node::Split {
-                axis,
-                first,
-                second,
-            } => {
-                let half = |el: gpui::Div| el.flex_1().min_w(px(0.)).min_h(px(0.));
-                let a = self.render_node(tab, first, split, cx);
-                let b = self.render_node(tab, second, split, cx);
-                let divider = match axis {
-                    Axis::Row => div().flex_none().bg(t.border).w(px(1.)).h_full(),
-                    Axis::Column => div().flex_none().bg(t.border).h(px(1.)).w_full(),
-                };
-                div()
-                    .size_full()
-                    .flex()
-                    .when(*axis == Axis::Column, |el| el.flex_col())
-                    .child(half(div()).child(a))
-                    .child(divider)
-                    .child(half(div()).child(b))
-                    .into_any_element()
-            }
-        }
     }
 }
