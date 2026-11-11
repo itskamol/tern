@@ -5,7 +5,7 @@
 //! first used, never at launch. A command line is never logged.
 //!
 //! The filter works from words, so it both misses secrets and drops harmless lines
-//! (`ssh -p2222`); a leading space and [`CommandHistory::delete`] are the person's corrections.
+//! (`tar -pxf a.tgz`); a leading space and [`CommandHistory::delete`] are the person's corrections.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 
 /// Commands kept per host; the oldest are dropped first.
 pub const CAP: usize = 5000;
+
+/// Lines a file may hold beyond [`CAP`] before it is rewritten, so a full history is not
+/// rewritten whole on every command.
+const HEADROOM: usize = CAP / 10;
 
 /// The longest file name a host may have once encoded; longer ones are not recorded.
 const NAME_MAX: usize = 200;
@@ -86,7 +90,7 @@ impl CommandHistory {
         let before = self.count(&path);
         open_private(&path, true)?.write_all(text.as_bytes())?;
         self.counts.insert(path.clone(), before + 1);
-        if before + 1 > CAP {
+        if before + 1 > CAP + HEADROOM {
             self.compact(&path)?;
         }
         Ok(true)
@@ -114,9 +118,13 @@ impl CommandHistory {
             return found;
         }
         let lines: Vec<&str> = found.iter().map(|e| e.line.as_str()).collect();
+        // The host is part of what matches only when hosts are mixed.
         let labels: Vec<String> = found
             .iter()
-            .map(|e| format!("{} {}", e.line, e.host))
+            .map(|e| match scope {
+                Scope::Host(_) => e.line.clone(),
+                Scope::All => format!("{} {}", e.line, e.host),
+            })
             .collect();
         crate::picker::rank_named(query, &lines, &labels)
             .into_iter()
@@ -238,11 +246,11 @@ fn keep(line: &str) -> Option<&str> {
     if SECRET_WORDS.iter().any(|w| lower.contains(w)) {
         return None;
     }
-    // `mysql -psecret`: a password glued to its flag.
-    if line
-        .split_whitespace()
-        .any(|t| t.starts_with("-p") && t.len() > 2)
-    {
+    // `mysql -psecret`: a password glued to its flag. Digits only is a port or a pid.
+    if line.split_whitespace().any(|t| {
+        t.strip_prefix("-p")
+            .is_some_and(|rest| !rest.is_empty() && !rest.bytes().all(|b| b.is_ascii_digit()))
+    }) {
         return None;
     }
     Some(line)
@@ -426,6 +434,52 @@ mod tests {
         assert_eq!(kept.len(), CAP);
         assert_eq!(kept[0], format!("cmd {}", CAP + 6));
         assert_eq!(kept[CAP - 1], "cmd 7");
+    }
+
+    #[test]
+    fn a_host_scope_search_matches_the_line_not_the_host_name() {
+        let (mut h, _d) = history();
+        h.record("prod", "uptime", 1).unwrap();
+        h.record("prod", "docker ps", 2).unwrap();
+        assert!(lines(&h, Scope::Host("prod"), "prod").is_empty());
+        assert_eq!(
+            lines(&h, Scope::All, "prod").len(),
+            2,
+            "all hosts match the host too"
+        );
+    }
+
+    #[test]
+    fn a_flag_with_digits_glued_on_is_kept_and_one_with_letters_is_not() {
+        let (mut h, _d) = history();
+        for line in ["ssh -p2222 host", "ps -p 123", "ps -p123"] {
+            assert!(h.record("web", line, 1).unwrap(), "{line} was dropped");
+        }
+        for line in ["mysql -pabc", "mysql -p123abc", "mysql -pp4ss"] {
+            assert!(!h.record("web", line, 1).unwrap(), "{line} was kept");
+        }
+    }
+
+    #[test]
+    fn a_full_history_is_rewritten_once_in_a_while_not_on_every_command() {
+        let (mut h, d) = history();
+        for n in 0..CAP + 1 {
+            h.record("web", &format!("cmd {n}"), n as u64).unwrap();
+        }
+        let file = d.path().join("history/web.jsonl");
+        let on_disk = |f: &std::path::Path| std::fs::read_to_string(f).unwrap().lines().count();
+        assert_eq!(on_disk(&file), CAP + 1, "no rewrite for one line over");
+        assert_eq!(
+            host_lines(&h, "web").len(),
+            CAP,
+            "a search still returns the cap"
+        );
+        for n in 0..CAP / 10 {
+            h.record("web", &format!("more {n}"), (CAP + 1 + n) as u64)
+                .unwrap();
+        }
+        assert!(on_disk(&file) <= CAP, "compacted once the headroom ran out");
+        assert_eq!(host_lines(&h, "web").len(), CAP);
     }
 
     #[test]
