@@ -17,6 +17,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- The offer to save a password in the vault no longer shares its line with a shell prompt that arrives late: what the server writes while tern asks is shown once the question is answered (#105).
 - Keychain unlock no longer reads the Keychain or runs scrypt at launch: the Keychain is asked once, the first time tern needs the vault, and a refusal falls back to the prompt without asking again (#91).
 - Clicking a session tab while Settings is open now closes Settings and shows the session, with typing going to its terminal (#63).
 - SFTP panel file sizes just under a unit boundary round up to the next unit (e.g. `1.0 MB` instead of `1024 KB`) and sizes just under 10 omit decimals (`10 KB` instead of `10.0 KB`) (#39).
