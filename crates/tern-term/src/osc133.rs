@@ -4,6 +4,11 @@
 //! few bytes between reads, so a mark split across two reads still counts, and it never
 //! buffers a long sequence (an OSC 52 payload is skipped as it goes by).
 
+use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::TermMode;
+
+use super::Terminal;
+
 /// What a prompt mark says: `A` the prompt starts, `B` the person's command starts (the
 /// prompt has ended), `C` the command's output starts, `D` the command finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +99,11 @@ impl Scanner {
                 _ => {}
             },
             State::SkipEsc => {
-                self.state = if b == b'\\' { State::Ground } else { State::Esc };
+                self.state = if b == b'\\' {
+                    State::Ground
+                } else {
+                    State::Esc
+                };
                 if self.state == State::Esc {
                     return self.step(b);
                 }
@@ -120,6 +129,49 @@ impl Scanner {
             _ => return None,
         };
         matches!(rest.get(1), None | Some(b';')).then_some(mark)
+    }
+}
+
+impl Terminal {
+    /// Where the cursor is now, for [`Self::text_from`].
+    pub fn cursor_pos(&self) -> GridPos {
+        let at = self.term.grid().cursor.point;
+        GridPos {
+            line: at.line.0,
+            col: at.column.0,
+            history: self.history_size(),
+        }
+    }
+
+    /// The text from `at` to the end of the cursor's line, wrapped rows joined: what has been
+    /// typed since `at`. `None` when `at` is no longer part of the cursor's line (output went
+    /// by, or the screen was cleared). Scrolling since `at` is followed through the history
+    /// length; once the scrollback is full that cannot be told, so only a start on the
+    /// cursor's own row is trusted.
+    pub fn text_from(&self, at: GridPos) -> Option<String> {
+        let cursor = self.term.grid().cursor.point;
+        let grown = self.history_size().checked_sub(at.history)? as i32;
+        let full = self.history_size() >= self.config.scrolling_history;
+        let line = match (grown, full) {
+            (_, true) if cursor.line.0 != at.line => return None,
+            (0, _) | (_, true) => at.line,
+            _ => at.line - grown,
+        };
+        if line > cursor.line.0 || line < -(self.history_size() as i32) {
+            return None;
+        }
+        let from = Point::new(
+            Line(line),
+            Column(at.col.min(self.cols().saturating_sub(1))),
+        );
+        let to = Point::new(cursor.line, Column(self.cols().saturating_sub(1)));
+        let text = self.term.bounds_to_string(from, to);
+        (!text.contains('\n')).then_some(text)
+    }
+
+    /// Whether a full-screen program (vim, htop, less) is on the screen.
+    pub fn on_alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 }
 

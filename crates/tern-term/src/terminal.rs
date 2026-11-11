@@ -27,11 +27,12 @@ use gpui::{Context, EventEmitter};
 use crate::config::CursorStyleSetting;
 use crate::config::TerminalTheme;
 use crate::links::Link;
-use crate::osc133::{GridPos, PromptMark, Scanner};
 use crate::search::{Search, SearchMark, mark_at};
+use osc133::Scanner;
 
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
+pub use osc133::{GridPos, PromptMark};
 
 /// The most text one OSC 52 request may put on the clipboard. The program on the other end of
 /// the connection chooses the payload, so a larger one is dropped rather than copied.
@@ -64,7 +65,10 @@ pub enum TerminalEvent {
     ClipboardStore(String),
     /// OSC 133: the shell marked its prompt. `at` is where the cursor was when the mark was
     /// written, so [`Terminal::text_from`] can read the command typed after a `CommandStart`.
-    PromptMark { mark: PromptMark, at: GridPos },
+    PromptMark {
+        mark: PromptMark,
+        at: GridPos,
+    },
 }
 
 /// Viewport dimensions in cells.
@@ -732,39 +736,6 @@ impl Terminal {
         Some(text)
     }
 
-    /// Where the cursor is now, for [`Self::text_from`].
-    pub fn cursor_pos(&self) -> GridPos {
-        let at = self.term.grid().cursor.point;
-        GridPos {
-            line: at.line.0,
-            col: at.column.0,
-            history: self.history_size(),
-        }
-    }
-
-    /// The text from `at` to the end of the cursor's line, wrapped rows joined: what has been
-    /// typed since `at`. `None` when `at` is no longer part of the cursor's line (output went
-    /// by, or the screen was cleared). Scrolling since `at` is followed through the history
-    /// length; once the scrollback is full that cannot be told, so only a start on the
-    /// cursor's own row is trusted.
-    pub fn text_from(&self, at: GridPos) -> Option<String> {
-        let cursor = self.term.grid().cursor.point;
-        let grown = self.history_size().checked_sub(at.history)? as i32;
-        let full = self.history_size() >= self.config.scrolling_history;
-        let line = match (grown, full) {
-            (_, true) if cursor.line.0 != at.line => return None,
-            (0, _) | (_, true) => at.line,
-            _ => at.line - grown,
-        };
-        if line > cursor.line.0 || line < -(self.history_size() as i32) {
-            return None;
-        }
-        let from = Point::new(Line(line), Column(at.col.min(self.cols().saturating_sub(1))));
-        let to = Point::new(cursor.line, Column(self.cols().saturating_sub(1)));
-        let text = self.term.bounds_to_string(from, to);
-        (!text.contains('\n')).then_some(text)
-    }
-
     /// A viewport row as trimmed text (wide-char spacers skipped).
     pub fn row_text(&self, viewport_row: usize) -> String {
         let mut text: String = self
@@ -779,6 +750,9 @@ impl Terminal {
         text
     }
 }
+
+#[path = "osc133.rs"]
+mod osc133;
 
 #[cfg(test)]
 #[path = "terminal_tests.rs"]

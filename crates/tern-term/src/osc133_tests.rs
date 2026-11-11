@@ -12,9 +12,7 @@ fn marks(notices: &[Notice]) -> Vec<(PromptMark, i32, usize)> {
     notices
         .iter()
         .filter_map(|n| match n {
-            Notice::Event(TerminalEvent::PromptMark { mark, at }) => {
-                Some((*mark, at.line, at.col))
-            }
+            Notice::Event(TerminalEvent::PromptMark { mark, at }) => Some((*mark, at.line, at.col)),
             _ => None,
         })
         .collect()

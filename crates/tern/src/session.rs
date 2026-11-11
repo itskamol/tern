@@ -101,6 +101,8 @@ pub struct Session {
     ends_line: bool,
     /// Remote output that arrived while tern's own question was open (see [`Held`]).
     held: Held,
+    /// The line being typed, for the command history.
+    typing: history::Typing,
     pub view: Entity<TerminalView>,
     terminal: Entity<Terminal>,
     link: Link,
@@ -167,6 +169,7 @@ impl Session {
                 last_output: std::time::Instant::now(),
                 ends_line: true,
                 held: Held::default(),
+                typing: history::Typing::default(),
                 view,
                 terminal,
                 link,
@@ -496,6 +499,9 @@ impl Session {
     }
 
     fn on_terminal_event(&mut self, event: &TerminalEvent, cx: &mut Context<Self>) {
+        if matches!(event, TerminalEvent::Output(_)) {
+            self.typing.mine = self.accepts_input();
+        }
         match event {
             TerminalEvent::Output(bytes) if self.life.status().is_dormant() => {
                 if self.life.retrying().is_some() {
@@ -550,7 +556,11 @@ impl Session {
                     tracing::debug!(error = %e, "session_resize_skipped");
                 }
             }
-            TerminalEvent::Typed(bytes) => self.mirror_typed(bytes, cx),
+            TerminalEvent::Typed(bytes) => {
+                self.mirror_typed(bytes, cx);
+                self.record_typed(bytes, cx);
+            }
+            TerminalEvent::PromptMark { mark, at } => self.on_prompt_mark(*mark, *at, cx),
             TerminalEvent::TitleChanged(_)
             | TerminalEvent::Bell
             | TerminalEvent::ClipboardStore(_) => {}
@@ -643,6 +653,8 @@ impl Held {
 
 #[path = "session_actions.rs"]
 mod actions;
+#[path = "session_history.rs"]
+mod history;
 #[path = "session_vault.rs"]
 mod vault;
 

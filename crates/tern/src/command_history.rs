@@ -241,7 +241,10 @@ fn keep(line: &str) -> Option<&str> {
         return None;
     }
     // `mysql -psecret`: a password glued to its flag.
-    if line.split_whitespace().any(|t| t.starts_with("-p") && t.len() > 2) {
+    if line
+        .split_whitespace()
+        .any(|t| t.starts_with("-p") && t.len() > 2)
+    {
         return None;
     }
     Some(line)
@@ -430,7 +433,8 @@ mod tests {
     #[test]
     fn a_fuzzy_query_finds_scattered_letters_and_ranks_the_closer_match_first() {
         let (mut h, _d) = history();
-        h.record("web", "dxxxxxxxxxkxxxxxxxxxcxxxxxxxxxmxxxxxxxxxp up", 1).unwrap();
+        h.record("web", "dxxxxxxxxxkxxxxxxxxxcxxxxxxxxxmxxxxxxxxxp up", 1)
+            .unwrap();
         h.record("web", "docker compose up -d", 2).unwrap();
         h.record("web", "ls", 3).unwrap();
         let found = lines(&h, Scope::Host("web"), "dkcmp up");
@@ -523,8 +527,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let (mut h, d) = history();
         h.record("web", "ls", 1).unwrap();
-        let mode =
-            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         let root = d.path().join("history");
         assert_eq!(mode(&root), 0o700);
         let file = std::fs::read_dir(&root)
