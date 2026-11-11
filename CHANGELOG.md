@@ -23,6 +23,10 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 - SFTP panel file sizes just under a unit boundary round up to the next unit (e.g. `1.0 MB` instead of `1024 KB`) and sizes just under 10 omit decimals (`10 KB` instead of `10.0 KB`) (#39).
 - Plain-text `ftps://` links are now detected and clickable in terminal output (#40).
 
+### Security
+
+- Dependencies updated past RUSTSEC-2026-0383 (`webpki-root-certs` trusted distrusted emSign intermediates), RUSTSEC-2026-0385 and -0387 (timing leaks in `ctutils` and `crypto-bigint`) and RUSTSEC-2026-0386 (`tokio` `AsyncFd` I/O safety), and off the yanked `async-executor` 1.14.0 and `crypto-bigint` 0.7.5.
+
 ## [0.1.3] - 2026-10-11
 
 ### Fixed
