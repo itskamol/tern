@@ -33,7 +33,7 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 | Feature | Value | Source |
 | --- | --- | --- |
 | Width | drag-resize 208–400px, default 256, persisted | inventory §1.3 |
-| Collapse | width → 0 over 200ms ease-out; main pane goes full-bleed (radius/border melt) | inventory §1.3 |
+| Collapse | width → 0 over 200ms ease-out; main area goes full-bleed (radius/border melt) | inventory §1.3 |
 | Separator | double-click resets width; arrow keys nudge ±16px | inventory §1.3 |
 | Rows | host alias, `user@host`, live status dot (connected / connecting / error) | §1.6, adapted |
 | Grouping | flat or grouped (ssh config file / tag), persisted | §1.6 |
@@ -74,5 +74,5 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 
 ## Later (not in the first version)
 
-- Right pane: SFTP file browser, same resize/transition rules as zeron's diff pane (360–760px, default 520, cap 52%).
+- Side panel: SFTP file browser, same resize/transition rules as zeron's diff pane (360–760px, default 520, cap 52%).
 - Theme library with VS Code theme import (zeron `crates/theme/src/vscode.rs`).
