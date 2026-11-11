@@ -103,12 +103,17 @@ impl<P: Paned> Tab<P> {
         })
     }
 
+    /// What the tab is called when the person has not named it.
+    pub fn untitled(&self) -> &str {
+        self.front().host()
+    }
+
     pub fn heading(&self) -> Heading {
         Heading {
             text: self
                 .title
                 .clone()
-                .unwrap_or_else(|| self.front().host().to_owned()),
+                .unwrap_or_else(|| self.untitled().to_owned()),
             others: self.panes.len() - 1,
         }
     }

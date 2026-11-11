@@ -24,11 +24,11 @@ impl Shell {
         let Some(tab) = self.tabs.get(ix) else {
             return;
         };
-        let current = tab.title().map_or_else(|| tab.alias.clone(), str::to_owned);
+        let current = tab.heading().text;
         let t = self.theme;
         let colors = t.input_colors();
         let input = cx.new(|cx| {
-            let mut input = TextInput::new(tab.alias.clone(), false, colors, cx);
+            let mut input = TextInput::new(tab.untitled().to_owned(), false, colors, cx);
             input.set_text(current, cx);
             input.select_everything(cx);
             input
@@ -38,14 +38,14 @@ impl Shell {
         cx.notify();
     }
 
-    /// Saves the field. An empty title, or the alias itself, clears the custom title.
+    /// Saves the field. An empty title, or what the tab is called anyway, clears the custom title.
     pub(crate) fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rename) = self.renaming.take() else {
             return;
         };
         let typed = rename.input.read(cx).text().trim().to_owned();
         if let Some(tab) = self.tabs.get(rename.ix) {
-            let title = custom_title(&typed, &tab.alias);
+            let title = custom_title(&typed, tab.untitled());
             self.tabs.set_title(rename.ix, title);
         }
         self.restore_focus(window, cx);
@@ -170,9 +170,9 @@ impl Shell {
     }
 }
 
-/// What a typed title means: nothing, or the alias it already shows, is no custom title.
-fn custom_title(typed: &str, alias: &str) -> Option<String> {
-    (!typed.is_empty() && typed != alias).then(|| typed.to_owned())
+/// What a typed title means: nothing, or the name the tab has anyway, is no custom title.
+fn custom_title(typed: &str, untitled: &str) -> Option<String> {
+    (!typed.is_empty() && typed != untitled).then(|| typed.to_owned())
 }
 
 #[cfg(test)]

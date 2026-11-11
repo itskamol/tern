@@ -464,9 +464,7 @@ impl Shell {
             .enumerate()
             .map(|(ix, tab)| TabInfo {
                 alias: tab.alias.clone(),
-                host: tab.front().host.clone(),
-                others: tab.panes().len() - 1,
-                title: tab.title().map(str::to_owned),
+                heading: tab.heading(),
                 logging: tab.session().is_some_and(|s| s.read(cx).is_logging()),
                 broadcast: self.is_broadcasting(tab.id),
                 dot: tab.session().map_or(Dot::Idle, |s| s.read(cx).dot()),

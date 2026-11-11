@@ -454,6 +454,20 @@ fn a_name_the_person_gave_wins_over_the_focused_host() {
 }
 
 #[test]
+fn what_a_tab_is_called_without_a_name_is_the_focused_panes_host() {
+    let (mut tabs, _) = set(&["a"]);
+    tabs.set_title(0, Some("prod".into()));
+    let id = tabs.new_pane_id();
+    tabs.split(1, Direction::Right, P(id, "db"), floor())
+        .unwrap();
+    let tab = tabs.active_tab().unwrap();
+    assert_eq!(
+        (tab.heading().text.as_str(), tab.untitled()),
+        ("prod", "db")
+    );
+}
+
+#[test]
 fn what_is_saved_ignores_layout_and_extra_panes() {
     let (mut tabs, saves) = set(&["a"]);
     let id = tabs.new_pane_id();
