@@ -151,6 +151,11 @@ impl FileSource for LocalFs {
             if !taken(from).await {
                 return Err(FileError::NotFound(path.to_owned()));
             }
+            if path.ends_with(crate::files::PART_SUFFIX) {
+                return tokio::fs::remove_file(from)
+                    .await
+                    .map_err(|e| io_error(path, &e));
+            }
             let trash = self
                 .trash
                 .as_deref()

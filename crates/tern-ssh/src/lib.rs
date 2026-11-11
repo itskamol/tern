@@ -19,6 +19,8 @@ mod session;
 mod sftp;
 mod socks;
 mod sshconf;
+mod transfer;
+mod transfer_plan;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,13 +31,17 @@ use tokio::sync::mpsc;
 pub use config::load_ssh_config_hosts;
 pub use error::{Disconnect, Error, ForwardError, InputError, Result};
 pub use files::{
-    Call, FileEntry, FileError, FileSource, LocalFs, Reader, SftpFiles, Writer, file_name, join,
-    keep_both, parent,
+    Call, FileEntry, FileError, FileSource, LocalFs, PART_SUFFIX, Reader, SftpFiles, Writer,
+    file_name, join, keep_both, parent,
 };
 pub use forward::{Forward, ForwardHandle, ForwardInfo};
 pub use futures::channel::oneshot;
 pub use secrecy::{self, ExposeSecret, SecretString};
 pub use sftp::{Progress, Sftp, SftpError};
+pub use transfer::{
+    Conflict, CopyJob, Event, MAX_RUNNING, Progress as TransferProgress, Question, Summary,
+    TransferQueue,
+};
 
 /// Keep-alive probe interval when the host sets no `ServerAliveInterval`.
 pub const DEFAULT_SERVER_ALIVE_INTERVAL: Duration = Duration::from_secs(30);

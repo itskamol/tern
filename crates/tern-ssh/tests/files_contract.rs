@@ -224,3 +224,13 @@ async fn the_mac_starts_in_the_home_folder() {
         .unwrap();
     assert!(Path::new(&home).is_dir(), "{home}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mac_removes_a_part_file_outright_instead_of_trashing_it() {
+    let rig = mac().await;
+    let trash = rig.trash.clone().unwrap();
+    std::fs::write(rig.disk.join("big.bin.part"), b"half").unwrap();
+    rig.source.delete(&at(&rig, "big.bin.part")).await.unwrap();
+    assert!(!rig.disk.join("big.bin.part").exists());
+    assert_eq!(std::fs::read_dir(&trash).unwrap().count(), 0);
+}

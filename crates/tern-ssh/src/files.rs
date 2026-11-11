@@ -15,6 +15,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub use crate::files_local::LocalFs;
 pub use crate::files_sftp::SftpFiles;
 
+/// What a copy in progress is called on the destination until it is whole.
+pub const PART_SUFFIX: &str = ".part";
+
 /// A file's bytes, read front to back.
 pub type Reader = Box<dyn AsyncRead + Send + Unpin>;
 /// A file being written; `shutdown` finishes it.
@@ -75,7 +78,8 @@ pub trait FileSource: Send + Sync + fmt::Debug {
     fn rename<'a>(&'a self, from: &'a str, to: &'a str) -> Call<'a, ()>;
 
     /// Removes a file, or a folder with everything in it. The Mac moves it to the Trash; a host
-    /// deletes for good.
+    /// deletes for good, and a `.part` file ([`PART_SUFFIX`]) is always removed outright, so an
+    /// abandoned copy never fills the Trash.
     fn delete<'a>(&'a self, path: &'a str) -> Call<'a, ()>;
 }
 
