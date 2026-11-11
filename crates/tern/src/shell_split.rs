@@ -433,3 +433,26 @@ fn drop_zone(side: Direction, t: &Theme) -> gpui::Div {
         Direction::Down => zone.left_0().right_0().bottom_0().h(relative(0.5)),
     }
 }
+
+/// The window's pane actions: split, resize, move focus, close, equalize.
+pub(super) fn pane_actions(root: gpui::Div, cx: &mut Context<Shell>) -> gpui::Div {
+    use Direction::{Down, Left, Right, Up};
+    root.on_action(cx.listener(|s, _: &SplitRight, w, cx| s.split_pane(Right, w, cx)))
+        .on_action(cx.listener(|s, _: &SplitDown, w, cx| s.split_pane(Down, w, cx)))
+        .on_action(
+            cx.listener(|s, _: &SplitRightWithHost, w, cx| s.pick_host_for_split(Right, w, cx)),
+        )
+        .on_action(
+            cx.listener(|s, _: &SplitDownWithHost, w, cx| s.pick_host_for_split(Down, w, cx)),
+        )
+        .on_action(cx.listener(|s, _: &ResizePaneLeft, _, cx| s.step_pane(Left, cx)))
+        .on_action(cx.listener(|s, _: &ResizePaneRight, _, cx| s.step_pane(Right, cx)))
+        .on_action(cx.listener(|s, _: &ResizePaneUp, _, cx| s.step_pane(Up, cx)))
+        .on_action(cx.listener(|s, _: &ResizePaneDown, _, cx| s.step_pane(Down, cx)))
+        .on_action(cx.listener(|s, _: &EqualizePanes, _, cx| s.equalize_panes(cx)))
+        .on_action(cx.listener(|s, _: &ClosePane, w, cx| s.close_pane_or_tab(w, cx)))
+        .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| s.move_pane_focus(Left, w, cx)))
+        .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| s.move_pane_focus(Right, w, cx)))
+        .on_action(cx.listener(|s, _: &FocusPaneUp, w, cx| s.move_pane_focus(Up, w, cx)))
+        .on_action(cx.listener(|s, _: &FocusPaneDown, w, cx| s.move_pane_focus(Down, w, cx)))
+}

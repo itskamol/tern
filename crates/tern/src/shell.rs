@@ -48,7 +48,8 @@ actions!(
         FocusPaneUp,
         FocusPaneDown,
         OpenSettings,
-        ShowAbout
+        ShowAbout,
+        CheckForUpdates
     ]
 );
 
@@ -182,6 +183,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 frame: look::FrameState::default(),
                 system_light: false,
                 update_ready: None,
+                update_check: Default::default(),
                 _clock: None,
             };
             shell.refresh_hosts();
@@ -277,6 +279,8 @@ pub struct Shell {
     system_light: bool,
     /// A downloaded, checked update; it is installed when tern quits, or on "Restart now".
     update_ready: Option<std::rc::Rc<update_ui::Staged>>,
+    /// Whether an update check runs, and how the last one ended.
+    update_check: crate::update_outcome::CheckState,
     _clock: Option<gpui::Task<()>>,
 }
 
@@ -639,48 +643,7 @@ impl Render for Shell {
             .font_family(UI_FONT)
             .text_color(t.text)
             .on_action(cx.listener(|s, _: &CloseTab, w, cx| s.close_pane_or_tab(w, cx)))
-            .on_action(
-                cx.listener(|s, _: &SplitRight, w, cx| {
-                    s.split_pane(split::Direction::Right, w, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|s, _: &SplitDown, w, cx| s.split_pane(split::Direction::Down, w, cx)),
-            )
-            .on_action(cx.listener(|s, _: &SplitRightWithHost, w, cx| {
-                s.pick_host_for_split(split::Direction::Right, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &SplitDownWithHost, w, cx| {
-                s.pick_host_for_split(split::Direction::Down, w, cx)
-            }))
-            .on_action(
-                cx.listener(|s, _: &ResizePaneLeft, _, cx| s.step_pane(split::Direction::Left, cx)),
-            )
-            .on_action(
-                cx.listener(|s, _: &ResizePaneRight, _, cx| {
-                    s.step_pane(split::Direction::Right, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|s, _: &ResizePaneUp, _, cx| s.step_pane(split::Direction::Up, cx)),
-            )
-            .on_action(
-                cx.listener(|s, _: &ResizePaneDown, _, cx| s.step_pane(split::Direction::Down, cx)),
-            )
-            .on_action(cx.listener(|s, _: &EqualizePanes, _, cx| s.equalize_panes(cx)))
-            .on_action(cx.listener(|s, _: &ClosePane, w, cx| s.close_pane_or_tab(w, cx)))
-            .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| {
-                s.move_pane_focus(split::Direction::Left, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| {
-                s.move_pane_focus(split::Direction::Right, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneUp, w, cx| {
-                s.move_pane_focus(split::Direction::Up, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneDown, w, cx| {
-                s.move_pane_focus(split::Direction::Down, w, cx)
-            }))
+            .map(|el| split_ui::pane_actions(el, cx))
             .on_action(cx.listener(|s, _: &NextTab, w, cx| {
                 s.show_tab(tabs::step(s.tabs.active(), s.tabs.len(), 1), w, cx)
             }))
@@ -698,6 +661,9 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
             .on_action(cx.listener(|s, _: &OpenSettings, w, cx| s.toggle_settings(w, cx)))
             .on_action(cx.listener(|s, _: &ShowAbout, w, cx| s.open_settings_at_about(w, cx)))
+            .when(!self.update_check_running(), |d| {
+                d.on_action(cx.listener(|s, _: &CheckForUpdates, _, cx| s.check_now(cx)))
+            })
             .on_action(cx.listener(|s, _: &UndoHosts, w, cx| s.undo_hosts(w, cx)))
             .on_action(cx.listener(|s, _: &RedoHosts, w, cx| s.redo_hosts(w, cx)))
             // Capture phase: the terminal handles Escape itself, and ending a broadcast must

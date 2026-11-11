@@ -56,10 +56,10 @@ pub fn init_menus(cx: &mut App) {
 #[cfg(target_os = "macos")]
 fn app_menus() -> Vec<Menu> {
     use crate::shell::{
-        ClosePane, DecreaseFontSize, EqualizePanes, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-        FocusPaneUp, IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize, ShowAbout,
-        SplitDown, SplitDownWithHost, SplitRight, SplitRightWithHost, ToggleSftp, ToggleSidebar,
-        ToggleSnippets,
+        CheckForUpdates, ClosePane, DecreaseFontSize, EqualizePanes, FocusPaneDown, FocusPaneLeft,
+        FocusPaneRight, FocusPaneUp, IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize,
+        ShowAbout, SplitDown, SplitDownWithHost, SplitRight, SplitRightWithHost, ToggleSftp,
+        ToggleSidebar, ToggleSnippets,
     };
     use crate::shell::{RedoHosts, UndoHosts};
     use crate::tabs::{CloseTab, NextTab, PrevTab};
@@ -74,6 +74,7 @@ fn app_menus() -> Vec<Menu> {
             "tern",
             vec![
                 MenuItem::action("About tern", ShowAbout),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),

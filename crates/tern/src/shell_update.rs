@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use super::{Shell, Toast, ToastKind};
 use crate::settings;
+use crate::update_outcome::{Found, Outcome, Trouble, reason, version_row};
 
 /// Only a page on GitHub is ever opened, whatever the response says.
 const PAGE_PREFIX: &str = "https://github.com/";
@@ -141,14 +142,25 @@ struct Release {
     draft: bool,
 }
 
-/// What the toast needs: the version text and the page to open.
-struct Available {
-    version: String,
-    url: String,
+/// One check, the daily one and a manual one alike: stamps the attempt as the day's check (also
+/// when it fails, so being offline does not retry on every launch), then asks the feed.
+/// Blocking; runs on the background executor.
+fn run_check(
+    feed: &Feed,
+    dir: Option<&Path>,
+    now: u64,
+    current: &str,
+) -> Result<Option<Found>, Trouble> {
+    if let Some(dir) = dir {
+        let _ = std::fs::create_dir_all(dir);
+        if let Err(e) = std::fs::write(dir.join(STAMP_FILE), now.to_string()) {
+            tracing::warn!(error = %e, "update_stamp_failed");
+        }
+    }
+    fetch(feed, current)
 }
 
-/// Blocking; runs on the background executor.
-fn fetch(feed: &Feed, current: &str) -> Result<Option<Available>, String> {
+fn fetch(feed: &Feed, current: &str) -> Result<Option<Found>, Trouble> {
     let config = ureq::Agent::config_builder()
         .tls_config(
             ureq::tls::TlsConfig::builder()
@@ -159,22 +171,29 @@ fn fetch(feed: &Feed, current: &str) -> Result<Option<Available>, String> {
         .timeout_global(Some(Duration::from_secs(10)))
         .http_status_as_error(true)
         .build();
-    let release: Release = ureq::Agent::new_with_config(config)
+    let mut response = ureq::Agent::new_with_config(config)
         .get(feed.latest())
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "tern")
         .call()
-        .map_err(|e| e.to_string())?
-        .body_mut()
-        .read_json()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            ureq::Error::StatusCode(code) => Trouble::Status(code),
+            e => {
+                tracing::info!(error = %e, "update_check_unreachable");
+                Trouble::Unreachable
+            }
+        })?;
+    let release: Release = response.body_mut().read_json().map_err(|e| {
+        tracing::info!(error = %e, "update_check_malformed");
+        Trouble::Malformed
+    })?;
     if release.prerelease
         || release.draft
         || !(feed.is_custom() || release.html_url.starts_with(PAGE_PREFIX))
     {
         return Ok(None);
     }
-    Ok(newer(current, &release.tag_name).map(|version| Available {
+    Ok(newer(current, &release.tag_name).map(|version| Found {
         version,
         url: release.html_url,
     }))
@@ -193,7 +212,7 @@ fn update_cache() -> Option<std::path::PathBuf> {
 
 /// Downloads and checks `found` when this build can update itself; `None` otherwise or when a
 /// step fails (logged), and the release page is offered instead.
-fn stage(feed: &Feed, found: &Available) -> Option<Staged> {
+fn stage(feed: &Feed, found: &Found) -> Option<Staged> {
     #[cfg(target_os = "macos")]
     {
         let (app, requirement) = crate::updater::self_updatable()?;
@@ -214,10 +233,33 @@ fn stage(feed: &Feed, found: &Available) -> Option<Staged> {
     }
 }
 
+/// The toast for how a check ended; "Restart now" and "Download" go with the outcomes that have
+/// something to do next.
+fn outcome_toast(outcome: &Outcome) -> Toast {
+    let text = outcome.toast_text(env!("CARGO_PKG_VERSION"));
+    let kind = match outcome {
+        Outcome::Failed(_) => ToastKind::Critical,
+        _ => ToastKind::Default,
+    };
+    let toast = Toast::new(kind, text);
+    if outcome.restarts() {
+        return toast
+            .staying(20)
+            .action("Restart now", |s, _, cx| s.restart_to_update(cx));
+    }
+    match outcome.download_url() {
+        Some(url) => {
+            let url = url.to_string();
+            toast.action("Download", move |_, _, cx| cx.open_url(&url))
+        }
+        None => toast,
+    }
+}
+
 impl Shell {
-    /// Runs the daily check when the setting allows it. The attempt is stamped even when it
-    /// fails, so being offline does not retry on every launch. A test feed (`TERN_UPDATE_FEED`)
-    /// is checked on every launch, also from a debug build.
+    /// Runs the daily check when the setting allows it and it is due. A test feed
+    /// (`TERN_UPDATE_FEED`) is checked on every launch, also from a debug build. Quiet unless it
+    /// finds something.
     pub(crate) fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         let Some(feed) = Feed::get() else { return };
         // Debug builds are test instances, started many times a day; they call GitHub never.
@@ -225,40 +267,136 @@ impl Shell {
             return;
         }
         let Some(dir) = settings::dir() else { return };
-        let now = now_secs();
-        if !feed.is_custom() && !due(last_check(&dir), now) {
+        if !feed.is_custom() && !due(last_check(&dir), now_secs()) {
             return;
         }
-        let work = cx.background_spawn(async move {
-            let _ = std::fs::create_dir_all(&dir);
-            if let Err(e) = std::fs::write(dir.join(STAMP_FILE), now.to_string()) {
-                tracing::warn!(error = %e, "update_stamp_failed");
+        self.start_check(feed, false, cx);
+    }
+
+    /// "Check for Updates…": checks now, whether or not the daily check is on or due, and says
+    /// how it went. Does nothing new while a check runs.
+    pub(crate) fn check_now(&mut self, cx: &mut Context<Self>) {
+        match Feed::get() {
+            Some(feed) => self.start_check(feed, true, cx),
+            None => {
+                let failed = Outcome::Failed("this build has no update feed".into());
+                if self.update_check.begin() {
+                    self.finish_check(&failed, true, cx);
+                }
             }
-            let found = fetch(&feed, env!("CARGO_PKG_VERSION"))?;
+        }
+    }
+
+    /// Whether a check is running; the menu item and the Settings button are off meanwhile.
+    pub(crate) fn update_check_running(&self) -> bool {
+        self.update_check.running()
+    }
+
+    /// What the Version row says about the last check.
+    pub(super) fn update_row_text(&self) -> String {
+        let waiting = self.update_waiting();
+        version_row(
+            env!("CARGO_PKG_VERSION"),
+            self.update_check.shown(),
+            waiting.as_deref(),
+        )
+    }
+
+    /// `manual` checks show their progress and every result; the daily one only what is found.
+    fn start_check(&mut self, feed: Feed, manual: bool, cx: &mut Context<Self>) {
+        if !self.update_check.begin() {
+            return;
+        }
+        if manual {
+            let text = Outcome::Checking.toast_text(env!("CARGO_PKG_VERSION"));
+            self.progress_toast(text, cx);
+        }
+        cx.notify();
+        let dir = settings::dir();
+        let now = now_secs();
+        let asked = feed.clone();
+        let work = cx.background_spawn(async move {
+            let found = run_check(&asked, dir.as_deref(), now, env!("CARGO_PKG_VERSION"))?;
             if found.is_none()
                 && let Some(cache) = update_cache()
             {
                 // Up to date: what an installed update left behind (its zip) goes.
                 let _ = std::fs::remove_dir_all(cache.join("update"));
             }
-            Ok::<_, String>(found.map(|found| {
-                let staged = stage(&feed, &found);
-                (found, staged)
-            }))
+            Ok::<_, Trouble>(found)
         });
-        cx.spawn(async move |this, cx| match work.await {
-            Ok(Some((found, staged))) => {
-                let _ = this.update(cx, |s, cx| s.offer_update(found, staged, cx));
-            }
-            Ok(None) => tracing::debug!("update_check_current"),
-            Err(e) => tracing::info!(error = %e, "update_check_failed"),
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |s, cx| s.checked(feed, result, manual, cx));
         })
         .detach();
     }
 
+    fn checked(
+        &mut self,
+        feed: Feed,
+        result: Result<Option<Found>, Trouble>,
+        manual: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let found = match result {
+            Ok(Some(found)) => found,
+            Ok(None) => return self.finish_check(&Outcome::UpToDate, manual, cx),
+            Err(trouble) => {
+                return self.finish_check(&Outcome::Failed(reason(&trouble)), manual, cx);
+            }
+        };
+        // Already downloaded by an earlier check: nothing to fetch again.
+        if self.update_waiting().as_deref() == Some(found.version.as_str()) {
+            return self.finish_check(&Outcome::Ready(found.version), manual, cx);
+        }
+        let downloading = Outcome::Downloading(found.version.clone());
+        if manual {
+            self.progress_toast(downloading.toast_text(env!("CARGO_PKG_VERSION")), cx);
+        }
+        self.update_check.progress(downloading);
+        cx.notify();
+        let work = cx.background_spawn(async move {
+            let staged = stage(&feed, &found);
+            (found, staged)
+        });
+        cx.spawn(async move |this, cx| {
+            let (found, staged) = work.await;
+            let _ = this.update(cx, |s, cx| {
+                let outcome = s.keep_staged(found, staged, cx);
+                s.finish_check(&outcome, manual, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Ends the check and shows how it went. The daily check says nothing when tern is up to
+    /// date or the check fails; it is only heard when there is a release to act on.
+    fn finish_check(&mut self, outcome: &Outcome, manual: bool, cx: &mut Context<Self>) {
+        let actionable = matches!(*outcome, Outcome::Ready(_) | Outcome::NotInstallable(_));
+        match outcome {
+            Outcome::Failed(why) => tracing::info!(error = %why, "update_check_failed"),
+            Outcome::UpToDate => tracing::debug!("update_check_current"),
+            _ => {}
+        }
+        self.update_check.finish(outcome.clone());
+        if manual {
+            self.end_progress_toast(cx);
+        }
+        if manual || actionable {
+            self.toast(outcome_toast(outcome), cx);
+        }
+        cx.notify();
+    }
+
     /// A staged update waits for tern to quit, or for "Restart now" (restarting ends open
     /// sessions, so it is never forced); without one, the release page is offered.
-    fn offer_update(&mut self, found: Available, staged: Option<Staged>, cx: &mut Context<Self>) {
+    fn keep_staged(
+        &mut self,
+        found: Found,
+        staged: Option<Staged>,
+        cx: &mut Context<Self>,
+    ) -> Outcome {
         #[cfg(target_os = "macos")]
         if let Some(staged) = staged {
             let first = self.update_ready.is_none();
@@ -272,25 +410,11 @@ impl Shell {
                 })
                 .detach();
             }
-            let toast = Toast::new(
-                ToastKind::Default,
-                format!("tern {version} is ready; it installs when tern quits"),
-            )
-            .staying(20)
-            .action("Restart now", |s, _, cx| s.restart_to_update(cx));
-            return self.toast(toast, cx);
+            return Outcome::Ready(version);
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = staged;
-        let url = found.url;
-        self.toast(
-            Toast::new(
-                ToastKind::Default,
-                format!("tern {} is available", found.version),
-            )
-            .action("Download", move |_, _, cx| cx.open_url(&url)),
-            cx,
-        );
+        let _ = (staged, cx);
+        Outcome::NotInstallable(found)
     }
 
     /// The version a downloaded update brings, while one waits to be installed.
@@ -409,3 +533,8 @@ mod tests {
         assert!(local.is_custom());
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[path = "shell_update_tests.rs"]
+mod check_tests;
