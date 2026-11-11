@@ -90,7 +90,6 @@ icon_assets!(
     (DOCUMENT, "document"),
     (ARROW_UP, "arrow-up"),
     (HOME, "home"),
-    (UPLOAD, "archive-up-minimalistic"),
     (FILE_CODE, "file-code"),
 );
 

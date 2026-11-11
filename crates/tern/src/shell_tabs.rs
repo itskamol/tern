@@ -91,7 +91,7 @@ impl Shell {
 
 impl Shell {
     pub(crate) fn start_logging(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(session) = self.tabs.get(ix).map(|t| t.session().clone()) else {
+        let Some(session) = self.tabs.get(ix).and_then(|t| t.session().cloned()) else {
             return;
         };
         match session.update(cx, |s, cx| {
@@ -121,7 +121,7 @@ impl Shell {
     }
 
     pub(crate) fn stop_logging(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(session) = self.tabs.get(ix).map(|t| t.session().clone()) else {
+        let Some(session) = self.tabs.get(ix).and_then(|t| t.session().cloned()) else {
             return;
         };
         let path = session.update(cx, |s, cx| {

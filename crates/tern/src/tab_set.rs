@@ -16,6 +16,12 @@ pub type TabId = u64;
 /// to, which a split tab's title follows.
 pub trait Paned {
     fn pane_id(&self) -> PaneId;
+
+    /// The pane is a session's terminal; the others (the Files tab) are not saved with the tab
+    /// list and are not a host's tab.
+    fn is_session(&self) -> bool {
+        true
+    }
     fn host(&self) -> &str;
 }
 
@@ -112,6 +118,11 @@ impl<P: Paned> Tab<P> {
     }
 
     /// The focused pane: what the strip shows and what typing reaches.
+    /// A host's tab, as against a Files tab.
+    pub fn is_session(&self) -> bool {
+        self.front().is_session()
+    }
+
     pub fn front(&self) -> &P {
         // `focused` always names a pane and a tab always has one; the first is the fallback.
         self.pane(self.focused).unwrap_or(&self.panes[0])
@@ -255,7 +266,7 @@ impl<P: Paned> TabSet<P> {
     /// never made for a split that cannot happen.
     pub fn can_split(&self, pane: PaneId, side: Direction, floor: Floor) -> bool {
         self.active_tab()
-            .is_some_and(|tab| tab.tree.can_split(pane, side, floor))
+            .is_some_and(|tab| tab.is_session() && tab.tree.can_split(pane, side, floor))
     }
 
     /// Splits pane `target` of the front tab on `side`; the new pane goes first for left and up,
@@ -373,9 +384,14 @@ impl<P: Paned> TabSet<P> {
 
     /// What `tabs.json` holds for these tabs.
     pub fn saved(&self) -> SavedTabs {
+        let kept: Vec<&Tab<P>> = self.tabs.iter().filter(|t| t.is_session()).collect();
+        // The slot among the saved tabs: a Files tab in front is saved as the tab before it.
+        let before = self.tabs[..self.active.min(self.tabs.len())]
+            .iter()
+            .filter(|t| t.is_session())
+            .count();
         SavedTabs {
-            tabs: self
-                .tabs
+            tabs: kept
                 .iter()
                 .map(|tab| SavedTab {
                     kind: SavedKind::Ssh {
@@ -384,7 +400,11 @@ impl<P: Paned> TabSet<P> {
                     title: tab.title.clone(),
                 })
                 .collect(),
-            active: self.active,
+            active: if self.active_tab().is_some_and(Tab::is_session) {
+                before
+            } else {
+                before.saturating_sub(1)
+            },
         }
     }
 

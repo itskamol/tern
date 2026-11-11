@@ -74,5 +74,4 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 
 ## Later (not in the first version)
 
-- Side panel: SFTP file browser, same resize/transition rules as zeron's diff pane (360–760px, default 520, cap 52%).
 - Theme library with VS Code theme import (zeron `crates/theme/src/vscode.rs`).

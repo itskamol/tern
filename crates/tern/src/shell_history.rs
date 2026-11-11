@@ -106,16 +106,19 @@ impl Shell {
         if self.history.window.is_some() {
             return self.close_command_history(window, cx);
         }
-        let alias = match self.tabs.active_tab() {
-            Some(tab) if self.settings_page.is_none() => tab.session().read(cx).alias().to_owned(),
-            _ => {
-                return self.notify_toast(
-                    ToastKind::Default,
-                    "Open a session to see its command history",
-                    cx,
-                );
-            }
+        let session = self
+            .tabs
+            .active_tab()
+            .and_then(|tab| tab.session())
+            .filter(|_| self.settings_page.is_none());
+        let Some(session) = session else {
+            return self.notify_toast(
+                ToastKind::Default,
+                "Open a session to see its command history",
+                cx,
+            );
         };
+        let alias = session.read(cx).alias().to_owned();
         self.picker = None;
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -229,10 +232,14 @@ impl Shell {
             .and_then(|w| w.entries.get(ix))
             .map(|e| e.line.clone());
         self.close_command_history(window, cx);
-        let (Some(line), Some(tab)) = (line, self.tabs.active_tab()) else {
+        let session = self
+            .tabs
+            .active_tab()
+            .and_then(|tab| tab.session())
+            .cloned();
+        let (Some(line), Some(session)) = (line, session) else {
             return;
         };
-        let session = tab.session().clone();
         if !session.update(cx, |s, cx| s.put_at_prompt(&line, run, cx)) {
             self.notify_toast(
                 ToastKind::Critical,
