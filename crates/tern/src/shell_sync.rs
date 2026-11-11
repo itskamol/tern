@@ -478,6 +478,7 @@ impl Shell {
             return;
         };
         self.settings = crate::settings::Settings::load(&dir);
+        self.tabs.set_saving(self.settings.reopen_tabs);
         crate::platform::apply_reduce_motion(self.settings.reduce_motion, cx);
         self.apply_appearance(cx);
         self.refresh_theme(cx);

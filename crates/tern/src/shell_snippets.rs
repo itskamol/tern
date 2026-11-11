@@ -76,7 +76,7 @@ impl Shell {
         if self.snippets.picker.is_some() {
             return self.close_snippet_picker(window, cx);
         }
-        let active_session = self.tabs.get(self.active).is_some() && self.settings_page.is_none();
+        let active_session = self.tabs.active_tab().is_some() && self.settings_page.is_none();
         if !active_session {
             return self.notify_toast(ToastKind::Default, "Open a session to use a snippet", cx);
         }
@@ -120,7 +120,7 @@ impl Shell {
         let Some(snippet) = self.snippets.items.get(ix).cloned() else {
             return;
         };
-        let Some(tab) = self.tabs.get(self.active) else {
+        let Some(tab) = self.tabs.active_tab() else {
             return;
         };
         let sent = tab.session().read(cx).insert_text(&snippet.command);

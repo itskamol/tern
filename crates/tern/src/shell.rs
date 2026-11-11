@@ -19,7 +19,9 @@ use crate::picker::{self, Picker, ToggleHostPicker};
 use crate::session::{Launch, Session, Status};
 use crate::settings::{self, SIDEBAR_DEFAULT, Settings};
 use crate::split::{self, PaneId};
+use crate::tab_set::{Paned, TabSet};
 use crate::tabs::{self, ActivateTab, CloseTab, NextTab, PrevTab, TabInfo};
+use crate::tabs_store::DiskTabs;
 use crate::theme::{Theme, UI_FONT};
 use crate::{sidebar, statusline};
 
@@ -130,26 +132,23 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
     let window = cx.open_window(options, |_, cx| {
         cx.new(|cx| {
             let theme = Theme::zeron_dark();
+            let settings = settings::dir()
+                .map(|d| Settings::load(&d))
+                .unwrap_or_default();
             let mut shell = Shell {
                 focus: cx.focus_handle(),
-                settings: settings::dir()
-                    .map(|d| Settings::load(&d))
-                    .unwrap_or_default(),
+                tabs: TabSet::new(Box::new(DiskTabs), settings.reopen_tabs),
+                settings,
                 theme,
                 hosts: Vec::new(),
                 connections,
                 store_error,
                 form: None,
                 confirm_delete: None,
-                tabs: Vec::new(),
                 renaming: None,
-                restoring: false,
-                next_tab: 0,
-                next_pane: 0,
                 broadcast: None,
                 broadcast_picker: None,
                 panels: Default::default(),
-                active: 0,
                 error: None,
                 picker: None,
                 sidebar_tween: None,
@@ -186,7 +185,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
             crate::platform::apply_reduce_motion(shell.settings.reduce_motion, cx);
             shell.sync_display_preferences(cx);
             if window.is_window_active() {
-                for pane in shell.tabs.iter().flat_map(|t| &t.panes) {
+                for pane in shell.tabs.iter().flat_map(|t| t.panes()) {
                     pane.session.update(cx, |s, cx| s.nudge(cx));
                 }
             }
@@ -231,18 +230,13 @@ pub struct Shell {
     store_error: Option<String>,
     form: Option<connections_ui::ConnectionForm>,
     confirm_delete: Option<usize>,
-    tabs: Vec<Tab>,
+    tabs: TabSet<Pane>,
     /// The tab whose title is being edited in the strip.
     renaming: Option<tabs_ui::Rename>,
-    /// True while the last run's tabs are being reopened, so half a list is never saved.
-    restoring: bool,
     /// Input typed in one tab also going to others, and the list that picks them.
-    next_tab: broadcast_ui::TabId,
-    next_pane: PaneId,
     broadcast: Option<broadcast_ui::Broadcast>,
     broadcast_picker: Option<broadcast_ui::BroadcastPicker>,
     panels: forwards_ui::Panels,
-    active: usize,
     error: Option<String>,
     picker: Option<Picker>,
     sidebar_tween: Option<WidthTween>,
@@ -290,26 +284,18 @@ struct Pane {
     _notes: Subscription,
 }
 
-struct Tab {
-    id: broadcast_ui::TabId,
-    alias: String,
-    /// The user's name for the tab. It belongs to the tab, not the session, so a reconnect
-    /// keeps it.
-    title: Option<String>,
-    /// How the panes are laid out, and which one has the keyboard.
-    tree: split::Node,
-    focused: PaneId,
-    panes: Vec<Pane>,
+type Tab = crate::tab_set::Tab<Pane>;
+
+impl Paned for Pane {
+    fn pane_id(&self) -> PaneId {
+        self.id
+    }
 }
 
 impl Tab {
     /// The focused pane's session: what the strip shows and what typing reaches.
     fn session(&self) -> &Entity<Session> {
-        match self.panes.iter().find(|p| p.id == self.focused) {
-            Some(pane) => &pane.session,
-            // `focused` always names a pane; the first is the fallback if that ever breaks.
-            None => &self.panes[0].session,
-        }
+        &self.front().session
     }
 }
 
@@ -420,7 +406,7 @@ impl Shell {
 
     /// Focus back to the active terminal, or the window when there is none.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = match self.tabs.get(self.active) {
+        let focus = match self.tabs.active_tab() {
             Some(tab) => tab.session().read(cx).view.focus_handle(cx),
             None => self.focus.clone(),
         };
@@ -431,7 +417,7 @@ impl Shell {
     fn apply_option_as_meta(&self, cx: &mut Context<Self>) {
         let on = self.settings.option_as_meta;
         for tab in &self.tabs {
-            for pane in &tab.panes {
+            for pane in tab.panes() {
                 let view = pane.session.read(cx).view.clone();
                 view.update(cx, |v, _| v.set_option_as_meta(on));
             }
@@ -465,7 +451,7 @@ impl Shell {
             .enumerate()
             .map(|(ix, tab)| TabInfo {
                 alias: tab.alias.clone(),
-                title: tab.title.clone(),
+                title: tab.title().map(str::to_owned),
                 logging: tab.session().read(cx).is_logging(),
                 broadcast: self.is_broadcasting(tab.id),
                 dot: {
@@ -489,7 +475,7 @@ impl Shell {
         panel_bg: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if let Some(tab) = self.tabs.get(self.active) {
+        if let Some(tab) = self.tabs.active_tab() {
             return self.render_panes(tab, cx);
         }
         let t = self.theme;
@@ -595,8 +581,8 @@ impl Render for Shell {
         crate::theme::set_see_through(self.window_fill().is_some());
         let t = self.theme;
         let infos = self.tab_infos(cx);
-        let active_alias = infos.get(self.active).map(|i| i.alias.clone());
-        let strip = tabs::strip(&infos, self.active, &self.tab_scroll, &t, cx);
+        let active_alias = infos.get(self.tabs.active()).map(|i| i.alias.clone());
+        let strip = tabs::strip(&infos, self.tabs.active(), &self.tab_scroll, &t, cx);
         let query = self.search_query(cx);
         let sidebar = sidebar::render(
             &sidebar::SidebarState {
@@ -670,10 +656,10 @@ impl Render for Shell {
                 s.move_pane_focus(split::Direction::Down, w, cx)
             }))
             .on_action(cx.listener(|s, _: &NextTab, w, cx| {
-                s.show_tab(tabs::step(s.active, s.tabs.len(), 1), w, cx)
+                s.show_tab(tabs::step(s.tabs.active(), s.tabs.len(), 1), w, cx)
             }))
             .on_action(cx.listener(|s, _: &PrevTab, w, cx| {
-                s.show_tab(tabs::step(s.active, s.tabs.len(), -1), w, cx)
+                s.show_tab(tabs::step(s.tabs.active(), s.tabs.len(), -1), w, cx)
             }))
             .on_action(cx.listener(|s, a: &ActivateTab, w, cx| s.show_tab(a.0, w, cx)))
             .on_action(cx.listener(|s, _: &ToggleHostPicker, w, cx| s.toggle_picker(w, cx)))

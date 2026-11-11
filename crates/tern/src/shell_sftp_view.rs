@@ -58,7 +58,7 @@ impl Shell {
         let tab = self.tabs.iter().find(|t| t.id == panel.tab)?;
         let t = self.theme;
         let viewport = window.viewport_size();
-        let label = tab.title.clone().unwrap_or_else(|| tab.alias.clone());
+        let label = tab.title().map_or_else(|| tab.alias.clone(), str::to_owned);
         let width = WIDTH.min(f32::from(viewport.width) - 2.0 * SPACE_SM);
         let height =
             f32::from(viewport.height) - TITLEBAR_HEIGHT - SPACE_SM - statusline::HEIGHT - 1.0;

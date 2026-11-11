@@ -179,7 +179,7 @@ impl Shell {
     /// The empty view's picture, filling the main tile. Only the empty view has it: with a tab
     /// or the Settings page open nothing sharp sits behind the content.
     pub(super) fn empty_view_hero(&mut self, window: &mut Window) -> Option<AnyElement> {
-        if self.tabs.get(self.active).is_some() || self.settings_page.is_some() {
+        if self.tabs.active_tab().is_some() || self.settings_page.is_some() {
             return None;
         }
         self.wallpaper_hero(window)

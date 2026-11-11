@@ -56,8 +56,8 @@ impl Shell {
         if self.panels.sftp.is_some() {
             return self.close_sftp(window, cx);
         }
-        if self.tabs.get(self.active).is_some() && self.settings_page.is_none() {
-            self.open_sftp(self.active, window, cx);
+        if self.tabs.active_tab().is_some() && self.settings_page.is_none() {
+            self.open_sftp(self.tabs.active(), window, cx);
         }
     }
 

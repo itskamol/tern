@@ -154,7 +154,7 @@ impl Shell {
         let panel = self.panels.forwards.as_ref()?;
         let t = self.theme;
         let tab = self.tabs.iter().find(|tab| tab.id == panel.tab)?;
-        let label = tab.title.clone().unwrap_or_else(|| tab.alias.clone());
+        let label = tab.title().map_or_else(|| tab.alias.clone(), str::to_owned);
         let session = tab.session().clone();
         let running = session.read(cx).active_forwards();
         let mut card = div()
@@ -285,7 +285,7 @@ impl Shell {
         if self.settings_page.is_some() || self.form.is_some() {
             return;
         }
-        let Some(tab) = self.tabs.get(self.active) else {
+        let Some(tab) = self.tabs.active_tab() else {
             return;
         };
         let session = tab.session().clone();
@@ -297,7 +297,7 @@ impl Shell {
         if self.settings_page.is_some() || self.form.is_some() {
             return;
         }
-        let Some(tab) = self.tabs.get(self.active) else {
+        let Some(tab) = self.tabs.active_tab() else {
             return;
         };
         let terminal = tab.session().read(cx).view.read(cx).terminal().clone();
@@ -325,7 +325,7 @@ impl Shell {
                 let in_front = self.settings_page.is_none()
                     && self
                         .tabs
-                        .get(self.active)
+                        .get(self.tabs.active())
                         .is_some_and(|t| t.session() == session);
                 let combo = cx.global::<Keymap>().combo(ShortcutId::FillPassword);
                 // Unbound, there is no shortcut to name.

@@ -183,9 +183,8 @@ impl Shell {
             .iter()
             .enumerate()
             .map(|(ix, tab)| {
-                let name =
-                    crate::tabs::middle_ellipsis(tab.title.as_deref().unwrap_or(&tab.alias), 40);
-                let label = if ix == self.active {
+                let name = crate::tabs::middle_ellipsis(tab.title().unwrap_or(&tab.alias), 40);
+                let label = if ix == self.tabs.active() {
                     format!("{name}  ✓")
                 } else {
                     name
@@ -230,13 +229,11 @@ impl Shell {
     }
 
     fn close_other_tabs(&mut self, keep: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if keep >= self.tabs.len() {
+        if self.tabs.close_others(keep).is_empty() {
             return;
         }
-        let kept = self.tabs.remove(keep);
-        self.tabs = vec![kept];
         self.sync_broadcast(cx);
-        self.activate_tab(0, window, cx);
+        self.front_tab_changed(window, cx);
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {

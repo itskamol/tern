@@ -84,6 +84,21 @@ impl SavedTabs {
     }
 }
 
+/// `tabs.json` in the settings folder; a failed write is logged, not fatal. It runs on every
+/// change, never at launch, so an unreadable file survives until the user changes something.
+pub struct DiskTabs;
+
+impl crate::tab_set::TabStore for DiskTabs {
+    fn save(&self, tabs: &SavedTabs) {
+        let Some(dir) = crate::settings::dir() else {
+            return;
+        };
+        if let Err(e) = tabs.save(&dir) {
+            tracing::warn!(error = %e, "tabs_save_failed");
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

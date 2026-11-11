@@ -41,7 +41,7 @@ impl Shell {
         self.update_settings(change, cx);
         let options = self.terminal_options();
         for tab in &self.tabs {
-            for pane in &tab.panes {
+            for pane in tab.panes() {
                 let view = pane.session.read(cx).view.clone();
                 view.update(cx, |v, cx| v.set_options(options.clone(), cx));
             }
@@ -146,7 +146,7 @@ impl Shell {
             .cursor_pointer()
             .on_click(cx.listener(|s, _, _, cx| {
                 s.update_settings(|st| st.reopen_tabs = !st.reopen_tabs, cx);
-                s.persist_tabs();
+                s.tabs.set_saving(s.settings.reopen_tabs);
             }))
             .child(w::toggle(&t, s.reopen_tabs, "reopen-tabs"));
 

@@ -111,7 +111,7 @@ impl Shell {
     /// remote side is told the new grid size.
     pub(super) fn restyle_tabs(&self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
-            for pane in &tab.panes {
+            for pane in tab.panes() {
                 let theme = self.terminal_theme(&tab.alias);
                 let view = pane.session.read(cx).view.clone();
                 view.update(cx, |v, cx| v.set_theme(theme, cx));
@@ -130,7 +130,7 @@ impl Shell {
 
     /// Background of the main panel: the active tab's scheme, so no seam shows around it.
     pub(super) fn panel_background(&self) -> gpui::Hsla {
-        match self.tabs.get(self.active) {
+        match self.tabs.active_tab() {
             Some(tab) => self.terminal_theme(&tab.alias).background,
             None => self.theme.terminal_background,
         }
@@ -145,7 +145,7 @@ impl Shell {
         if !self.settings.show_status_line {
             return None;
         }
-        let session = self.tabs.get(self.active)?.session().read(cx);
+        let session = self.tabs.active_tab()?.session().read(cx);
         Some(statusline::render(
             &self.theme,
             &session.label(),
@@ -166,7 +166,7 @@ impl Shell {
                 let alive = this.update(cx, |s, cx| {
                     let ticking = s.settings.show_status_line
                         && s.tabs
-                            .get(s.active)
+                            .get(s.tabs.active())
                             .is_some_and(|t| t.session().read(cx).status() == Status::Connected);
                     if ticking {
                         cx.notify();

@@ -32,6 +32,7 @@ mod single_instance;
 mod snippets;
 mod split;
 mod statusline;
+mod tab_set;
 mod tabs;
 mod tabs_store;
 mod text_input;
