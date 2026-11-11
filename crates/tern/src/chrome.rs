@@ -36,8 +36,27 @@ actions!(
 
 const HELP_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#readme");
 
+/// Quits, unless copies are running: the window asks first.
+fn quit(cx: &mut App) {
+    let shell = cx
+        .windows()
+        .into_iter()
+        .find_map(|w| w.downcast::<crate::shell::Shell>());
+    match shell {
+        Some(window) => {
+            if window
+                .update(cx, |shell, _, cx| shell.request_quit(cx))
+                .is_err()
+            {
+                cx.quit();
+            }
+        }
+        None => cx.quit(),
+    }
+}
+
 pub fn init_menus(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| quit(cx));
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -57,8 +76,8 @@ pub fn init_menus(cx: &mut App) {
 fn app_menus() -> Vec<Menu> {
     use crate::shell::{
         CheckForUpdates, ClosePane, DecreaseFontSize, EqualizePanes, FocusPaneDown, FocusPaneLeft,
-        FocusPaneRight, FocusPaneUp, IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize,
-        ShowAbout, SplitDown, SplitDownWithHost, SplitRight, SplitRightWithHost, ToggleSftp,
+        FocusPaneRight, FocusPaneUp, IncreaseFontSize, NewConnection, OpenFiles, OpenSettings,
+        ResetFontSize, ShowAbout, SplitDown, SplitDownWithHost, SplitRight, SplitRightWithHost,
         ToggleSidebar, ToggleSnippets,
     };
     use crate::shell::{RedoHosts, UndoHosts};
@@ -115,7 +134,7 @@ fn app_menus() -> Vec<Menu> {
             "View",
             vec![
                 MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
-                MenuItem::action("Browse Files", ToggleSftp),
+                MenuItem::action("Files Tab", OpenFiles),
                 MenuItem::separator(),
                 MenuItem::action("Bigger Text", IncreaseFontSize),
                 MenuItem::action("Smaller Text", DecreaseFontSize),

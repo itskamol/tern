@@ -34,14 +34,10 @@ impl Shell {
         let Some(tab) = self.tabs.active_tab() else {
             return Floor::cells(1.0, 1.0);
         };
-        let terminal = tab
-            .front()
-            .session
-            .read(cx)
-            .view
-            .read(cx)
-            .terminal()
-            .read(cx);
+        let Some(session) = tab.front().session() else {
+            return Floor::cells(1.0, 1.0);
+        };
+        let terminal = session.read(cx).view.read(cx).terminal().read(cx);
         let (cols, rows) = (terminal.cols() as f32, terminal.rows() as f32);
         let Rect { w, h, .. } = tab
             .layout()
@@ -87,7 +83,10 @@ impl Shell {
             return;
         };
         let target = tab.focused();
-        let launch = tab.session().read(cx).launch_again();
+        let Some(session) = tab.session() else {
+            return;
+        };
+        let launch = session.read(cx).launch_again();
         let host = tab.front().host.clone();
         self.split_with(target, side, launch, &host, window, cx);
     }
@@ -209,8 +208,8 @@ impl Shell {
         let Some(tab) = self.tabs.active_tab() else {
             return;
         };
-        for pane in tab.panes() {
-            let view = pane.session.read(cx).view.clone();
+        for session in tab.panes().iter().filter_map(Pane::session) {
+            let view = session.read(cx).view.clone();
             view.update(cx, |v, cx| v.hold_remote_resize(held, cx));
         }
     }
@@ -382,7 +381,7 @@ impl Shell {
             .map(|(_, side)| side);
         // A pane not in front that waits at a password prompt says so; the badge is read from
         // the session each frame, so it is gone as soon as the prompt is.
-        let asking = split && !focused && pane.session.read(cx).waiting_for_fill(cx);
+        let asking = split && !focused && pane.waiting_for_fill(cx);
         let combo = cx.global::<Keymap>().combo(ShortcutId::FillPassword);
         div()
             .id(("pane", id))
@@ -416,9 +415,13 @@ impl Shell {
             .on_drop(
                 cx.listener(move |s, from: &DraggedHost, w, cx| s.drop_host(id, from.ix, w, cx)),
             )
-            .child(tern_term::TerminalView::cached_child(
-                &pane.session.read(cx).view,
-            ))
+            .child(match &pane.content {
+                Content::Session(term) => {
+                    tern_term::TerminalView::cached_child(&term.session.read(cx).view)
+                        .into_any_element()
+                }
+                Content::Files(files) => files.clone().into_any_element(),
+            })
             .when_some(hint, |el, side| el.child(drop_zone(side, &t)))
             .when(asking, |el| el.child(password_badge(combo, &t)))
             .into_any_element()

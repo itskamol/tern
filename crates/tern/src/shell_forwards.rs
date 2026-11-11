@@ -25,7 +25,6 @@ actions!(tern, [FillPassword, ClearTerminal]);
 #[derive(Default)]
 pub(super) struct Panels {
     pub forwards: Option<ForwardsPanel>,
-    pub sftp: Option<super::sftp_ui::SftpPanel>,
 }
 
 pub(super) struct ForwardsPanel {
@@ -108,7 +107,7 @@ impl Shell {
             .tabs
             .iter()
             .find(|t| t.id == panel.tab)
-            .map(|t| t.session().clone())
+            .and_then(|t| t.session().cloned())
         else {
             return;
         };
@@ -132,18 +131,8 @@ impl Shell {
         cx.stop_propagation();
     }
 
-    pub(super) fn render_panels(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        [
-            self.render_forwards_panel(cx),
-            self.render_sftp_panel(window, cx),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+    pub(super) fn render_panels(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.render_forwards_panel(cx).into_iter().collect()
     }
 
     fn render_forwards_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -151,7 +140,7 @@ impl Shell {
         let t = self.theme;
         let tab = self.tabs.iter().find(|tab| tab.id == panel.tab)?;
         let label = tab.title().map_or_else(|| tab.alias.clone(), str::to_owned);
-        let session = tab.session().clone();
+        let session = tab.session()?.clone();
         let running = session.read(cx).active_forwards();
         let mut card = div()
             .id("forwards-panel")
@@ -283,9 +272,7 @@ impl Shell {
         if self.settings_page.is_some() || self.form.is_some() {
             return;
         }
-        let target = self
-            .tabs
-            .fill_target(|pane| pane.session.read(cx).waiting_for_fill(cx));
+        let target = self.tabs.fill_target(|pane| pane.waiting_for_fill(cx));
         if target == FillTarget::Several {
             return self.notify_toast(
                 ToastKind::Default,
@@ -300,7 +287,9 @@ impl Shell {
         let Some(tab) = self.tabs.active_tab() else {
             return;
         };
-        let session = tab.session().clone();
+        let Some(session) = tab.session().cloned() else {
+            return;
+        };
         session.update(cx, |s, cx| s.fill_password(cx));
     }
 
@@ -316,12 +305,10 @@ impl Shell {
         let Some(tab) = self.tabs.active_tab() else {
             return;
         };
-        let Some(pane) = tab.panes().iter().find(|p| &p.session == session) else {
+        let Some(pane) = tab.panes().iter().find(|p| p.session() == Some(session)) else {
             return;
         };
-        let target = self
-            .tabs
-            .fill_target(|p| p.session.read(cx).waiting_for_fill(cx));
+        let target = self.tabs.fill_target(|p| p.waiting_for_fill(cx));
         if target != FillTarget::Pane(pane.id) {
             return;
         }
@@ -342,7 +329,10 @@ impl Shell {
         let Some(tab) = self.tabs.active_tab() else {
             return;
         };
-        let terminal = tab.session().read(cx).view.read(cx).terminal().clone();
+        let Some(session) = tab.session() else {
+            return;
+        };
+        let terminal = session.read(cx).view.read(cx).terminal().clone();
         terminal.update(cx, |t, cx| {
             t.clear();
             cx.notify();

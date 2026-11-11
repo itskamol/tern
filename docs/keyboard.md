@@ -8,7 +8,7 @@ The defaults, from `crates/tern/src/keymap.rs`. Every shortcut can be rebound in
 | Search hosts | ⇧⌘F | Ctrl+Alt+F |
 | New connection | ⌘N | Ctrl+Shift+N |
 | Snippets | ⇧⌘S | Ctrl+Alt+S |
-| Browse files | ⇧⌘O | Ctrl+Alt+O |
+| Files tab | ⇧⌘O | Ctrl+Alt+O |
 | Settings | ⌘, | Ctrl+, |
 | Toggle sidebar | ⌘B | Ctrl+Shift+B |
 | Split right / down | ⌘D / ⌘⇧D | Ctrl+Shift+D / Ctrl+Alt+D |

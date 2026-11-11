@@ -193,6 +193,41 @@ impl russh_sftp::server::Handler for FsHandler {
         Ok(status(id))
     }
 
+    async fn mkdir(
+        &mut self,
+        id: u32,
+        path: String,
+        _: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        std::fs::create_dir(self.real(&path)).map_err(|e| code(&e))?;
+        Ok(status(id))
+    }
+
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        std::fs::remove_dir(self.real(&path)).map_err(|e| code(&e))?;
+        Ok(status(id))
+    }
+
+    async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+        std::fs::remove_file(self.real(&filename)).map_err(|e| code(&e))?;
+        Ok(status(id))
+    }
+
+    /// Like OpenSSH's plain SFTP rename: an existing target is an error, not replaced.
+    async fn rename(
+        &mut self,
+        id: u32,
+        oldpath: String,
+        newpath: String,
+    ) -> Result<Status, Self::Error> {
+        let to = self.real(&newpath);
+        if to.symlink_metadata().is_ok() {
+            return Err(StatusCode::Failure);
+        }
+        std::fs::rename(self.real(&oldpath), to).map_err(|e| code(&e))?;
+        Ok(status(id))
+    }
+
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
         self.handles.remove(&handle);
         Ok(status(id))

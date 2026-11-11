@@ -25,6 +25,11 @@ impl Paned for P {
     fn host(&self) -> &str {
         self.1
     }
+
+    /// Ids from 1000 up stand for a Files tab's pane.
+    fn is_session(&self) -> bool {
+        self.0 < 1000
+    }
 }
 
 /// Records every save as "alias,alias|active".
@@ -503,4 +508,30 @@ fn fill_only_looks_at_the_front_tab() {
     assert_eq!(tabs.fill_target(asking(&[1])), FillTarget::None);
     tabs.activate(0);
     assert_eq!(tabs.fill_target(asking(&[1])), FillTarget::Pane(1));
+}
+
+#[test]
+fn a_files_tab_is_not_saved_and_the_saved_slot_skips_it() {
+    let (mut tabs, saves) = set(&["a", "b"]);
+    tabs.open("Files".into(), P(1000, "Files"));
+    assert_eq!(
+        saves.take(),
+        ["a,b|1"],
+        "in front, it is saved as the tab before it"
+    );
+    let id = tabs.new_pane_id();
+    tabs.open("c".into(), P(id, "host"));
+    assert_eq!(
+        saves.take(),
+        ["a,b,c|2"],
+        "slot 3 here, the third of the saved"
+    );
+    tabs.activate(0);
+    assert_eq!(saves.take(), ["a,b,c|0"]);
+    tabs.activate(2);
+    assert!(
+        !tabs.can_split(1000, Direction::Down, floor()),
+        "a Files tab does not split"
+    );
+    assert!(!tabs[2].is_session() && tabs[1].is_session());
 }

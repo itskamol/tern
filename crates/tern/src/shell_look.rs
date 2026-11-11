@@ -56,6 +56,7 @@ impl Shell {
         self.theme = next;
         self.install_input_colors(cx);
         self.restyle_tabs(cx);
+        self.retheme_files(cx);
         cx.notify();
         true
     }
@@ -101,9 +102,9 @@ impl Shell {
     /// remote side is told the new grid size.
     pub(super) fn restyle_tabs(&self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
-            for pane in tab.panes() {
+            for session in tab.panes().iter().filter_map(Pane::session) {
                 let theme = self.terminal_theme(&tab.alias);
-                let view = pane.session.read(cx).view.clone();
+                let view = session.read(cx).view.clone();
                 view.update(cx, |v, cx| v.set_theme(theme, cx));
             }
         }
@@ -126,7 +127,7 @@ impl Shell {
         if !self.settings.show_status_line {
             return None;
         }
-        let session = self.tabs.active_tab()?.session().read(cx);
+        let session = self.tabs.active_tab()?.session()?.read(cx);
         Some(statusline::render(
             &self.theme,
             &session.label(),
@@ -148,7 +149,8 @@ impl Shell {
                     let ticking = s.settings.show_status_line
                         && s.tabs
                             .get(s.tabs.active())
-                            .is_some_and(|t| t.session().read(cx).status() == Status::Connected);
+                            .and_then(|t| t.session())
+                            .is_some_and(|s| s.read(cx).status() == Status::Connected);
                     if ticking {
                         cx.notify();
                     }

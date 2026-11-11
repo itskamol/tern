@@ -3,11 +3,10 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, MouseUpEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, point, px,
-    size,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
+    MouseButton, MouseUpEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowOptions, actions, div, point, px, size,
 };
 #[cfg(debug_assertions)]
 use tern_ssh::ConnectSpec;
@@ -15,11 +14,12 @@ use tern_ssh::HostEntry;
 
 use crate::chrome::{self, DragGhost, SidebarResize, WidthTween};
 use crate::connections::{self, Connection};
+use crate::indicator::Dot;
 use crate::picker::{self, Picker, ToggleHostPicker};
 use crate::session::{Launch, Session, Status};
 use crate::settings::{self, SIDEBAR_DEFAULT, Settings};
 use crate::split::{self, PaneId};
-use crate::tab_set::{Paned, TabSet};
+use crate::tab_set::TabSet;
 use crate::tabs::{self, ActivateTab, CloseTab, NextTab, PrevTab, TabInfo};
 use crate::tabs_store::DiskTabs;
 use crate::theme::{Theme, UI_FONT};
@@ -29,6 +29,7 @@ actions!(
     tern,
     [
         ToggleSidebar,
+        OpenFiles,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
@@ -55,12 +56,14 @@ actions!(
 
 #[path = "shell_broadcast.rs"]
 mod broadcast_ui;
+#[path = "shell_files.rs"]
+mod files_ui;
+#[path = "shell_pane.rs"]
+mod pane_ui;
+use pane_ui::{Content, Pane, Tab, TermPane};
 #[path = "shell_forwards.rs"]
 mod forwards_ui;
-#[path = "shell_sftp.rs"]
-mod sftp_ui;
 pub(crate) use forwards_ui::{ClearTerminal, FillPassword};
-pub(crate) use sftp_ui::ToggleSftp;
 #[path = "shell_wallpaper_gallery.rs"]
 mod gallery_ui;
 #[path = "shell_look.rs"]
@@ -161,6 +164,12 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 broadcast: None,
                 broadcast_picker: None,
                 panels: Default::default(),
+                transfers: cx.new(|cx| {
+                    crate::transfers::Transfers::new(crate::platform::SshRuntime::handle(cx), cx)
+                }),
+                quit_ask: false,
+                conflict_all: false,
+                _transfers_sub: None,
                 error: None,
                 picker: None,
                 sidebar_tween: None,
@@ -187,8 +196,19 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 _clock: None,
             };
             shell.refresh_hosts();
+            shell._transfers_sub = Some(cx.subscribe(
+                &shell.transfers,
+                |s, _, done: &crate::transfers::Finished, cx| s.on_transfer_finished(done, cx),
+            ));
             shell
         })
+    })?;
+    window.update(cx, |_, window, cx| {
+        // The close button asks first when copies are running.
+        let shell = cx.entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            shell.update(cx, |s, cx| s.close_allowed(cx))
+        });
     })?;
     window.update(cx, |shell, window, cx| {
         shell.reapply(settings::Reapply::all(), cx);
@@ -199,8 +219,13 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
             crate::platform::apply_reduce_motion(shell.settings.reduce_motion, cx);
             shell.sync_display_preferences(cx);
             if window.is_window_active() {
-                for pane in shell.tabs.iter().flat_map(|t| t.panes()) {
-                    pane.session.update(cx, |s, cx| s.nudge(cx));
+                for session in shell
+                    .tabs
+                    .iter()
+                    .flat_map(|t| t.panes())
+                    .filter_map(Pane::session)
+                {
+                    session.update(cx, |s, cx| s.nudge(cx));
                 }
             }
         })
@@ -253,6 +278,14 @@ pub struct Shell {
     broadcast: Option<broadcast_ui::Broadcast>,
     broadcast_picker: Option<broadcast_ui::BroadcastPicker>,
     panels: forwards_ui::Panels,
+    /// The copies in progress: the queue is the shell's, so closing a Files tab does not stop
+    /// one.
+    transfers: Entity<crate::transfers::Transfers>,
+    /// Quitting with copies running is being asked about.
+    quit_ask: bool,
+    /// The conflict sheet's "apply to all" box.
+    conflict_all: bool,
+    _transfers_sub: Option<Subscription>,
     error: Option<String>,
     picker: Option<Picker>,
     sidebar_tween: Option<WidthTween>,
@@ -286,42 +319,12 @@ pub struct Shell {
 
 /// Debug builds: keep scripted logins out of the real ~/.ssh/known_hosts.
 #[cfg(debug_assertions)]
-fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
+pub(crate) fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
     ConnectSpec {
         known_hosts: std::env::var_os("TERN_KNOWN_HOSTS")
             .map(Into::into)
             .or(spec.known_hosts),
         ..spec
-    }
-}
-
-/// One terminal in a tab: a connection.
-struct Pane {
-    id: PaneId,
-    /// The host this pane is connected to; a split tab's title follows the focused pane's.
-    host: String,
-    session: Entity<Session>,
-    _repaint: Subscription,
-    _bell: Subscription,
-    _notes: Subscription,
-}
-
-type Tab = crate::tab_set::Tab<Pane>;
-
-impl Paned for Pane {
-    fn pane_id(&self) -> PaneId {
-        self.id
-    }
-
-    fn host(&self) -> &str {
-        &self.host
-    }
-}
-
-impl Tab {
-    /// The focused pane's session: what the strip shows and what typing reaches.
-    fn session(&self) -> &Entity<Session> {
-        &self.front().session
     }
 }
 
@@ -422,7 +425,7 @@ impl Shell {
     /// Focus back to the active terminal, or the window when there is none.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = match self.tabs.active_tab() {
-            Some(tab) => tab.session().read(cx).view.focus_handle(cx),
+            Some(tab) => tab.focus_handle(cx),
             None => self.focus.clone(),
         };
         window.focus(&focus, cx);
@@ -459,12 +462,9 @@ impl Shell {
                 host: tab.front().host.clone(),
                 others: tab.panes().len() - 1,
                 title: tab.title().map(str::to_owned),
-                logging: tab.session().read(cx).is_logging(),
+                logging: tab.session().is_some_and(|s| s.read(cx).is_logging()),
                 broadcast: self.is_broadcasting(tab.id),
-                dot: {
-                    let s = tab.session().read(cx);
-                    s.dot()
-                },
+                dot: tab.session().map_or(Dot::Idle, |s| s.read(cx).dot()),
                 rename: self
                     .renaming
                     .as_ref()
@@ -655,7 +655,7 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &FocusHostSearch, w, cx| s.focus_search(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSnippets, w, cx| s.toggle_snippet_picker(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
-            .on_action(cx.listener(|s, _: &ToggleSftp, w, cx| s.toggle_sftp(w, cx)))
+            .on_action(cx.listener(|s, _: &OpenFiles, w, cx| s.open_files_tab(None, w, cx)))
             .on_action(cx.listener(|s, _: &FillPassword, w, cx| s.fill_password(w, cx)))
             .on_action(cx.listener(|s, _: &ClearTerminal, _, cx| s.clear_terminal(cx)))
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
@@ -742,7 +742,9 @@ impl Render for Shell {
             .when_some(theme_picker, |el, p| el.child(p))
             .when_some(context_menu, |el, m| el.child(m))
             .when_some(self.render_broadcast_picker(cx), |el, p| el.child(p))
-            .children(self.render_panels(window, cx))
+            .children(self.render_panels(cx))
+            .children(self.render_conflict_sheet(window, cx))
+            .children(self.render_quit_sheet(window, cx))
             .when_some(toast, |el, t| el.child(t))
             .when_some(self.picker.as_ref(), |el, p| {
                 el.child(picker::render(

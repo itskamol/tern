@@ -13,14 +13,14 @@ use russh::server::{self, Auth, Msg};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
 
 /// The login password, and the one `sudo` accepts.
-pub(super) const PASSWORD: &str = "hunter2";
+pub(crate) const PASSWORD: &str = "hunter2";
 pub(super) const PROMPT: &str = "test@demo:~$ ";
 /// What `sudo` asks.
 pub(super) const SUDO_PROMPT: &str = "[sudo] password for test:";
 
 /// Every line the shell received, passwords included, in order.
 #[derive(Clone, Default)]
-pub(super) struct Typed(Arc<Mutex<Vec<String>>>);
+pub(crate) struct Typed(Arc<Mutex<Vec<String>>>);
 
 impl Typed {
     pub(super) fn lines(&self) -> Vec<String> {
@@ -159,7 +159,7 @@ impl server::Handler for OnePassword {
 
 /// A server on 127.0.0.1 taking only [`PASSWORD`], on its own runtime (kept alive by the
 /// caller), and what its shells were typed.
-pub(super) fn serve() -> (tokio::runtime::Runtime, u16, Typed) {
+pub(crate) fn serve() -> (tokio::runtime::Runtime, u16, Typed) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
