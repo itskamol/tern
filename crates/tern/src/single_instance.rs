@@ -186,7 +186,7 @@ fn hand_over(_dir: &Path, _target: Option<&str>) -> io::Result<()> {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -213,9 +213,22 @@ mod tests {
         let mut instance = first(dir.path());
         instance.listener = None;
         assert!(matches!(claim(dir.path(), None), Claim::Unanswered(_)));
-        // Once it exits, the next launch is the first again.
+        // Once it exits, the next launch is the first again. Other tests spawn processes in
+        // parallel, and a child between fork and exec briefly shares the lock file's open
+        // description (flock belongs to it, not to the fd), so the lock can outlive the drop
+        // by a moment here; in the app the holder is a whole process that has exited.
         drop(instance);
-        assert!(matches!(claim(dir.path(), None), Claim::First(_)));
+        let freed = (0..100).any(|_| {
+            let first = matches!(claim(dir.path(), None), Claim::First(_));
+            if !first {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            first
+        });
+        assert!(
+            freed,
+            "the folder was not free within 2 s of the holder going"
+        );
     }
 
     #[test]

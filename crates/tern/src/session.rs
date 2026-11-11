@@ -424,9 +424,9 @@ impl Session {
                 let next = match end {
                     // Reconnecting only fails again; say how to drop the old key, but leave that
                     // step to the user, because a changed key is also what an attack looks like.
-                    End::HostKeyChanged => format!(
+                    End::HostKeyChanged { hop } => format!(
                         "If the server was reinstalled, remove its old key and reconnect:\r\n  {}",
-                        forget_key_command(&self.link.spec)
+                        forget_key_command(&self.link.spec, hop.as_ref())
                     ),
                     End::Ended => "Press Enter to reconnect".into(),
                 };
@@ -651,10 +651,13 @@ pub use actions::SessionNote;
 /// A closed tab reconnects on Enter only, so a stray keystroke into a dead tab does not dial
 /// the server again. Enter arrives as CR from both the main and the keypad key.
 /// The `ssh-keygen -R` line that forgets this server's key, in OpenSSH's `[host]:port` form.
-fn forget_key_command(spec: &ConnectSpec) -> String {
-    let host = match spec.port {
-        22 => spec.host.clone(),
-        port => format!("'[{}]:{port}'", spec.host),
+/// The `ssh-keygen -R` line that drops the changed key: the target's, or `hop`'s when a jump
+/// host's key changed. Hops are checked against the same known_hosts file.
+fn forget_key_command(spec: &ConnectSpec, hop: Option<&(String, u16)>) -> String {
+    let (name, port) = hop.map_or((spec.host.as_str(), spec.port), |(h, p)| (h.as_str(), *p));
+    let host = match port {
+        22 => name.to_owned(),
+        port => format!("'[{name}]:{port}'"),
     };
     match &spec.known_hosts {
         Some(path) => format!("ssh-keygen -R {host} -f '{}'", path.display()),
@@ -703,12 +706,21 @@ mod tests {
             known_hosts: None,
             ..Default::default()
         };
-        assert_eq!(forget_key_command(&spec), "ssh-keygen -R '[10.0.0.5]:2222'");
+        assert_eq!(
+            forget_key_command(&spec, None),
+            "ssh-keygen -R '[10.0.0.5]:2222'"
+        );
         spec.port = 22;
         spec.known_hosts = Some("/tmp/kh".into());
         assert_eq!(
-            forget_key_command(&spec),
+            forget_key_command(&spec, None),
             "ssh-keygen -R 10.0.0.5 -f '/tmp/kh'"
+        );
+        // A jump host's key changed: the line drops that hop's key, not the target's.
+        let hop = ("bastion".to_owned(), 2200);
+        assert_eq!(
+            forget_key_command(&spec, Some(&hop)),
+            "ssh-keygen -R '[bastion]:2200' -f '/tmp/kh'"
         );
     }
 

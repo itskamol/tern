@@ -37,6 +37,9 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- A first sync on a Mac with no vault, with a passphrase that does not open the remote's vault, no longer leaves a new local vault under that passphrase behind; before, the right passphrase then failed with "Wrong vault passphrase."
+- When a jump host's key changes, the hint under "connection closed" gives the `ssh-keygen -R` line for that jump host, not for the server behind it.
+- A vault passphrase or PIN that finishes checking only after the vault was locked (the Mac slept meanwhile) leaves the vault shut and says so, instead of opening it.
 - Unlocking from Settings → Vault no longer replaces a vault another tab opened (and saved to) while the unlock ran; like the terminal's unlock, it keeps the open one.
 - A Keychain read still running when the Mac slept or the screen locked (its system dialog left on screen, say) no longer opens the vault once it returns: the lock wins, and the next need asks again.
 - A yes to running a saved password, fill or proxy command now holds for the rest of that tab's session even when `approved-commands.json` cannot be written, so an automatic reconnect does not stop at the question again; before, only the proxy question behaved this way. The password command that runs is always the text the question showed, even if the connection was edited while it was on screen.

@@ -135,9 +135,10 @@ pub enum Disconnect {
     ServerClosed,
     /// The server could not be reached while connecting (refused, no route, no answer).
     Unreachable,
-    /// The server's host key does not match known_hosts. A hard stop: reconnecting only fails
-    /// again, and a changed key is also what an attack looks like.
-    HostKeyChanged,
+    /// A host key does not match known_hosts: the target's, or with `hop` set, that jump
+    /// host's (`host`, `port`). A hard stop: reconnecting only fails again, and a changed key
+    /// is also what an attack looks like.
+    HostKeyChanged { hop: Option<(String, u16)> },
     /// Setup failed for a reason retrying will not fix: login, proxy, bad request.
     Failed,
 }
@@ -194,7 +195,14 @@ impl Cause {
 /// Classifies a failure. `connected` is true once the SSH handshake had finished.
 pub(crate) fn classify(f: &Failure, connected: bool) -> Disconnect {
     match f {
-        Failure::Jump(_, inner) => classify(inner, connected),
+        Failure::Jump(label, inner) => match classify(inner, connected) {
+            Disconnect::HostKeyChanged { hop: None } => Disconnect::HostKeyChanged {
+                hop: label
+                    .rsplit_once(':')
+                    .and_then(|(host, port)| Some((host.to_owned(), port.parse().ok()?))),
+            },
+            other => other,
+        },
         Failure::KeepaliveTimeout => Disconnect::Timeout,
         Failure::Unreachable(_) | Failure::ConnectTimeout => Disconnect::Unreachable,
         Failure::Io(e) => match e.kind() {
@@ -207,7 +215,7 @@ pub(crate) fn classify(f: &Failure, connected: bool) -> Disconnect {
             _ => Disconnect::Unreachable,
         },
         Failure::Transport(_) if connected => Disconnect::ServerClosed,
-        Failure::HostKeyChanged { .. } => Disconnect::HostKeyChanged,
+        Failure::HostKeyChanged { .. } => Disconnect::HostKeyChanged { hop: None },
         _ => Disconnect::Failed,
     }
 }
@@ -232,7 +240,7 @@ mod tests {
             Disconnect::Exited(1),
             Disconnect::Signaled("KILL".into()),
             Disconnect::Local,
-            Disconnect::HostKeyChanged,
+            Disconnect::HostKeyChanged { hop: None },
             Disconnect::Failed,
         ] {
             assert!(!d.is_network(), "{d:?}");
@@ -328,18 +336,20 @@ mod tests {
     fn host_key_and_proxy_setup_failures_are_never_retried() {
         assert_eq!(
             classify(&Failure::HostKeyChanged { line: 1 }, false),
-            Disconnect::HostKeyChanged
+            Disconnect::HostKeyChanged { hop: None }
         );
         assert_eq!(
             classify(
                 &Failure::Jump(
-                    "bastion".into(),
+                    "bastion:2200".into(),
                     Box::new(Failure::HostKeyChanged { line: 2 })
                 ),
                 false
             ),
-            Disconnect::HostKeyChanged,
-            "a jump host's changed key stops the same way"
+            Disconnect::HostKeyChanged {
+                hop: Some(("bastion".into(), 2200))
+            },
+            "a jump host's changed key stops the same way, and names that hop"
         );
         let setup = [
             Failure::HostKeyCheck("unreadable".into()),

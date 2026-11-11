@@ -224,11 +224,32 @@ pub fn sync<V: SyncVault>(
     force: Option<Plan>,
     resolve: &Resolutions,
 ) -> Result<(Outcome, Option<V>), String> {
-    let backend = remote;
+    // A Mac with no vault file yet writes the one it was given, so it travels. Should the
+    // sync then fail (the remote's vault under another passphrase, say), that file goes
+    // again: a vault under a mistyped passphrase must not stay behind and lock the next try
+    // out.
     let vault_path = dir.join(VAULT_FILE);
-    if !vault_path.exists() {
+    let started = !vault_path.exists();
+    if started {
         vault.save(&vault_path)?;
     }
+    let result = sync_saved(dir, remote, vault, passphrase, force, resolve);
+    if started && result.is_err() {
+        let _ = std::fs::remove_file(&vault_path);
+    }
+    result
+}
+
+fn sync_saved<V: SyncVault>(
+    dir: &Path,
+    remote: &dyn Remote,
+    vault: &V,
+    passphrase: Option<&str>,
+    force: Option<Plan>,
+    resolve: &Resolutions,
+) -> Result<(Outcome, Option<V>), String> {
+    let backend = remote;
+    let vault_path = dir.join(VAULT_FILE);
     let local = read_local(dir)?;
     let local_hash = crate::hash(&local);
     let state = load_state(dir);

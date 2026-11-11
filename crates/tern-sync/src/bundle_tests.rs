@@ -121,6 +121,10 @@ fn two_macs_converge_through_any_remote_and_a_wrong_passphrase_takes_nothing() {
         .unwrap_err();
     assert!(err.contains("another passphrase"), "{err}");
     assert!(!b.join(HOSTS_FILE).exists(), "nothing was taken");
+    assert!(
+        !b.join(VAULT_FILE).exists(),
+        "the vault this sync started under the wrong passphrase is not left behind"
+    );
     // Typed, the right passphrase opens it.
     let (out, theirs) = sync(&b, &remote, &fake("other"), Some("pw"), None, &none).unwrap();
     assert!(matches!(out, Outcome::Pulled));

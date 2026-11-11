@@ -27,13 +27,13 @@ impl Status {
 }
 
 /// How a connection ended for good, until the person dials again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum End {
     /// Closed, exited or failed: Enter reconnects.
     Ended,
-    /// The server's host key changed. Never retried by itself: it would only fail again, and a
-    /// changed key is also what an attack looks like.
-    HostKeyChanged,
+    /// A host key changed: the target's, or with `hop` set, that jump host's. Never retried by
+    /// itself: it would only fail again, and a changed key is also what an attack looks like.
+    HostKeyChanged { hop: Option<(String, u16)> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +59,7 @@ pub enum Start {
 }
 
 /// What follows a connection that closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
     /// Count down and dial again at this time.
     RetryAt(Instant),
@@ -136,10 +136,10 @@ impl Lifecycle {
             return Next::RetryAt(at);
         }
         let end = match reason {
-            Disconnect::HostKeyChanged => End::HostKeyChanged,
+            Disconnect::HostKeyChanged { hop } => End::HostKeyChanged { hop: hop.clone() },
             _ => End::Ended,
         };
-        self.phase = Phase::Closed(end);
+        self.phase = Phase::Closed(end.clone());
         Next::Stop(end)
     }
 
@@ -236,7 +236,7 @@ mod tests {
             Disconnect::Exited(255),
             Disconnect::Signaled("KILL".into()),
             Disconnect::Local,
-            Disconnect::HostKeyChanged,
+            Disconnect::HostKeyChanged { hop: None },
             Disconnect::Failed,
         ];
         for r in &network {
@@ -332,8 +332,15 @@ mod tests {
         life.start(false);
         life.connected();
         assert_eq!(
-            life.closed(&Disconnect::HostKeyChanged, Instant::now()),
-            Next::Stop(End::HostKeyChanged)
+            life.closed(
+                &Disconnect::HostKeyChanged {
+                    hop: Some(("bastion".into(), 22))
+                },
+                Instant::now()
+            ),
+            Next::Stop(End::HostKeyChanged {
+                hop: Some(("bastion".into(), 22))
+            })
         );
         assert_eq!(life.retrying(), None);
         assert_eq!(life.status(), Status::Closed);

@@ -102,12 +102,6 @@ pub(super) fn run(
         (None, Some(p)) => Vault::new(SecretString::from(p.to_owned())),
         (None, None) => return (None, Err("The vault is locked.".into())),
     });
-    // A vault started here is on disk before anything else can fail.
-    if !vault_path.exists()
-        && let Err(e) = vault.save(&vault_path)
-    {
-        return (Some(vault.0), Err(e));
-    }
     let result = bundle::remote_for(dir, remote_url)
         .and_then(|remote| bundle::sync(dir, remote.as_ref(), &vault, passphrase, force, resolve));
     match result {

@@ -30,7 +30,7 @@ fn bare_repo(root: &Path) -> String {
 }
 
 /// Real age encryption both ways: a vault created by the first sync, another Mac opening the
-/// remote's vault with the typed passphrase, and a wrong one refused before anything is taken.
+/// remote's vault with the typed passphrase after a wrong one was refused.
 #[test]
 fn a_new_vault_syncs_to_a_second_mac_that_types_its_passphrase() {
     let root = tempfile::tempdir().unwrap();
@@ -62,11 +62,15 @@ fn a_new_vault_syncs_to_a_second_mac_that_types_its_passphrase() {
     assert!(matches!(out, Ok(Outcome::Pushed)));
     assert_eq!(ours.unwrap().len(), 1);
 
-    let c = root.path().join("c");
-    std::fs::create_dir_all(&c).unwrap();
-    let (_, wrong) = run(&c, Some(&url), None, Some("nope"), None, &none);
+    // A mistyped passphrase on a Mac with no vault yet takes nothing and leaves nothing, so
+    // the right one works next.
+    let (_, wrong) = run(&b, Some(&url), None, Some("nope"), None, &none);
     assert!(wrong.unwrap_err().contains("another passphrase"));
-    assert!(!c.join("hosts.json").exists(), "nothing was taken");
+    assert!(!b.join("hosts.json").exists(), "nothing was taken");
+    assert!(
+        !b.join(VAULT_FILE).exists(),
+        "no vault under the wrong passphrase"
+    );
     let (pulled, out) = run(&b, Some(&url), None, Some("pw"), None, &none);
     assert!(matches!(out, Ok(Outcome::Pulled)), "{out:?}");
     assert_eq!(pulled.unwrap().len(), 1, "B holds A's vault");
