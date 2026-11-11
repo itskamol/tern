@@ -75,7 +75,10 @@ impl Shell {
         let Some(tab) = self.tabs.get(ix) else {
             return;
         };
-        let (tab_id, session) = (tab.id, tab.session().clone());
+        let tab_id = tab.id;
+        let Some(session) = tab.session().cloned() else {
+            return;
+        };
         let Some(handle) = session.read(cx).ssh_handle() else {
             return self.notify_toast(
                 ToastKind::Critical,

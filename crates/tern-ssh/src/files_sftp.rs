@@ -2,6 +2,7 @@
 //! work is [`Sftp`]; this maps it to the seam's operations and errors.
 use futures::FutureExt;
 
+use crate::SessionHandle;
 use crate::files::{Call, FileEntry, FileError, FileSource, Reader, Writer};
 use crate::sftp::{Sftp, SftpError};
 
@@ -10,6 +11,9 @@ use crate::sftp::{Sftp, SftpError};
 pub struct SftpFiles {
     id: String,
     sftp: Sftp,
+    /// The connection this source was opened on, when the source owns it: the connection ends
+    /// when the last clone of the source is dropped.
+    _keep: Option<SessionHandle>,
 }
 
 impl SftpFiles {
@@ -18,7 +22,16 @@ impl SftpFiles {
         Self {
             id: id.into(),
             sftp,
+            _keep: None,
         }
+    }
+
+    /// Ties the connection's life to this source (and every clone of it): a copy still using
+    /// the source keeps the connection open after whoever opened it is done.
+    #[must_use]
+    pub fn keeping(mut self, handle: SessionHandle) -> Self {
+        self._keep = Some(handle);
+        self
     }
 
     /// The connection underneath, for closing it.

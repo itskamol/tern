@@ -34,7 +34,7 @@ Hosts, snippets and settings sync to a private Git repository you own, encrypted
 | | |
 | --- | --- |
 | <img src="docs/screenshots/docker.jpg" alt="sudo docker ps with the sudo password filled by ⌘\"><br>**⌘\\ fills `sudo`**: the password comes from your password manager, typed only when you ask and only at a password prompt. | <img src="docs/screenshots/snippets.jpg" alt="The snippets picker filtering docker commands"><br>**Snippets (⇧⌘S)**: saved commands. ↵ marks the ones that run when picked; the rest are typed for you to finish. |
-| <img src="docs/screenshots/split.jpg" alt="Two panes side by side with find in scrollback"><br>**Splits and find**: ⌘D and ⌘⇧D split a tab; ⌘F searches the scrollback. | <img src="docs/screenshots/sftp.jpg" alt="The SFTP side panel listing a remote home folder"><br>**Files (⇧⌘O)**: browse the remote side over SFTP; download, or drop files to upload. |
+| <img src="docs/screenshots/split.jpg" alt="Two panes side by side with find in scrollback"><br>**Splits and find**: ⌘D and ⌘⇧D split a tab; ⌘F searches the scrollback. | <img src="docs/screenshots/sftp.jpg" alt="The SFTP side panel listing a remote home folder"><br>**Files tab (⇧⌘O)**: two panels, the Mac and a host; drag files and folders between them, or drop files from Finder to upload. |
 | <img src="docs/screenshots/settings.jpg" alt="Settings, Appearance, with the wallpaper gallery"><br>**Wallpapers and fonts**: seven public-domain artworks built in, or any image; light, dark or follow macOS; any monospace font. | <img src="docs/screenshots/light.jpg" alt="tern in light appearance over Van Gogh's Wheat Field"><br>**Light and dark**: the window takes its colours from the wallpaper, and body text stays at least 4.5:1 against it. |
 
 ## Also in the box

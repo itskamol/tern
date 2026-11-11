@@ -15,6 +15,12 @@ pub type TabId = u64;
 /// What the tab set needs from a pane: its id in the layout tree.
 pub trait Paned {
     fn pane_id(&self) -> PaneId;
+
+    /// The pane is a session's terminal; the others (the Files tab) are not saved with the tab
+    /// list and are not a host's tab.
+    fn is_session(&self) -> bool {
+        true
+    }
 }
 
 /// Where the tab list is saved: `tabs.json` in the app, a recorder in tests.
@@ -69,6 +75,11 @@ impl<P: Paned> Tab<P> {
     }
 
     /// The focused pane: what the strip shows and what typing reaches.
+    /// A host's tab, as against a Files tab.
+    pub fn is_session(&self) -> bool {
+        self.front().is_session()
+    }
+
     pub fn front(&self) -> &P {
         // `focused` always names a pane and a tab always has one; the first is the fallback.
         self.pane(self.focused).unwrap_or(&self.panes[0])
@@ -211,7 +222,7 @@ impl<P: Paned> TabSet<P> {
     /// (and the connection it dials) is never made for a split that cannot happen.
     pub fn can_split(&self) -> bool {
         self.active_tab()
-            .is_some_and(|tab| tab.tree.contains(tab.focused))
+            .is_some_and(|tab| tab.is_session() && tab.tree.contains(tab.focused))
     }
 
     /// Splits the front tab's focused pane along `axis`; the new pane goes second and takes
@@ -276,9 +287,14 @@ impl<P: Paned> TabSet<P> {
 
     /// What `tabs.json` holds for these tabs.
     pub fn saved(&self) -> SavedTabs {
+        let kept: Vec<&Tab<P>> = self.tabs.iter().filter(|t| t.is_session()).collect();
+        // The slot among the saved tabs: a Files tab in front is saved as the tab before it.
+        let before = self.tabs[..self.active.min(self.tabs.len())]
+            .iter()
+            .filter(|t| t.is_session())
+            .count();
         SavedTabs {
-            tabs: self
-                .tabs
+            tabs: kept
                 .iter()
                 .map(|tab| SavedTab {
                     kind: SavedKind::Ssh {
@@ -287,7 +303,11 @@ impl<P: Paned> TabSet<P> {
                     title: tab.title.clone(),
                 })
                 .collect(),
-            active: self.active,
+            active: if self.active_tab().is_some_and(Tab::is_session) {
+                before
+            } else {
+                before.saturating_sub(1)
+            },
         }
     }
 
@@ -351,6 +371,11 @@ mod tests {
     impl Paned for P {
         fn pane_id(&self) -> PaneId {
             self.0
+        }
+
+        /// Ids from 1000 up stand for a Files tab's pane.
+        fn is_session(&self) -> bool {
+            self.0 < 1000
         }
     }
 
@@ -496,6 +521,28 @@ mod tests {
         assert_eq!(tabs[0].tree().leaves(), [second]);
         assert_eq!(tabs[0].panes(), [P(second)]);
         assert_eq!(tabs.close_pane(), None, "the last pane closes with its tab");
+    }
+
+    #[test]
+    fn a_files_tab_is_not_saved_and_the_saved_slot_skips_it() {
+        let (mut tabs, saves) = set(&["a", "b"]);
+        tabs.open("Files".into(), P(1000));
+        assert_eq!(
+            saves.take(),
+            ["a,b|1"],
+            "in front, it is saved as the tab before it"
+        );
+        tabs.open("c".into(), P(7));
+        assert_eq!(
+            saves.take(),
+            ["a,b,c|2"],
+            "slot 3 here, the third of the saved"
+        );
+        tabs.activate(0);
+        assert_eq!(saves.take(), ["a,b,c|0"]);
+        tabs.activate(2);
+        assert!(!tabs.can_split(), "a Files tab does not split");
+        assert!(!tabs[2].is_session() && tabs[1].is_session());
     }
 
     #[test]

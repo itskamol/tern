@@ -15,6 +15,7 @@ use tern_ssh::HostEntry;
 
 use crate::chrome::{self, DragGhost, SidebarResize, WidthTween};
 use crate::connections::{self, Connection};
+use crate::indicator::Dot;
 use crate::picker::{self, Picker, ToggleHostPicker};
 use crate::session::{Launch, Session, Status};
 use crate::settings::{self, SIDEBAR_DEFAULT, Settings};
@@ -29,6 +30,7 @@ actions!(
     tern,
     [
         ToggleSidebar,
+        OpenFiles,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
@@ -46,6 +48,8 @@ actions!(
 
 #[path = "shell_broadcast.rs"]
 mod broadcast_ui;
+#[path = "shell_files.rs"]
+mod files_ui;
 #[path = "shell_forwards.rs"]
 mod forwards_ui;
 #[path = "shell_sftp.rs"]
@@ -149,6 +153,12 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 broadcast: None,
                 broadcast_picker: None,
                 panels: Default::default(),
+                transfers: cx.new(|cx| {
+                    crate::transfers::Transfers::new(crate::platform::SshRuntime::handle(cx), cx)
+                }),
+                quit_ask: false,
+                conflict_all: false,
+                _transfers_sub: None,
                 error: None,
                 picker: None,
                 sidebar_tween: None,
@@ -174,8 +184,19 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 _clock: None,
             };
             shell.refresh_hosts();
+            shell._transfers_sub = Some(cx.subscribe(
+                &shell.transfers,
+                |s, _, done: &crate::transfers::Finished, cx| s.on_transfer_finished(done, cx),
+            ));
             shell
         })
+    })?;
+    window.update(cx, |_, window, cx| {
+        // The close button asks first when copies are running.
+        let shell = cx.entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            shell.update(cx, |s, cx| s.close_allowed(cx))
+        });
     })?;
     window.update(cx, |shell, window, cx| {
         shell.reapply(settings::Reapply::all(), cx);
@@ -186,8 +207,13 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
             crate::platform::apply_reduce_motion(shell.settings.reduce_motion, cx);
             shell.sync_display_preferences(cx);
             if window.is_window_active() {
-                for pane in shell.tabs.iter().flat_map(|t| t.panes()) {
-                    pane.session.update(cx, |s, cx| s.nudge(cx));
+                for session in shell
+                    .tabs
+                    .iter()
+                    .flat_map(|t| t.panes())
+                    .filter_map(Pane::session)
+                {
+                    session.update(cx, |s, cx| s.nudge(cx));
                 }
             }
         })
@@ -238,6 +264,14 @@ pub struct Shell {
     broadcast: Option<broadcast_ui::Broadcast>,
     broadcast_picker: Option<broadcast_ui::BroadcastPicker>,
     panels: forwards_ui::Panels,
+    /// The copies in progress: the queue is the shell's, so closing a Files tab does not stop
+    /// one.
+    transfers: Entity<crate::transfers::Transfers>,
+    /// Quitting with copies running is being asked about.
+    quit_ask: bool,
+    /// The conflict sheet's "apply to all" box.
+    conflict_all: bool,
+    _transfers_sub: Option<Subscription>,
     error: Option<String>,
     picker: Option<Picker>,
     sidebar_tween: Option<WidthTween>,
@@ -269,7 +303,7 @@ pub struct Shell {
 
 /// Debug builds: keep scripted logins out of the real ~/.ssh/known_hosts.
 #[cfg(debug_assertions)]
-fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
+pub(crate) fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
     ConnectSpec {
         known_hosts: std::env::var_os("TERN_KNOWN_HOSTS")
             .map(Into::into)
@@ -278,9 +312,19 @@ fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
     }
 }
 
-/// One terminal in a tab: a connection.
+/// One pane in a tab: a terminal on a connection, or the Files tab's two panels.
 struct Pane {
     id: PaneId,
+    content: Content,
+}
+
+enum Content {
+    Session(TermPane),
+    Files(Entity<crate::files_tab::FilesView>),
+}
+
+/// A terminal: a connection.
+struct TermPane {
     session: Entity<Session>,
     _repaint: Subscription,
     _bell: Subscription,
@@ -293,12 +337,39 @@ impl Paned for Pane {
     fn pane_id(&self) -> PaneId {
         self.id
     }
+
+    fn is_session(&self) -> bool {
+        matches!(self.content, Content::Session(_))
+    }
+}
+
+impl Pane {
+    /// The pane's session; a Files tab has none.
+    fn session(&self) -> Option<&Entity<Session>> {
+        match &self.content {
+            Content::Session(t) => Some(&t.session),
+            Content::Files(_) => None,
+        }
+    }
+
+    /// What the keyboard goes to when the pane is in front.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match &self.content {
+            Content::Session(t) => t.session.read(cx).view.focus_handle(cx),
+            Content::Files(f) => f.read(cx).focus.clone(),
+        }
+    }
 }
 
 impl Tab {
-    /// The focused pane's session: what the strip shows and what typing reaches.
-    fn session(&self) -> &Entity<Session> {
-        &self.front().session
+    /// The focused pane's session: what the strip shows and what typing reaches. A Files tab
+    /// has none.
+    fn session(&self) -> Option<&Entity<Session>> {
+        self.front().session()
+    }
+
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.front().focus_handle(cx)
     }
 }
 
@@ -399,7 +470,7 @@ impl Shell {
     /// Focus back to the active terminal, or the window when there is none.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = match self.tabs.active_tab() {
-            Some(tab) => tab.session().read(cx).view.focus_handle(cx),
+            Some(tab) => tab.focus_handle(cx),
             None => self.focus.clone(),
         };
         window.focus(&focus, cx);
@@ -434,12 +505,9 @@ impl Shell {
             .map(|(ix, tab)| TabInfo {
                 alias: tab.alias.clone(),
                 title: tab.title().map(str::to_owned),
-                logging: tab.session().read(cx).is_logging(),
+                logging: tab.session().is_some_and(|s| s.read(cx).is_logging()),
                 broadcast: self.is_broadcasting(tab.id),
-                dot: {
-                    let s = tab.session().read(cx);
-                    s.dot()
-                },
+                dot: tab.session().map_or(Dot::Idle, |s| s.read(cx).dot()),
                 rename: self
                     .renaming
                     .as_ref()
@@ -648,6 +716,7 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &ToggleSnippets, w, cx| s.toggle_snippet_picker(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
             .on_action(cx.listener(|s, _: &ToggleSftp, w, cx| s.toggle_sftp(w, cx)))
+            .on_action(cx.listener(|s, _: &OpenFiles, w, cx| s.open_files_tab(None, w, cx)))
             .on_action(cx.listener(|s, _: &FillPassword, _, cx| s.fill_password(cx)))
             .on_action(cx.listener(|s, _: &ClearTerminal, _, cx| s.clear_terminal(cx)))
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
@@ -732,6 +801,8 @@ impl Render for Shell {
             .when_some(context_menu, |el, m| el.child(m))
             .when_some(self.render_broadcast_picker(cx), |el, p| el.child(p))
             .children(self.render_panels(window, cx))
+            .children(self.render_conflict_sheet(window, cx))
+            .children(self.render_quit_sheet(window, cx))
             .when_some(toast, |el, t| el.child(t))
             .when_some(self.picker.as_ref(), |el, p| {
                 el.child(picker::render(

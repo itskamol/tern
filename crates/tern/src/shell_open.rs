@@ -7,8 +7,8 @@
 use crate::split::{Axis, Direction, Node, PaneId};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Focusable, InteractiveElement, IntoElement, ParentElement, Styled, Window,
-    div, px, transparent_black,
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div, px,
+    transparent_black,
 };
 use tern_ssh::{ConnectSpec, HostEntry};
 
@@ -19,13 +19,18 @@ impl Shell {
     /// a new tab.
     pub fn connect_host(&mut self, host: HostEntry, window: &mut Window, cx: &mut Context<Self>) {
         self.record_recent(&host.alias);
-        if let Some(ix) = self.tabs.iter().position(|tab| tab.alias == host.alias) {
-            let session = self.tabs[ix].session().clone();
-            session.update(cx, |s, cx| {
-                if s.status().is_dormant() {
-                    s.reconnect(cx);
-                }
-            });
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.is_session() && tab.alias == host.alias)
+        {
+            if let Some(session) = self.tabs[ix].session().cloned() {
+                session.update(cx, |s, cx| {
+                    if s.status().is_dormant() {
+                        s.reconnect(cx);
+                    }
+                });
+            }
             return self.show_tab(ix, window, cx);
         }
         match ConnectSpec::from_host_entry(&host) {
@@ -104,7 +109,7 @@ impl Shell {
                     let ix = shell
                         .tabs
                         .iter()
-                        .position(|t| t.panes().iter().any(|p| p.session == session));
+                        .position(|t| t.panes().iter().any(|p| p.session() == Some(&session)));
                     if let Some(ix) =
                         ix.filter(|ix| *ix != shell.tabs.active() || shell.settings_page.is_some())
                     {
@@ -112,7 +117,11 @@ impl Shell {
                         shell.toast(
                             Toast::new(ToastKind::Critical, format!("{alias} disconnected"))
                                 .action("Show", move |s, window, cx| {
-                                    if let Some(ix) = s.tabs.iter().position(|t| t.alias == alias) {
+                                    if let Some(ix) = s
+                                        .tabs
+                                        .iter()
+                                        .position(|t| t.is_session() && t.alias == alias)
+                                    {
                                         s.show_tab(ix, window, cx);
                                     }
                                 }),
@@ -131,10 +140,12 @@ impl Shell {
         );
         Pane {
             id: self.tabs.new_pane_id(),
-            session,
-            _repaint: repaint,
-            _bell: bell,
-            _notes: notes,
+            content: Content::Session(TermPane {
+                session,
+                _repaint: repaint,
+                _bell: bell,
+                _notes: notes,
+            }),
         }
     }
 
@@ -156,7 +167,7 @@ impl Shell {
         self.tab_scroll.reveal(self.tabs.active());
         // Behind Settings the terminal is hidden, and keys sent to it would be typed blind.
         if self.settings_page.is_none() {
-            let focus = tab.session().read(cx).view.focus_handle(cx);
+            let focus = tab.focus_handle(cx);
             window.focus(&focus, cx);
         }
         self.apply_broadcast(cx);
@@ -217,7 +228,10 @@ impl Shell {
         let Some(tab) = self.tabs.active_tab().filter(|_| self.tabs.can_split()) else {
             return;
         };
-        let launch = tab.session().read(cx).launch_again();
+        let Some(session) = tab.session() else {
+            return;
+        };
+        let launch = session.read(cx).launch_again();
         let alias = tab.alias.clone();
         let pane = self.make_pane(launch, &alias, window, cx);
         if self.tabs.split(axis, pane).is_ok() {
@@ -255,7 +269,7 @@ impl Shell {
     /// Gives the keyboard to the focused pane of the front tab, and points a broadcast at it.
     fn focus_front_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.active_tab() {
-            let focus = tab.session().read(cx).view.focus_handle(cx);
+            let focus = tab.focus_handle(cx);
             window.focus(&focus, cx);
         }
         self.apply_broadcast(cx);
@@ -296,9 +310,13 @@ impl Shell {
                     // Before the terminal sees the click, so selecting text in a pane also
                     // gives it the keyboard.
                     .capture_any_mouse_down(cx.listener(move |s, _, w, cx| s.focus_pane(id, w, cx)))
-                    .child(tern_term::TerminalView::cached_child(
-                        &pane.session.read(cx).view,
-                    ))
+                    .child(match &pane.content {
+                        Content::Session(term) => {
+                            tern_term::TerminalView::cached_child(&term.session.read(cx).view)
+                                .into_any_element()
+                        }
+                        Content::Files(files) => files.clone().into_any_element(),
+                    })
                     .into_any_element()
             }
             Node::Split {

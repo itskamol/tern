@@ -4,6 +4,15 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- A Files tab (⇧⌘O) with two panels side by side, each the Mac's own files or one host's. A host panel uses an open session's connection, or connects by itself and asks the host key, password and vault questions in the panel. Files and whole folders copy by dragging between panels or with Copy, also host to host; either panel can make a folder, rename and delete (the Mac's go to the Trash, a host's cannot be undone). Files dragged in from Finder upload to the panel they are dropped on.
+- Copies are written as `name.part` and renamed when whole, removed on cancel or failure. A transfer list shows progress, speed and time left with Cancel and Cancel all; at most two copies run at once and one per destination host. A name that is already taken asks Replace, Keep both or Skip, with "apply to all". Copies keep going after the tab is closed, and quitting with copies running asks first.
+
+### Removed
+
+- The SFTP side panel and its Browse files shortcut slot: ⇧⌘O now opens the Files tab, which does what the panel did and more.
+
 ## [0.2.0] - 2026-11-11
 
 ### Added

@@ -13,6 +13,7 @@ use gpui::{
 #[path = "shell_settings_nav.rs"]
 mod nav;
 
+use super::Pane;
 use super::Shell;
 use crate::keymap::{Keymap, Record, ShortcutId, badge, record};
 use crate::settings::{self, AppearanceMode, FONT_DEFAULT, FONT_MAX, FONT_MIN, Settings};
@@ -114,8 +115,13 @@ impl Shell {
         }
         if what.terminal_options {
             let options = self.terminal_options();
-            for pane in self.tabs.iter().flat_map(|t| t.panes()) {
-                let view = pane.session.read(cx).view.clone();
+            for session in self
+                .tabs
+                .iter()
+                .flat_map(|t| t.panes())
+                .filter_map(Pane::session)
+            {
+                let view = session.read(cx).view.clone();
                 view.update(cx, |v, cx| v.set_options(options.clone(), cx));
             }
         }
@@ -130,8 +136,8 @@ impl Shell {
     pub(super) fn apply_option_as_meta(&self, cx: &mut Context<Self>) {
         let on = self.settings.option_as_meta;
         for tab in &self.tabs {
-            for pane in tab.panes() {
-                let view = pane.session.read(cx).view.clone();
+            for session in tab.panes().iter().filter_map(Pane::session) {
+                let view = session.read(cx).view.clone();
                 view.update(cx, |v, _| v.set_option_as_meta(on));
             }
         }

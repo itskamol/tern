@@ -20,7 +20,7 @@ use crate::keeper::Keeper;
 use crate::password_command::Auth as LinkAuth;
 use crate::platform::SshRuntime;
 
-const PASSWORD: &str = "hunter2";
+pub(crate) const PASSWORD: &str = "hunter2";
 const PROMPT: &str = "test@demo:~$ ";
 
 #[derive(Clone)]
@@ -77,7 +77,7 @@ impl server::Handler for OnePassword {
 }
 
 /// A server on 127.0.0.1 taking only [`PASSWORD`], on its own runtime (kept alive by the caller).
-fn serve() -> (tokio::runtime::Runtime, u16) {
+pub(crate) fn serve() -> (tokio::runtime::Runtime, u16) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()

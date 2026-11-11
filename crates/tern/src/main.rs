@@ -7,6 +7,9 @@ mod connections;
 #[cfg(debug_assertions)]
 mod devkeys;
 mod empty_state;
+mod files_model;
+mod files_tab;
+mod files_tab_view;
 mod forward_spec;
 mod host_history;
 mod hover;
@@ -18,6 +21,7 @@ mod keymap;
 mod lifecycle;
 mod lock_on_sleep;
 mod login;
+mod panel_login;
 mod password_command;
 mod picker;
 mod platform;
@@ -38,6 +42,7 @@ mod tabs_store;
 mod text_input;
 mod theme;
 mod theme_tint;
+mod transfers;
 #[cfg(target_os = "macos")]
 mod updater;
 mod vault_pin;
