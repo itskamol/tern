@@ -8,6 +8,7 @@
 //! Deciding what to do needs no network: compare the local and remote bundle hashes with the
 //! hash both sides had at the last sync ([`decide`]).
 
+pub mod bundle;
 mod github;
 mod gitrepo;
 mod merge;
