@@ -45,6 +45,10 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 tempfile = "3"
 # Layout and scroll tests drive a real gpui window through its test platform.
 gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
+# Session scenario tests log in to an in-process SSH server; the versions tern-ssh already uses.
+russh = "0.64"
+rand = { version = "0.10", features = ["thread_rng"] }
+tokio = { version = "1", features = ["net", "macros"] }
 
 [lints]
 workspace = true

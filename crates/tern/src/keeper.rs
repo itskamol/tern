@@ -57,6 +57,22 @@ fn ordered<T>(written: &Mutex<u64>, ticket: u64, write: impl FnOnce() -> T) -> O
 }
 
 impl Keeper {
+    /// A keeper over the vault file at `path`, locked, with the Keychain and PIN off: what a
+    /// session scenario test starts from.
+    #[cfg(test)]
+    pub(crate) fn install_at(path: PathBuf, cx: &mut App) {
+        cx.set_global(Self {
+            path: Some(path),
+            open: None,
+            keychain: false,
+            gate: Gate::default(),
+            keychain_current: false,
+            ticket: 0,
+            pin: false,
+            locks: 0,
+        });
+    }
+
     pub fn install(keychain: bool, cx: &mut App) {
         let path = crate::settings::dir().map(|d| d.join("vault.age"));
         cx.set_global(Self {

@@ -670,6 +670,10 @@ fn wants_reconnect(input: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+#[path = "session_scenario_tests.rs"]
+mod scenario_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{HELD_MAX, Held, forget_key_command, wants_reconnect};
     use tern_ssh::ConnectSpec;
