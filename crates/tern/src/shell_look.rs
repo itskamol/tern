@@ -43,18 +43,21 @@ impl Shell {
     /// Rebuilds the palette after one of its inputs changed (appearance, a display
     /// preference, the wallpaper or its settings). When it is different, everything that holds
     /// a colour is restyled once: open terminals, text fields, the window.
-    pub(crate) fn retheme(&mut self, cx: &mut Context<Self>) {
-        self.retheme_with(self.look(), cx);
+    /// Returns whether it changed (and so restyled).
+    pub(crate) fn retheme(&mut self, cx: &mut Context<Self>) -> bool {
+        self.retheme_with(self.look(), cx)
     }
 
-    fn retheme_with(&mut self, look: Look, cx: &mut Context<Self>) {
+    fn retheme_with(&mut self, look: Look, cx: &mut Context<Self>) -> bool {
         let next = Theme::resolve(look);
-        if next != self.theme {
-            self.theme = next;
-            self.install_input_colors(cx);
-            self.restyle_tabs(cx);
-            cx.notify();
+        if next == self.theme {
+            return false;
         }
+        self.theme = next;
+        self.install_input_colors(cx);
+        self.restyle_tabs(cx);
+        cx.notify();
+        true
     }
 
     /// Reads macOS's Increase contrast and Reduce transparency; a change rebuilds the palette
@@ -104,15 +107,6 @@ impl Shell {
                 view.update(cx, |v, cx| v.set_theme(theme, cx));
             }
         }
-    }
-
-    pub(super) fn change_font(
-        &mut self,
-        change: impl FnOnce(&mut Settings),
-        cx: &mut Context<Self>,
-    ) {
-        self.update_settings(change, cx);
-        self.restyle_tabs(cx);
     }
 
     /// Background of the main panel: the active tab's scheme, so no seam shows around it.

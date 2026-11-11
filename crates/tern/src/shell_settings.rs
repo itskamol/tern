@@ -15,7 +15,7 @@ mod nav;
 
 use super::Shell;
 use crate::keymap::{Keymap, Record, ShortcutId, badge, record};
-use crate::settings::{AppearanceMode, FONT_DEFAULT, FONT_MAX, FONT_MIN};
+use crate::settings::{self, AppearanceMode, FONT_DEFAULT, FONT_MAX, FONT_MIN, Settings};
 use crate::settings_widgets as w;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +78,62 @@ impl Section {
             Section::Vault => "nav-vault",
             Section::Sync => "nav-sync",
             Section::About => "nav-about",
+        }
+    }
+}
+
+impl Shell {
+    /// Changes, saves and applies settings: whatever the change needs re-applied to the running
+    /// app (palette, open terminals, motion) is, here, so no caller has to remember it.
+    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        let old = self.settings.clone();
+        change(&mut self.settings);
+        self.settings = self.settings.clone().clamped();
+        self.save_settings();
+        self.reapply(old.reapply(&self.settings), cx);
+        cx.notify();
+    }
+
+    pub(super) fn save_settings(&self) {
+        if let Some(dir) = settings::dir()
+            && let Err(e) = self.settings.save(&dir)
+        {
+            tracing::warn!(error = %e, "settings_save_failed");
+        }
+    }
+
+    /// Applies what a settings change asks for: at launch everything, after a change or a sync
+    /// reload what [`Settings::reapply`] found.
+    pub(crate) fn reapply(&mut self, what: settings::Reapply, cx: &mut Context<Self>) {
+        if what.motion {
+            crate::platform::apply_reduce_motion(self.settings.reduce_motion, cx);
+        }
+        let restyled = what.palette && self.retheme(cx);
+        if what.terminal_style && !restyled {
+            self.restyle_tabs(cx);
+        }
+        if what.terminal_options {
+            let options = self.terminal_options();
+            for pane in self.tabs.iter().flat_map(|t| t.panes()) {
+                let view = pane.session.read(cx).view.clone();
+                view.update(cx, |v, cx| v.set_options(options.clone(), cx));
+            }
+        }
+        if what.option_as_meta {
+            self.apply_option_as_meta(cx);
+        }
+        if what.reopen_tabs {
+            self.tabs.set_saving(self.settings.reopen_tabs);
+        }
+    }
+
+    pub(super) fn apply_option_as_meta(&self, cx: &mut Context<Self>) {
+        let on = self.settings.option_as_meta;
+        for tab in &self.tabs {
+            for pane in tab.panes() {
+                let view = pane.session.read(cx).view.clone();
+                view.update(cx, |v, _| v.set_option_as_meta(on));
+            }
         }
     }
 }
@@ -176,16 +232,14 @@ impl Shell {
                 .items_center()
                 .gap(px(6.))
                 .child(minus.on_click(
-                    cx.listener(|s, _, _, cx| s.change_font(|st| st.step_font(-1.0), cx)),
+                    cx.listener(|s, _, _, cx| s.update_settings(|st| st.step_font(-1.0), cx)),
                 ))
                 .child(value)
-                .child(
-                    plus.on_click(
-                        cx.listener(|s, _, _, cx| s.change_font(|st| st.step_font(1.0), cx)),
-                    ),
-                )
+                .child(plus.on_click(
+                    cx.listener(|s, _, _, cx| s.update_settings(|st| st.step_font(1.0), cx)),
+                ))
                 .child(w::button(&t, "font-reset", "Reset").on_click(cx.listener(
-                    |s, _, _, cx| s.change_font(|st| st.terminal_font_size = FONT_DEFAULT, cx),
+                    |s, _, _, cx| s.update_settings(|st| st.terminal_font_size = FONT_DEFAULT, cx),
                 )));
         let reduce = self.settings.reduce_motion;
         let show_status = self.settings.show_status_line;
@@ -204,7 +258,6 @@ impl Shell {
                     })
                     .on_click(cx.listener(move |s, _, _, cx| {
                         s.update_settings(|st| st.appearance = mode, cx);
-                        s.retheme(cx);
                     })),
             );
         }
@@ -306,7 +359,6 @@ impl Shell {
                         .cursor_pointer()
                         .on_click(cx.listener(|s, _, _, cx| {
                             s.update_settings(|st| st.reduce_motion = !st.reduce_motion, cx);
-                            crate::platform::apply_reduce_motion(s.settings.reduce_motion, cx);
                         }))
                         .child(w::toggle(&t, reduce, "reduce-motion")),
                 )),

@@ -472,10 +472,8 @@ impl Shell {
         let Some(dir) = crate::settings::dir() else {
             return;
         };
-        self.settings = crate::settings::Settings::load(&dir);
-        self.tabs.set_saving(self.settings.reopen_tabs);
-        crate::platform::apply_reduce_motion(self.settings.reduce_motion, cx);
-        self.retheme(cx);
+        let old = std::mem::replace(&mut self.settings, crate::settings::Settings::load(&dir));
+        self.reapply(old.reapply(&self.settings), cx);
         cx.set_global(crate::keymap::Keymap::load(&dir));
         crate::keymap::apply(cx);
         match crate::connections::load(&dir) {
@@ -486,8 +484,6 @@ impl Shell {
             Err(e) => self.store_error = Some(e.to_string()),
         }
         self.refresh_hosts();
-        self.restyle_tabs(cx);
-        self.apply_option_as_meta(cx);
     }
 
     pub(super) fn sync_page(&self, cx: &mut Context<Self>) -> gpui::Div {

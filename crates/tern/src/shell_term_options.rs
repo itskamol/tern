@@ -34,18 +34,6 @@ impl Shell {
 
     pub(super) fn set_terminal_font(&mut self, family: Option<String>, cx: &mut Context<Self>) {
         self.update_settings(|st| st.terminal_font_family = family, cx);
-        self.restyle_tabs(cx);
-    }
-
-    fn change_terminal(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        self.update_settings(change, cx);
-        let options = self.terminal_options();
-        for tab in &self.tabs {
-            for pane in tab.panes() {
-                let view = pane.session.read(cx).view.clone();
-                view.update(cx, |v, cx| v.set_options(options.clone(), cx));
-            }
-        }
     }
 
     /// BEL from a session bounces the Dock icon while tern is behind other apps (macOS only
@@ -93,7 +81,7 @@ impl Shell {
                 .id(id)
                 .switch(label, on)
                 .cursor_pointer()
-                .on_click(cx.listener(move |shell, _, _, cx| shell.change_terminal(flip, cx)))
+                .on_click(cx.listener(move |shell, _, _, cx| shell.update_settings(flip, cx)))
                 .child(w::toggle(&t, on, id))
         };
         let meta = div()
@@ -102,7 +90,6 @@ impl Shell {
             .cursor_pointer()
             .on_click(cx.listener(|s, _, _, cx| {
                 s.update_settings(|st| st.option_as_meta = !st.option_as_meta, cx);
-                s.apply_option_as_meta(cx);
             }))
             .child(w::toggle(&t, s.option_as_meta, "option-meta"));
 
@@ -121,7 +108,7 @@ impl Shell {
                     .when(selected, |el| el.bg(t.ink(0.16)).text_color(t.text))
                     .when(!selected, |el| el.text_color(t.muted))
                     .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.change_terminal(|st| st.cursor_style = style, cx)
+                        shell.update_settings(|st| st.cursor_style = style, cx)
                     })),
             );
         }
@@ -134,11 +121,11 @@ impl Shell {
             .items_center()
             .gap(px(6.))
             .child(minus.on_click(cx.listener(|shell, _, _, cx| {
-                shell.change_terminal(|st| st.step_scrollback(false), cx)
+                shell.update_settings(|st| st.step_scrollback(false), cx)
             })))
             .child(value)
             .child(plus.on_click(cx.listener(|shell, _, _, cx| {
-                shell.change_terminal(|st| st.step_scrollback(true), cx)
+                shell.update_settings(|st| st.step_scrollback(true), cx)
             })));
 
         let reopen = div()
@@ -146,7 +133,6 @@ impl Shell {
             .cursor_pointer()
             .on_click(cx.listener(|s, _, _, cx| {
                 s.update_settings(|st| st.reopen_tabs = !st.reopen_tabs, cx);
-                s.tabs.set_saving(s.settings.reopen_tabs);
             }))
             .child(w::toggle(&t, s.reopen_tabs, "reopen-tabs"));
 

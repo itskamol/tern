@@ -177,7 +177,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
         })
     })?;
     window.update(cx, |shell, window, cx| {
-        crate::platform::apply_reduce_motion(shell.settings.reduce_motion, cx);
+        shell.reapply(settings::Reapply::all(), cx);
         shell.sync_display_preferences(cx);
         // macOS posts no notification gpui forwards, so re-read the preference whenever tern
         // comes to the front: the user changes it in System Settings, then switches back.
@@ -319,17 +319,6 @@ impl Shell {
     }
 
     /// Applies a settings change and writes it out; a failed write is logged, not fatal.
-    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        change(&mut self.settings);
-        self.settings = self.settings.clone().clamped();
-        if let Some(dir) = settings::dir()
-            && let Err(e) = self.settings.save(&dir)
-        {
-            tracing::warn!(error = %e, "settings_save_failed");
-        }
-        cx.notify();
-    }
-
     fn sidebar_target(&self) -> f32 {
         if self.settings.sidebar_collapsed {
             0.0
@@ -392,7 +381,7 @@ impl Shell {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|shell, _, _, cx| shell.update_settings(|_| {}, cx)),
+                cx.listener(|shell, _, _, _| shell.save_settings()),
             )
     }
 
@@ -412,16 +401,6 @@ impl Shell {
         };
         window.focus(&focus, cx);
         cx.notify();
-    }
-
-    fn apply_option_as_meta(&self, cx: &mut Context<Self>) {
-        let on = self.settings.option_as_meta;
-        for tab in &self.tabs {
-            for pane in tab.panes() {
-                let view = pane.session.read(cx).view.clone();
-                view.update(cx, |v, _| v.set_option_as_meta(on));
-            }
-        }
     }
 
     pub fn hosts(&self) -> &[HostEntry] {
@@ -700,13 +679,13 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|s, _: &IncreaseFontSize, _, cx| {
-                s.change_font(|st| st.step_font(1.0), cx)
+                s.update_settings(|st| st.step_font(1.0), cx)
             }))
             .on_action(cx.listener(|s, _: &DecreaseFontSize, _, cx| {
-                s.change_font(|st| st.step_font(-1.0), cx)
+                s.update_settings(|st| st.step_font(-1.0), cx)
             }))
             .on_action(cx.listener(|s, _: &ResetFontSize, _, cx| {
-                s.change_font(|st| st.terminal_font_size = settings::FONT_DEFAULT, cx)
+                s.update_settings(|st| st.terminal_font_size = settings::FONT_DEFAULT, cx)
             }))
             .on_drag_move(
                 cx.listener(|s, e: &gpui::DragMoveEvent<SidebarResize>, _, cx| {

@@ -153,8 +153,10 @@ impl Shell {
                 self.wp.failed = Some(want);
             }
         }
-        self.retheme(cx);
-        self.restyle_tabs(cx);
+        // The panel alpha follows the picture even when the palette does not.
+        if !self.retheme(cx) {
+            self.restyle_tabs(cx);
+        }
         cx.notify();
     }
 
@@ -426,8 +428,6 @@ impl Shell {
                         |st| st.wallpaper_fills_window = !st.wallpaper_fills_window,
                         cx,
                     );
-                    s.retheme(cx);
-                    s.restyle_tabs(cx);
                 }))
                 .child(w::toggle(&t, fills, "wallpaper-fills")),
         ))
@@ -447,7 +447,6 @@ impl Shell {
                         |st| st.wallpaper_theme_colors = !st.wallpaper_theme_colors,
                         cx,
                     );
-                    s.retheme(cx);
                 }))
                 .child(w::toggle(&t, on, "wallpaper-colours")),
         ))

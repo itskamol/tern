@@ -173,7 +173,72 @@ impl Default for Settings {
     }
 }
 
+/// What a change of settings needs re-applied to the running app. Anything not named here is
+/// read where it is used (at render, or when the next tab opens) and needs nothing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Reapply {
+    /// The app's reduced-motion flag.
+    pub motion: bool,
+    /// The palette: appearance, and the wallpaper's part in it.
+    pub palette: bool,
+    /// Open terminals' font, colour scheme and see-through background.
+    pub terminal_style: bool,
+    /// Open terminals' cursor, scrollback, selection, bell and clipboard behaviour.
+    pub terminal_options: bool,
+    pub option_as_meta: bool,
+    /// Whether the tab list is saved.
+    pub reopen_tabs: bool,
+}
+
+impl Reapply {
+    /// Everything, as at launch.
+    pub fn all() -> Self {
+        Self {
+            motion: true,
+            palette: true,
+            terminal_style: true,
+            terminal_options: true,
+            option_as_meta: true,
+            reopen_tabs: true,
+        }
+    }
+}
+
 impl Settings {
+    /// What going from these settings to `new` needs re-applied.
+    pub fn reapply(&self, new: &Settings) -> Reapply {
+        let fill = (self.wallpaper_fills_window, self.wallpaper_theme_colors)
+            != (new.wallpaper_fills_window, new.wallpaper_theme_colors);
+        Reapply {
+            motion: self.reduce_motion != new.reduce_motion,
+            palette: self.appearance != new.appearance || fill,
+            terminal_style: fill
+                || self.terminal_font_size != new.terminal_font_size
+                || self.terminal_font_family != new.terminal_font_family
+                || self.terminal_theme != new.terminal_theme
+                || self.host_themes != new.host_themes,
+            terminal_options: (
+                self.cursor_style,
+                self.cursor_blink,
+                self.scrollback_lines,
+                self.copy_on_select,
+                self.middle_click_paste,
+                self.visual_bell,
+                self.clipboard_write,
+            ) != (
+                new.cursor_style,
+                new.cursor_blink,
+                new.scrollback_lines,
+                new.copy_on_select,
+                new.middle_click_paste,
+                new.visual_bell,
+                new.clipboard_write,
+            ),
+            option_as_meta: self.option_as_meta != new.option_as_meta,
+            reopen_tabs: self.reopen_tabs != new.reopen_tabs,
+        }
+    }
+
     /// Missing file → defaults. A file that does not parse is logged and replaced by defaults
     /// rather than stopping the app; fields it lacks take their defaults.
     pub fn load(dir: &Path) -> Self {
@@ -636,5 +701,83 @@ mod tests {
         assert_eq!(s.terminal_font_size, FONT_MIN);
         s.terminal_font_size = 99.0;
         assert_eq!(s.clamped().terminal_font_size, FONT_MAX);
+    }
+
+    #[test]
+    fn a_change_names_only_what_it_needs_re_applied() {
+        let old = Settings::default();
+        let with = |f: fn(&mut Settings)| {
+            let mut new = old.clone();
+            f(&mut new);
+            old.reapply(&new)
+        };
+        assert_eq!(old.reapply(&old), Reapply::default());
+        assert_eq!(
+            with(|s| s.reduce_motion = !s.reduce_motion),
+            Reapply {
+                motion: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.appearance = AppearanceMode::Light),
+            Reapply {
+                palette: true,
+                ..Reapply::default()
+            }
+        );
+        // The wallpaper filling the window changes the palette and the terminals' background.
+        assert_eq!(
+            with(|s| s.wallpaper_fills_window = !s.wallpaper_fills_window),
+            Reapply {
+                palette: true,
+                terminal_style: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.terminal_font_size += 1.0),
+            Reapply {
+                terminal_style: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| {
+                s.host_themes.insert("web".into(), "Dracula".into());
+            }),
+            Reapply {
+                terminal_style: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.scrollback_lines += 1000),
+            Reapply {
+                terminal_options: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.option_as_meta = !s.option_as_meta),
+            Reapply {
+                option_as_meta: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.reopen_tabs = !s.reopen_tabs),
+            Reapply {
+                reopen_tabs: true,
+                ..Reapply::default()
+            }
+        );
+        // Read where they are used: nothing to re-apply.
+        assert_eq!(with(|s| s.sidebar_width += 10.0), Reapply::default());
+        assert_eq!(
+            with(|s| s.log_sessions = !s.log_sessions),
+            Reapply::default()
+        );
+        assert_eq!(with(|s| s.vault_lock_minutes = 5), Reapply::default());
     }
 }
