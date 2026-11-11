@@ -114,7 +114,7 @@ impl Planner {
             if item.is_symlink && item.is_dir && depth > 0 {
                 // A link to a folder inside a folder could lead back to it; copying it as a
                 // folder could never end.
-                return self.inner.note(self.batch, None);
+                return self.inner.note_link(self.batch);
             }
             if item.is_dir
                 && self.same_place()
@@ -268,14 +268,38 @@ async fn copy_through(
         () = stopped(stop) => return Err(Stopped::Cancelled),
     }
     drop(reader);
-    if job.replace {
-        match job.to.delete(&job.dest).await {
+    if !job.replace {
+        return job
+            .to
+            .rename(part, &job.dest)
+            .await
+            .map_err(|e| Stopped::Failed(e.to_string()));
+    }
+    let aside = aside_name(&job.dest);
+    let moved_aside = match job.to.rename(&job.dest, &aside).await {
+        Ok(()) => true,
+        Err(files::FileError::NotFound(_)) => false,
+        Err(e) => return Err(Stopped::Failed(e.to_string())),
+    };
+    if let Err(e) = job.to.rename(part, &job.dest).await {
+        if moved_aside {
+            let _ = job.to.rename(&aside, &job.dest).await;
+        }
+        return Err(Stopped::Failed(e.to_string()));
+    }
+    if moved_aside {
+        match job.to.delete(&aside).await {
             Ok(()) | Err(files::FileError::NotFound(_)) => {}
             Err(e) => return Err(Stopped::Failed(e.to_string())),
         }
     }
-    job.to
-        .rename(part, &job.dest)
-        .await
-        .map_err(|e| Stopped::Failed(e.to_string()))
+    Ok(())
+}
+
+/// Where the old file waits while its replacement is renamed into place: hidden, beside it.
+fn aside_name(dest: &str) -> String {
+    files::join(
+        &files::parent(dest),
+        &format!(".{}.replaced", files::file_name(dest)),
+    )
 }

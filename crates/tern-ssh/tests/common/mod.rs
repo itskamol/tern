@@ -53,6 +53,8 @@ struct TestServer {
     /// Serve SFTP from this directory when asked for the subsystem.
     sftp_root: Option<PathBuf>,
     sessions: HashMap<ChannelId, Channel<Msg>>,
+    /// `pty`, `shell` and `agent` requests received, in order.
+    requests: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl server::Handler for TestServer {
@@ -94,6 +96,7 @@ impl server::Handler for TestServer {
 
     async fn agent_request(&mut self, _: ChannelId, _: &mut Session) -> Result<bool, Self::Error> {
         self.agent_asked = true;
+        self.requests.lock().unwrap().push("agent");
         Ok(true)
     }
 
@@ -108,11 +111,13 @@ impl server::Handler for TestServer {
         _: &[(russh::Pty, u32)],
         s: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.requests.lock().unwrap().push("pty");
         s.channel_success(ch)?;
         Ok(())
     }
 
     async fn shell_request(&mut self, ch: ChannelId, s: &mut Session) -> Result<(), Self::Error> {
+        self.requests.lock().unwrap().push("shell");
         s.channel_success(ch)?;
         self.shell_channel = Some(ch);
         if self.probe == AgentProbe::Always
@@ -233,6 +238,8 @@ pub struct Server {
     pub agent_log: Arc<Mutex<Vec<String>>>,
     /// Direct-tcpip targets this server was asked to open.
     pub opened: Arc<Mutex<Vec<String>>>,
+    /// `pty`, `shell` and `agent` requests received, in order.
+    pub requests: Arc<Mutex<Vec<&'static str>>>,
 }
 
 pub async fn serve(shell: Shell) -> Server {
@@ -262,6 +269,8 @@ async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>)
     let log = opened.clone();
     let agent_log = Arc::new(Mutex::new(Vec::new()));
     let agent = agent_log.clone();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let handler = TestServer {
@@ -273,6 +282,7 @@ async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>)
                 probe,
                 agent_asked: false,
                 agent_log: agent.clone(),
+                requests: seen.clone(),
             };
             let config = config.clone();
             tokio::spawn(async move {
@@ -286,6 +296,7 @@ async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>)
         port,
         agent_log,
         opened,
+        requests,
     }
 }
 

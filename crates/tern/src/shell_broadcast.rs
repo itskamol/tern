@@ -168,7 +168,7 @@ impl Shell {
             .tabs
             .iter()
             .find(|tab| tab.id == picker.source)
-            .map(|tab| tab.title().map_or_else(|| tab.alias.clone(), str::to_owned))
+            .map(|tab| tab.heading().text)
             .unwrap_or_default();
         let mut card = div()
             .id("broadcast-picker")
@@ -212,7 +212,7 @@ impl Shell {
                 .broadcast
                 .as_ref()
                 .is_some_and(|b| b.targets.contains(&id));
-            let label = tab.title().map_or_else(|| tab.alias.clone(), str::to_owned);
+            let label = tab.heading().text;
             card = card.child(
                 div()
                     .id(("broadcast-target", ix))

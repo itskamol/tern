@@ -73,7 +73,7 @@ struct Outcome {
 
 pub(crate) async fn run(
     spec: ConnectSpec,
-    size: TermSize,
+    size: Option<TermSize>,
     mut cmds: mpsc::Receiver<Command>,
     events: async_channel::Sender<SessionEvent>,
     forwards: Arc<Registry>,
@@ -221,14 +221,16 @@ pub(crate) fn client_config(spec: &ConnectSpec, host: &str, port: u16) -> Arc<cl
 
 async fn run_inner(
     spec: &ConnectSpec,
-    size: TermSize,
+    size: Option<TermSize>,
     cmds: &mut mpsc::Receiver<Command>,
     events: &async_channel::Sender<SessionEvent>,
     cause: &Cause,
     handshaken: &mut bool,
     forwards: &Arc<Registry>,
 ) -> Result<Outcome, Failure> {
-    let agent_socket = authn::socket_for(spec.forward_agent, spec.agent_socket.as_deref());
+    let shell = size.is_some();
+    // A files-only connection has no shell for a server to ask the agent through.
+    let agent_socket = authn::socket_for(shell && spec.forward_agent, spec.agent_socket.as_deref());
     let asking = Asking::default();
     let handler = Handler {
         host: spec.host.clone(),
@@ -293,23 +295,27 @@ async fn run_inner(
 
     *handshaken = true;
     let session = Arc::new(session);
-    let mut channel = session.channel_open_session().await?;
-    if agent_socket.is_some() {
-        // No reply wanted: a refusal would arrive as a channel failure and read as a refused shell.
-        channel.agent_forward(false).await?;
+    let mut channel = None;
+    if let Some(size) = size {
+        let opened = session.channel_open_session().await?;
+        if agent_socket.is_some() {
+            // No reply wanted: a refusal would arrive as a channel failure and read as a refused shell.
+            opened.agent_forward(false).await?;
+        }
+        opened
+            .request_pty(
+                false,
+                TERM,
+                size.cols.into(),
+                size.rows.into(),
+                size.pixel_width.into(),
+                size.pixel_height.into(),
+                &[],
+            )
+            .await?;
+        opened.request_shell(true).await?;
+        channel = Some(opened);
     }
-    channel
-        .request_pty(
-            false,
-            TERM,
-            size.cols.into(),
-            size.rows.into(),
-            size.pixel_width.into(),
-            size.pixel_height.into(),
-            &[],
-        )
-        .await?;
-    channel.request_shell(true).await?;
     events
         .send(SessionEvent::Connected)
         .await
@@ -323,13 +329,22 @@ async fn run_inner(
     let mut signal = None;
     let mut deadline: Option<Instant> = None;
     let mut closing = false;
+    // The UI stopped listening but something still holds the connection (a copy using its
+    // SFTP): the shell goes, the connection stays until the last handle is dropped.
+    let mut detached = false;
     let mut outbox = Outbox::new(events.clone());
     loop {
         tokio::select! {
             cmd = cmds.recv(), if !closing => match cmd {
-                Some(Command::Write(bytes)) => channel.data_bytes(bytes).await?,
+                Some(Command::Write(bytes)) => {
+                    if let Some(channel) = &channel {
+                        channel.data_bytes(bytes).await?;
+                    }
+                }
                 Some(Command::Resize(s)) => {
-                    channel.window_change(s.cols.into(), s.rows.into(), s.pixel_width.into(), s.pixel_height.into()).await?
+                    if let Some(channel) = &channel {
+                        channel.window_change(s.cols.into(), s.rows.into(), s.pixel_width.into(), s.pixel_height.into()).await?;
+                    }
                 }
                 Some(Command::Forward { forward, reply }) => {
                     let (session, forwards) = (session.clone(), forwards.clone());
@@ -349,17 +364,30 @@ async fn run_inner(
                         let _ = session.cancel_tcpip_forward(host, u32::from(port)).await;
                     });
                 }
+                Some(Command::Close) | None if detached => break,
                 Some(Command::Close) | None => {
                     closing = true;
-                    let _ = channel.close().await;
+                    if let Some(channel) = &channel {
+                        let _ = channel.close().await;
+                    }
                     deadline = Some(Instant::now() + EXIT_GRACE);
                 }
             },
-            delivered = outbox.progress(), if outbox.has_work() => {
-                if !delivered { break; }
+            delivered = outbox.progress(), if !detached && outbox.has_work() => {
+                if !delivered {
+                    detached = true;
+                    if let Some(channel) = channel.take() {
+                        let _ = channel.close().await;
+                    }
+                }
             }
             // Not reading while the outbox is full is the backpressure: see `Outbox`.
-            msg = channel.wait(), if outbox.wants_input() => match msg {
+            msg = async {
+                match channel.as_mut() {
+                    Some(channel) => channel.wait().await,
+                    None => std::future::pending().await,
+                }
+            }, if outbox.wants_input() => match msg {
                 Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
                     outbox.push(&data);
                 }
@@ -387,7 +415,7 @@ async fn run_inner(
     let reason = match (exit_status, signal) {
         (Some(code), _) => Disconnect::Exited(code),
         (None, Some(name)) => Disconnect::Signaled(name),
-        (None, None) if closing => Disconnect::Local,
+        (None, None) if closing || detached => Disconnect::Local,
         // The shell channel ended with no exit status: the link died or the server hung up.
         (None, None) => cause
             .wait(CAUSE_GRACE)

@@ -318,6 +318,21 @@ pub fn connect(
     let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
     let forwards = Arc::new(forward::Registry::default());
     let (etx, erx) = async_channel::bounded(session::EVENT_QUEUE);
-    rt.spawn(session::run(spec, size, rx, etx, forwards.clone()));
+    rt.spawn(session::run(spec, Some(size), rx, etx, forwards.clone()));
+    (SessionHandle { tx, forwards }, erx)
+}
+
+/// Starts a connection with no shell, no pty and no agent forwarding, for work that only needs
+/// the connection ([`SessionHandle::open_sftp`]). Prompts, [`SessionEvent::Connected`] and
+/// [`SessionEvent::Closed`] come as for [`connect`]; it never sends [`SessionEvent::Data`].
+#[must_use = "the connection runs only while its events are received"]
+pub fn connect_files(
+    spec: ConnectSpec,
+    rt: &tokio::runtime::Handle,
+) -> (SessionHandle, async_channel::Receiver<SessionEvent>) {
+    let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
+    let forwards = Arc::new(forward::Registry::default());
+    let (etx, erx) = async_channel::bounded(session::EVENT_QUEUE);
+    rt.spawn(session::run(spec, None, rx, etx, forwards.clone()));
     (SessionHandle { tx, forwards }, erx)
 }

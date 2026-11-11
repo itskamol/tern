@@ -18,6 +18,7 @@ use gpui::{
 use super::{Shell, ToastKind};
 use crate::command_history::{CommandHistory, Entry, Scope};
 use crate::picker;
+use crate::session::Put;
 use crate::settings_widgets as w;
 use crate::text_input::SelectAll;
 
@@ -240,13 +241,13 @@ impl Shell {
         let (Some(line), Some(session)) = (line, session) else {
             return;
         };
-        if !session.update(cx, |s, cx| s.put_at_prompt(&line, run, cx)) {
-            self.notify_toast(
-                ToastKind::Critical,
-                "The session is not connected, so nothing was typed",
-                cx,
-            );
-        }
+        let why = match session.update(cx, |s, cx| s.put_at_prompt(&line, run, cx)) {
+            Put::Typed => return,
+            Put::NotConnected => "The session is not connected, so nothing was typed",
+            Put::FullScreen => "A full-screen program is open, so nothing was typed",
+            Put::PasswordPrompt => "The session is asking for a password, so nothing was typed",
+        };
+        self.notify_toast(ToastKind::Critical, why, cx);
     }
 
     fn delete_history_line(&mut self, cx: &mut Context<Self>) {
@@ -445,8 +446,6 @@ impl Shell {
             );
         Some(overlay(card.into_any_element(), viewport, t))
     }
-
-    // ---- Settings → Command history ------------------------------------------------------
 
     pub(super) fn history_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;

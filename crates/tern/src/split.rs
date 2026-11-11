@@ -43,6 +43,29 @@ impl Floor {
         }
     }
 
+    /// The floor for a tab measured from its panes: each is `(columns, rows, share)` of the tab
+    /// as drawn. `pad` is what a pane's border and one divider take besides its grid, in cells,
+    /// so a pane at the floor still has [`MIN_COLS`] by [`MIN_ROWS`] to show.
+    pub fn of_panes(panes: &[(f32, f32, Rect)], pad: (f32, f32)) -> Self {
+        // A pane's grid and padding are its share of the tab; the biggest estimate is the least
+        // thrown off by the dividers.
+        let tab = |cells: fn(&(f32, f32, Rect)) -> (f32, f32), pad: f32| {
+            panes
+                .iter()
+                .map(|p| {
+                    let (len, share) = cells(p);
+                    (len + pad) / share.max(0.01)
+                })
+                .fold(1.0_f32, f32::max)
+        };
+        let cols = tab(|(c, _, r)| (*c, r.w), pad.0);
+        let rows = tab(|(_, h, r)| (*h, r.h), pad.1);
+        Self {
+            w: (MIN_COLS + pad.0) / cols,
+            h: (MIN_ROWS + pad.1) / rows,
+        }
+    }
+
     fn along(self, axis: Axis) -> f32 {
         match axis {
             Axis::Row => self.w,
@@ -212,11 +235,16 @@ impl Node {
         self.adjust(pane, side.axis(), beside, UNIT, floor, &|_| ratio)
     }
 
-    /// Moves the nearest divider across `dir`'s axis around `pane` by 5% of its split, toward
-    /// `dir`. False when the pane has no such divider.
+    /// Moves the nearest divider across `dir`'s axis that has a neighbour of `pane` in `dir` by
+    /// 5% of its split, toward `dir`; a pane with none that way moves its own divider. False
+    /// when the pane has no divider on that axis.
     pub fn step_ratio(&mut self, pane: PaneId, dir: Direction, floor: Floor) -> bool {
         let delta = if dir.pane_is_first() { 0.05 } else { -0.05 };
-        self.adjust(pane, dir.axis(), Beside::Any, UNIT, floor, &|r| r + delta)
+        let to = |r: f32| r + delta;
+        // The divider with a neighbour that way; a pane at the edge moves its own divider.
+        let toward = Beside::Side(dir.pane_is_first());
+        self.adjust(pane, dir.axis(), toward, UNIT, floor, &to)
+            || self.adjust(pane, dir.axis(), Beside::Any, UNIT, floor, &to)
     }
 
     /// Puts the divider beside `pane` on `side` back to half and half.
@@ -415,6 +443,58 @@ mod tests {
         assert!(t.split(1, Direction::Right, 2));
         assert!(t.split(2, Direction::Down, 3));
         t
+    }
+
+    /// The two ratios of `Row(1, Row(2, 3))`.
+    fn ratios(t: &Node) -> (f32, f32) {
+        match t {
+            Node::Split { ratio, second, .. } => match &**second {
+                Node::Split { ratio: inner, .. } => (*ratio, *inner),
+                Node::Leaf(_) => (*ratio, f32::NAN),
+            },
+            Node::Leaf(_) => (f32::NAN, f32::NAN),
+        }
+    }
+
+    #[test]
+    fn the_floor_leaves_a_pane_its_minimum_grid_after_border_and_divider() {
+        let half = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.5,
+            h: 1.0,
+        };
+        // Two panes of 100 columns each, 1 column of border and divider apiece: a tab of 202.
+        let floor = Floor::of_panes(&[(100.0, 30.0, half)], (1.0, 0.5));
+        assert!((floor.w * 202.0 - 1.0 - MIN_COLS).abs() < 1e-3, "{floor:?}");
+        assert!((floor.h * 30.5 - 0.5 - MIN_ROWS).abs() < 1e-3, "{floor:?}");
+    }
+
+    #[test]
+    fn an_arrow_moves_the_nearest_divider_that_has_a_neighbour_that_way() {
+        let floor = Floor { w: 0.1, h: 0.1 };
+        let three = || {
+            let mut t = Node::Leaf(1);
+            assert!(t.split(1, Direction::Right, 2));
+            assert!(t.split(2, Direction::Right, 3));
+            t
+        };
+        // The middle pane has 1 on its left: ← moves the divider with 1, not the one with 3.
+        let mut t = three();
+        assert!(t.step_ratio(2, Direction::Left, floor));
+        assert_eq!(ratios(&t), (0.45, 0.5));
+        // ... and → the divider with 3.
+        let mut t = three();
+        assert!(t.step_ratio(2, Direction::Right, floor));
+        assert_eq!(ratios(&t), (0.5, 0.55));
+        // The left pane grows to the right.
+        let mut t = three();
+        assert!(t.step_ratio(1, Direction::Right, floor));
+        assert_eq!(ratios(&t), (0.55, 0.5));
+        // The last pane has nothing on its right, so → moves its own divider and shrinks it.
+        let mut t = three();
+        assert!(t.step_ratio(3, Direction::Right, floor));
+        assert_eq!(ratios(&t), (0.5, 0.55));
     }
 
     #[test]

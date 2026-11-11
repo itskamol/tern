@@ -163,11 +163,16 @@ pub fn outcome(label: &str, s: &Summary) -> (bool, String) {
         };
         return (false, format!("Could not copy {label}: {first}{more}"));
     }
-    let skipped = match s.skipped {
-        0 => String::new(),
-        n => format!(", {n} skipped"),
-    };
-    (true, format!("Copied {label}{skipped}"))
+    let mut notes = String::new();
+    if s.skipped > 0 {
+        notes += &format!(", {} skipped", s.skipped);
+    }
+    match s.links {
+        0 => {}
+        1 => notes += ", 1 folder not copied because it is a link",
+        n => notes += &format!(", {n} folders not copied because they are links"),
+    }
+    (true, format!("Copied {label}{notes}"))
 }
 
 #[cfg(test)]
@@ -181,6 +186,7 @@ mod tests {
             dir: "/".into(),
             copied,
             skipped,
+            links: 0,
             failed: failed.iter().map(|s| (*s).to_owned()).collect(),
             cancelled,
         }
@@ -221,6 +227,12 @@ mod tests {
         assert_eq!(
             outcome("a", &summary(1, 2, &[], false)).1,
             "Copied a, 2 skipped"
+        );
+        let mut linked = summary(1, 0, &[], false);
+        linked.links = 2;
+        assert_eq!(
+            outcome("a", &linked).1,
+            "Copied a, 2 folders not copied because they are links"
         );
         let (ok, text) = outcome("a", &summary(0, 0, &["x: denied", "y: gone"], false));
         assert!(!ok);

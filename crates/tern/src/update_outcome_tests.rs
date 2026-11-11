@@ -38,9 +38,9 @@ fn each_result_has_its_toast_and_its_version_row() {
             "0.2.1; 0.2.2 is available to download",
         ),
         (
-            Outcome::Failed("no connection to the update server".into()),
-            "Could not check for updates: no connection to the update server",
-            "0.2.1; the last check failed: no connection to the update server",
+            Outcome::Failed("could not reach the update feed".into()),
+            "Could not check for updates: could not reach the update feed",
+            "0.2.1; the last check failed: could not reach the update feed",
         ),
     ];
     for (outcome, toast, row) in cases {
@@ -105,6 +105,26 @@ fn a_running_check_shows_as_checking_on_the_row() {
 }
 
 #[test]
+fn the_row_follows_the_check_into_the_download() {
+    let mut state = CheckState::default();
+    state.begin();
+    state.progress(Outcome::Downloading("0.2.2".into()));
+    assert!(state.running());
+    assert_eq!(state.shown(), Some(&Outcome::Downloading("0.2.2".into())));
+    state.finish(Outcome::Ready("0.2.2".into()));
+    assert_eq!(state.shown(), Some(&Outcome::Ready("0.2.2".into())));
+}
+
+#[test]
+fn a_new_check_does_not_show_the_last_result_while_it_runs() {
+    let mut state = CheckState::default();
+    state.begin();
+    state.finish(Outcome::Failed("x".into()));
+    state.begin();
+    assert_eq!(state.shown(), Some(&Outcome::Checking));
+}
+
+#[test]
 fn an_error_is_put_in_words_a_person_can_act_on() {
     assert_eq!(
         reason(&Trouble::Status(503)),
@@ -112,10 +132,10 @@ fn an_error_is_put_in_words_a_person_can_act_on() {
     );
     assert_eq!(
         reason(&Trouble::Unreachable),
-        "no connection to the update server; are you offline?"
+        "could not reach the update feed; are you offline?"
     );
     assert_eq!(
         reason(&Trouble::Malformed),
-        "the update server's reply was not understood"
+        "the update feed's reply was not understood"
     );
 }

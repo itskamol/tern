@@ -11,7 +11,7 @@ use tern_vault::{Key, Vault};
 
 use super::{LoginEvent, PanelLogin, Step};
 use crate::keeper::Keeper;
-use crate::password_command::Auth;
+use crate::password_command::{Approvals, Auth};
 use crate::platform::SshRuntime;
 use crate::session::scenario_server::{PASSWORD, serve};
 
@@ -26,6 +26,10 @@ struct Scene {
 /// A panel login to the test server; with `vault`, a locked vault (passphrase `vp1`) holds the
 /// password.
 fn scene(vault: bool) -> Scene {
+    scene_with(vault, Auth::default())
+}
+
+fn scene_with(vault: bool, auth: Auth) -> Scene {
     let (server, port, _typed) = serve();
     let dir = tempfile::tempdir().unwrap();
     let vault_path = dir.path().join("vault.age");
@@ -48,6 +52,7 @@ fn scene(vault: bool) -> Scene {
         known_hosts: Some(dir.path().join("known_hosts")),
         ..Default::default()
     };
+    let approved = dir.path().join("approved");
     let mut app = TestApp::new();
     app.update(|cx| {
         SshRuntime::install(cx).unwrap();
@@ -57,7 +62,8 @@ fn scene(vault: bool) -> Scene {
     let seen = events.clone();
     let login = app.update(|cx| {
         let colors = crate::theme::Theme::zeron_dark().input_colors();
-        let login = cx.new(|cx| PanelLogin::start(spec, Auth::default(), colors, cx));
+        let approvals = Approvals::in_dir(Some(approved));
+        let login = cx.new(|cx| PanelLogin::start_with(spec, auth, approvals, colors, cx));
         cx.subscribe(&login, move |_, event: &LoginEvent, _| {
             seen.borrow_mut().push(event.clone());
         })
@@ -175,4 +181,104 @@ fn refusing_the_host_key_ends_the_login_and_retry_asks_again() {
     let login = s.login.clone();
     s.app.update(|cx| login.update(cx, |l, cx| l.retry(cx)));
     s.asking("can't be established");
+}
+
+#[test]
+fn an_unapproved_proxy_command_is_asked_about_in_the_panel_before_anything_is_dialled() {
+    let auth = Auth {
+        proxy_command: Some("ssh -W %h:%p bastion".into()),
+        ..Auth::default()
+    };
+    let mut s = scene_with(false, auth);
+    s.asking("ssh -W %h:%p bastion");
+    s.say_yes();
+    s.asking("can't be established");
+}
+
+#[test]
+fn refusing_the_proxy_command_fails_the_panel_without_dialling() {
+    let auth = Auth {
+        proxy_command: Some("ssh -W %h:%p bastion".into()),
+        ..Auth::default()
+    };
+    let mut s = scene_with(false, auth);
+    s.asking("ssh -W %h:%p bastion");
+    let login = s.login.clone();
+    s.app
+        .update(|cx| login.update(cx, |l, cx| l.answer_yes(false, cx)));
+    s.wait(
+        "failed",
+        |l| matches!(&l.step, Step::Failed(why) if why.contains("proxy command was not run")),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_password_command_answers_the_password_question_after_it_is_approved() {
+    let auth = Auth {
+        password_command: Some(format!("printf {PASSWORD}")),
+        ..Auth::default()
+    };
+    let mut s = scene_with(false, auth);
+    s.asking("can't be established");
+    s.say_yes();
+    s.asking("to get its password");
+    s.say_yes();
+    s.connected();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refused_password_command_falls_through_to_asking_the_person() {
+    let auth = Auth {
+        password_command: Some(format!("printf {PASSWORD}")),
+        ..Auth::default()
+    };
+    let mut s = scene_with(false, auth);
+    s.asking("can't be established");
+    s.say_yes();
+    s.asking("to get its password");
+    let login = s.login.clone();
+    s.app
+        .update(|cx| login.update(cx, |l, cx| l.answer_yes(false, cx)));
+    s.asking("password");
+    s.type_in(PASSWORD);
+    s.connected();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failing_password_command_says_so_and_the_person_is_asked() {
+    let auth = Auth {
+        password_command: Some("echo nope >&2; exit 1".into()),
+        ..Auth::default()
+    };
+    let mut s = scene_with(false, auth);
+    s.asking("can't be established");
+    s.say_yes();
+    s.asking("to get its password");
+    s.say_yes();
+    s.asking("password");
+    s.type_in(PASSWORD);
+    s.connected();
+}
+
+#[test]
+fn a_typed_password_is_offered_for_saving_even_with_no_vault_and_asks_for_a_new_passphrase() {
+    let mut s = scene(false);
+    s.asking("can't be established");
+    s.say_yes();
+    s.asking("password");
+    s.type_in(PASSWORD);
+    s.connected();
+    s.wait("offered", |l| l.save_offer().is_some());
+    let login = s.login.clone();
+    s.app
+        .update(|cx| login.update(cx, |l, cx| l.answer_offer(true, cx)));
+    s.asking("New vault passphrase");
+    s.type_in("vp9");
+    s.asking("Repeat vault passphrase");
+    s.type_in("vp9");
+    s.wait("saved", |l| l.note() == Some("Saved in the vault."));
+    s.wait("connected again", |l| matches!(l.step, Step::Connected));
 }

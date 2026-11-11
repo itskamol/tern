@@ -84,7 +84,11 @@ impl CheckState {
 
     /// Starts a check; `false` when one already runs, and the request is dropped.
     pub fn begin(&mut self) -> bool {
-        !std::mem::replace(&mut self.running, true)
+        let started = !std::mem::replace(&mut self.running, true);
+        if started {
+            self.last = None;
+        }
+        started
     }
 
     pub fn finish(&mut self, outcome: Outcome) {
@@ -97,12 +101,12 @@ impl CheckState {
         self.last = Some(outcome);
     }
 
-    /// What the Version row reports: "checking" while a check runs, else the last result.
+    /// What the Version row reports: how the running check has got so far ("checking" until it
+    /// says more), else the last result.
     pub fn shown(&self) -> Option<&Outcome> {
-        if self.running {
-            Some(&Outcome::Checking)
-        } else {
-            self.last.as_ref()
+        match (&self.last, self.running) {
+            (None, true) => Some(&Outcome::Checking),
+            (last, _) => last.as_ref(),
         }
     }
 }
@@ -118,8 +122,8 @@ pub enum Trouble {
 pub fn reason(trouble: &Trouble) -> String {
     match trouble {
         Trouble::Status(code) => format!("GitHub answered {code}; try again later"),
-        Trouble::Unreachable => "no connection to the update server; are you offline?".into(),
-        Trouble::Malformed => "the update server's reply was not understood".into(),
+        Trouble::Unreachable => "could not reach the update feed; are you offline?".into(),
+        Trouble::Malformed => "the update feed's reply was not understood".into(),
     }
 }
 

@@ -8,13 +8,11 @@
 //! the panel is told when they are done. Copies go to the shell's transfer queue, which outlives
 //! this tab.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{AppContext, Context, Entity, FocusHandle, Focusable, Subscription, WeakEntity, Window};
+use gpui::{AppContext, Context, Entity, FocusHandle, Focusable, Subscription, WeakEntity};
 use tern_ssh::{
-    Call, ConnectSpec, CopyJob, FileEntry, FileError, FileSource, HostEntry, LocalFs,
-    SessionHandle, SftpFiles,
+    ConnectSpec, FileEntry, FileError, FileSource, HostEntry, LocalFs, SessionHandle, SftpFiles,
 };
 
 use crate::files_model::{Selection, Sort, SortKey, order};
@@ -42,6 +40,40 @@ impl Target {
     }
 }
 
+/// Why a panel could not show a host's files, worded in one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// The host stopped answering while the panel was open.
+    Gone,
+    /// The panel was asked for a name tern has no host for.
+    Unknown(String),
+    /// The host went away after the login; what it said, if anything.
+    Lost(String),
+    /// A host's or the login's own message, as it came.
+    Said(String),
+}
+
+impl Reason {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Gone => "The host stopped answering.".to_owned(),
+            Self::Unknown(alias) => format!("{alias}: not a host tern knows"),
+            Self::Lost(why) if why.is_empty() => "The host went away.".to_owned(),
+            Self::Lost(why) => format!("The host went away: {why}"),
+            Self::Said(text) => text.clone(),
+        }
+    }
+}
+
+impl From<&FileError> for Reason {
+    fn from(e: &FileError) -> Self {
+        match e {
+            FileError::Closed => Self::Gone,
+            other => Self::Said(other.to_string()),
+        }
+    }
+}
+
 /// Where a panel stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
@@ -50,9 +82,9 @@ pub enum State {
     Loading,
     Ready,
     /// Could not connect or list; Retry tries again.
-    Failed(String),
-    /// The connection was up and went away; Reconnect starts over.
-    Dropped(String),
+    Failed(Reason),
+    /// The host was there and went away; Reconnect starts over.
+    Dropped(Reason),
 }
 
 pub struct Panel {
@@ -200,8 +232,6 @@ impl FilesView {
         1 - side
     }
 
-    // ---- choosing and connecting ---------------------------------------------------------
-
     /// Shows `target` in panel `side`, starting from its home folder.
     pub fn set_target(&mut self, side: usize, target: Target, cx: &mut Context<Self>) {
         self.menu = None;
@@ -244,11 +274,11 @@ impl FilesView {
             Target::Host(alias) => alias,
         };
         let Some(access) = access else {
-            self.panels[side].state = State::Failed(format!("{alias}: not a host tern knows"));
+            self.panels[side].state = State::Failed(Reason::Unknown(alias));
             return;
         };
         match access.session.clone() {
-            Some(handle) => self.open_sftp(side, handle, access.label, false, cx),
+            Some(handle) => self.open_sftp(side, handle, access.label, cx),
             None => self.login(side, access, cx),
         }
     }
@@ -263,11 +293,11 @@ impl FilesView {
             match event {
                 LoginEvent::Connected => {
                     if let Some(handle) = login.read(cx).handle() {
-                        this.open_sftp(side, handle, label.clone(), true, cx);
+                        this.open_sftp(side, handle, label.clone(), cx);
                     }
                 }
                 LoginEvent::Dropped(why) => {
-                    this.panels[side].state = State::Dropped(why.clone());
+                    this.panels[side].state = State::Dropped(Reason::Lost(why.clone()));
                 }
             }
             cx.notify();
@@ -279,14 +309,13 @@ impl FilesView {
         cx.notify();
     }
 
-    /// Opens SFTP on `handle`. A connection the panel made itself rides along with its source,
-    /// so it closes when the panel and every copy using it are done.
+    /// Opens SFTP on `handle`. The connection rides along with its source, whoever opened it, so
+    /// a copy in progress keeps it open after the panel or the terminal tab is closed.
     fn open_sftp(
         &mut self,
         side: usize,
         handle: SessionHandle,
         label: String,
-        owned: bool,
         cx: &mut Context<Self>,
     ) {
         let generation = self.panels[side].generation;
@@ -304,26 +333,21 @@ impl FilesView {
                 }
                 match opened {
                     Ok(Ok(sftp)) => {
-                        let mut files = SftpFiles::new(label, sftp);
-                        if owned {
-                            files = files.keeping(handle);
-                        }
+                        let files = SftpFiles::new(label, sftp).keeping(handle);
                         p.source = Some(Arc::new(files));
                         this.go_home(side, cx);
                     }
                     Ok(Err(e)) => {
                         tracing::warn!(error = %e, "files_sftp_open_failed");
-                        p.state = State::Failed(e.to_string());
+                        p.state = State::Failed(Reason::Said(e.to_string()));
                     }
-                    Err(_) => p.state = State::Failed("the connection ended".into()),
+                    Err(_) => p.state = State::Failed(Reason::Gone),
                 }
                 cx.notify();
             });
         })
         .detach();
     }
-
-    // ---- browsing ------------------------------------------------------------------------
 
     pub fn go_home(&mut self, side: usize, cx: &mut Context<Self>) {
         let Some(source) = self.panels[side].source.clone() else {
@@ -340,9 +364,7 @@ impl FilesView {
                 match home {
                     Ok(Ok(home)) => this.go(side, home, cx),
                     Ok(Err(e)) => this.failed(side, &e, cx),
-                    Err(_) => {
-                        this.panels[side].state = State::Failed("the connection ended".into())
-                    }
+                    Err(_) => this.panels[side].state = State::Failed(Reason::Gone),
                 }
                 cx.notify();
             });
@@ -384,9 +406,7 @@ impl FilesView {
                         p.path.update(cx, |i, cx| i.set_text(path, cx));
                     }
                     Ok(Err(e)) => this.listing_failed(side, &e, cx),
-                    Err(_) => {
-                        this.panels[side].state = State::Failed("the connection ended".into())
-                    }
+                    Err(_) => this.panels[side].state = State::Failed(Reason::Gone),
                 }
                 cx.notify();
             });
@@ -401,9 +421,9 @@ impl FilesView {
         if self.panels[side].cwd.is_empty() {
             return self.failed(side, e, cx);
         }
-        self.panels[side].notice = Some(e.to_string());
+        self.panels[side].notice = Some(Reason::from(e).text());
         self.panels[side].state = if *e == FileError::Closed {
-            State::Dropped("The connection closed.".into())
+            State::Dropped(Reason::Gone)
         } else {
             State::Ready
         };
@@ -411,8 +431,8 @@ impl FilesView {
 
     fn failed(&mut self, side: usize, e: &FileError, _cx: &mut Context<Self>) {
         self.panels[side].state = match e {
-            FileError::Closed => State::Dropped("The connection closed.".into()),
-            other => State::Failed(other.to_string()),
+            FileError::Closed => State::Dropped(Reason::Gone),
+            other => State::Failed(Reason::from(other)),
         };
     }
 
@@ -495,223 +515,6 @@ impl FilesView {
             .collect()
     }
 
-    // ---- copying -------------------------------------------------------------------------
-
-    /// The Copy button: the picked items go to the other panel's folder.
-    pub fn copy_picked(&mut self, side: usize, cx: &mut Context<Self>) {
-        let entries = self.picked(side);
-        self.copy(side, entries, Self::other(side), cx);
-    }
-
-    /// Copies `entries` of panel `from` into the folder panel `to` shows.
-    pub fn copy(
-        &mut self,
-        from: usize,
-        entries: Vec<FileEntry>,
-        to: usize,
-        cx: &mut Context<Self>,
-    ) {
-        if entries.is_empty() {
-            return;
-        }
-        let (Some(src), Some(dst)) = (
-            self.panels[from].source.clone(),
-            self.panels[to].source.clone(),
-        ) else {
-            self.panels[to].notice = Some("Both panels need a connection to copy.".into());
-            return cx.notify();
-        };
-        if self.panels[to].state != State::Ready {
-            self.panels[to].notice = Some("Open a folder to copy into first.".into());
-            return cx.notify();
-        }
-        let dir = self.panels[to].cwd.clone();
-        let label = copy_label(&entries, &self.panels[to].target.label());
-        let jobs = entries
-            .into_iter()
-            .map(|item| CopyJob {
-                from: src.clone(),
-                item,
-                to: dst.clone(),
-                dir: dir.clone(),
-                rule: None,
-            })
-            .collect();
-        self.transfers.update(cx, |t, cx| t.submit(jobs, label, cx));
-    }
-
-    /// Files dropped from Finder upload into the folder panel `side` shows.
-    pub fn drop_files(&mut self, side: usize, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let entries: Vec<FileEntry> = paths.iter().filter_map(|p| local_entry(p)).collect();
-        if entries.is_empty() {
-            return;
-        }
-        let Some(dst) = self.panels[side].source.clone() else {
-            return;
-        };
-        if self.panels[side].state != State::Ready {
-            return;
-        }
-        let dir = self.panels[side].cwd.clone();
-        let label = copy_label(&entries, &self.panels[side].target.label());
-        let mac: Arc<dyn FileSource> = Arc::new(LocalFs::new());
-        let jobs = entries
-            .into_iter()
-            .map(|item| CopyJob {
-                from: mac.clone(),
-                item,
-                to: dst.clone(),
-                dir: dir.clone(),
-                rule: None,
-            })
-            .collect();
-        self.transfers.update(cx, |t, cx| t.submit(jobs, label, cx));
-    }
-
-    /// A batch ended: panels showing its destination read it again.
-    fn transfer_finished(&mut self, done: &Finished, cx: &mut Context<Self>) {
-        for side in 0..2 {
-            let p = &self.panels[side];
-            let same_place = p
-                .source
-                .as_ref()
-                .is_some_and(|s| s.id() == done.summary.dest);
-            if same_place && p.cwd == done.summary.dir {
-                self.refresh(side, cx);
-            }
-        }
-    }
-
-    // ---- making, renaming, deleting ------------------------------------------------------
-
-    pub fn start_new_folder(&mut self, side: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panels[side].state != State::Ready {
-            return;
-        }
-        let input = self.dialog_input("New folder", String::new(), cx);
-        window.focus(&input.read(cx).focus_handle(cx), cx);
-        self.dialog = Some(Dialog::NewFolder { side, input });
-        cx.notify();
-    }
-
-    pub fn start_rename(&mut self, side: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let mut picked = self.picked(side);
-        if picked.len() != 1 {
-            return;
-        }
-        let entry = picked.remove(0);
-        let input = self.dialog_input("Name", entry.name.clone(), cx);
-        input.update(cx, |i, cx| i.select_everything(cx));
-        window.focus(&input.read(cx).focus_handle(cx), cx);
-        self.dialog = Some(Dialog::Rename { side, entry, input });
-        cx.notify();
-    }
-
-    pub fn start_delete(&mut self, side: usize, cx: &mut Context<Self>) {
-        let entries = self.picked(side);
-        if !entries.is_empty() {
-            self.dialog = Some(Dialog::Delete { side, entries });
-            cx.notify();
-        }
-    }
-
-    fn dialog_input(
-        &mut self,
-        placeholder: &'static str,
-        text: String,
-        cx: &mut Context<Self>,
-    ) -> Entity<TextInput> {
-        let colors = self.theme.input_colors();
-        let input = cx.new(|cx| {
-            let mut input = TextInput::new(placeholder, false, colors, cx);
-            input.set_text(text, cx);
-            input
-        });
-        cx.observe(&input, |_, _, cx| cx.notify()).detach();
-        input
-    }
-
-    pub fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog.take().is_some() {
-            window.focus(&self.focus, cx);
-            cx.notify();
-        }
-    }
-
-    /// Enter or the confirm button.
-    pub fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = self.dialog.take() else {
-            return;
-        };
-        window.focus(&self.focus, cx);
-        match dialog {
-            Dialog::NewFolder { side, input } => {
-                let name = input.read(cx).text().trim().to_owned();
-                if let Some(name) = plain_name(&name) {
-                    let path = tern_ssh::join(&self.panels[side].cwd, name);
-                    self.change(side, "make the folder", cx, move |s| {
-                        Box::pin(async move { s.mkdir(&path).await })
-                    });
-                } else {
-                    self.panels[side].notice = Some(format!("{name:?} is not a folder name."));
-                }
-            }
-            Dialog::Rename { side, entry, input } => {
-                let name = input.read(cx).text().trim().to_owned();
-                match plain_name(&name) {
-                    Some(name) if name != entry.name => {
-                        let to = tern_ssh::join(&tern_ssh::parent(&entry.path), name);
-                        self.change(side, "rename", cx, move |s| {
-                            Box::pin(async move { s.rename(&entry.path, &to).await })
-                        });
-                    }
-                    Some(_) => {}
-                    None => self.panels[side].notice = Some(format!("{name:?} is not a name.")),
-                }
-            }
-            Dialog::Delete { side, entries } => {
-                self.change(side, "delete", cx, move |s| {
-                    Box::pin(async move {
-                        for e in &entries {
-                            s.delete(&e.path).await?;
-                        }
-                        Ok(())
-                    })
-                });
-            }
-        }
-        cx.notify();
-    }
-
-    /// Runs one change on panel `side`'s source, then lists the folder again.
-    fn change(
-        &mut self,
-        side: usize,
-        what: &'static str,
-        cx: &mut Context<Self>,
-        work: impl FnOnce(Arc<dyn FileSource>) -> Call<'static, ()> + Send + 'static,
-    ) {
-        let Some(source) = self.panels[side].source.clone() else {
-            return;
-        };
-        let rt = self.rt.clone();
-        cx.spawn(async move |this, cx| {
-            let done = rt.spawn(work(source)).await;
-            let _ = this.update(cx, |this, cx| {
-                match done {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        tracing::warn!(error = %e, what, "files_change_failed");
-                        this.panels[side].notice = Some(format!("Could not {what}: {e}"));
-                    }
-                    Err(_) => this.panels[side].notice = Some(format!("Could not {what}.")),
-                }
-                this.refresh(side, cx);
-            });
-        })
-        .detach();
-    }
-
     pub fn toggle_menu(&mut self, side: usize, cx: &mut Context<Self>) {
         self.menu = if self.menu == Some(side) {
             None
@@ -725,33 +528,6 @@ impl FilesView {
         }
         cx.notify();
     }
-}
-
-/// A name for something in a folder: no empty names, no paths.
-fn plain_name(name: &str) -> Option<&str> {
-    (!matches!(name, "" | "." | "..") && !name.contains(['/', '\0'])).then_some(name)
-}
-
-/// What a copy is called in the transfer list and the toast.
-pub fn copy_label(entries: &[FileEntry], to: &str) -> String {
-    match entries {
-        [one] => format!("{} to {to}", one.name),
-        many => format!("{} items to {to}", many.len()),
-    }
-}
-
-/// An item from Finder as a file source entry; `None` when it cannot be read.
-fn local_entry(path: &std::path::Path) -> Option<FileEntry> {
-    let meta = std::fs::metadata(path).ok()?;
-    let name = path.file_name()?.to_str()?.to_owned();
-    Some(FileEntry {
-        name,
-        path: path.to_str()?.to_owned(),
-        is_dir: meta.is_dir(),
-        is_symlink: false,
-        size: meta.len(),
-        modified: meta.modified().ok(),
-    })
 }
 
 /// Debug builds keep scripted logins out of the real known_hosts, as a session's tab does.
@@ -769,31 +545,18 @@ fn dev_spec(spec: ConnectSpec) -> ConnectSpec {
 mod tests {
     use super::*;
 
-    fn entry(name: &str) -> FileEntry {
-        FileEntry {
-            name: name.into(),
-            path: String::new(),
-            is_dir: false,
-            is_symlink: false,
-            size: 0,
-            modified: None,
-        }
-    }
-
     #[test]
-    fn a_copy_is_named_for_one_item_or_the_count() {
-        assert_eq!(copy_label(&[entry("a.txt")], "web-01"), "a.txt to web-01");
+    fn a_reason_is_worded_in_the_hosts_terms() {
+        assert_eq!(Reason::Gone.text(), "The host stopped answering.");
+        assert_eq!(Reason::from(&FileError::Closed).text(), Reason::Gone.text());
         assert_eq!(
-            copy_label(&[entry("a"), entry("b"), entry("c")], "This Mac"),
-            "3 items to This Mac"
+            Reason::Unknown("web".into()).text(),
+            "web: not a host tern knows"
         );
-    }
-
-    #[test]
-    fn a_new_name_is_one_plain_name() {
-        assert_eq!(plain_name("docs"), Some("docs"));
-        for bad in ["", ".", "..", "a/b", "../x", "a\0"] {
-            assert_eq!(plain_name(bad), None, "{bad:?}");
-        }
+        assert_eq!(
+            Reason::Lost("exit status 1".into()).text(),
+            "The host went away: exit status 1"
+        );
+        assert_eq!(Reason::Lost(String::new()).text(), "The host went away.");
     }
 }
