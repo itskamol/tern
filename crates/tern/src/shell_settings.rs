@@ -589,6 +589,7 @@ impl Shell {
     fn about_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;
         let on = self.settings.check_for_updates;
+        let checking = self.update_check_running();
         w::page_column()
             .child(w::page_header(&t, "About"))
             .child(w::section(
@@ -599,20 +600,27 @@ impl Shell {
                         &t,
                         true,
                         "Version",
-                        Some(match self.update_waiting() {
-                            Some(next) => format!(
-                                "{}; {next} is downloaded and installs when tern quits",
-                                env!("CARGO_PKG_VERSION")
-                            )
-                            .into(),
-                            None => env!("CARGO_PKG_VERSION").into(),
-                        }),
-                        div().when(self.update_waiting().is_some(), |el| {
-                            el.child(
-                                w::button(&t, "update-restart", "Restart now")
-                                    .on_click(cx.listener(|s, _, _, cx| s.restart_to_update(cx))),
-                            )
-                        }),
+                        Some(self.update_row_text().into()),
+                        div()
+                            .flex()
+                            .gap_2()
+                            .when(self.update_waiting().is_some(), |el| {
+                                el.child(
+                                    w::button(&t, "update-restart", "Restart now").on_click(
+                                        cx.listener(|s, _, _, cx| s.restart_to_update(cx)),
+                                    ),
+                                )
+                            })
+                            .child(
+                                w::button(
+                                    &t,
+                                    "update-check-now",
+                                    if checking { "Checking…" } else { "Check now" },
+                                )
+                                .when(!checking, |b| {
+                                    b.on_click(cx.listener(|s, _, _, cx| s.check_now(cx)))
+                                }),
+                            ),
                     ))
                     .child(w::row(
                         &t,
