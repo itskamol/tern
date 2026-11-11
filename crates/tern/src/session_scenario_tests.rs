@@ -352,8 +352,10 @@ fn nothing_is_recorded_while_this_tab_broadcasts_its_typing() {
             ))
         })
         .read(|host, _| host.0.downgrade());
-    s.app
-        .update(|cx| s.session.update(cx, |sess, _| sess.set_mirrors(vec![other])));
+    s.app.update(|cx| {
+        s.session
+            .update(cx, |sess, _| sess.set_mirrors(vec![other]))
+    });
     s.run("echo broadcast");
     assert!(s.history().is_empty());
     s.app

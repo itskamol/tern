@@ -7,8 +7,6 @@
 //! The filter works from words, so it both misses secrets and drops harmless lines
 //! (`ssh -p2222`); a leading space and [`CommandHistory::delete`] are the person's corrections.
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write as _};
@@ -108,7 +106,7 @@ impl CommandHistory {
                     .iter()
                     .flat_map(|p| newest_first(p, None))
                     .collect();
-                all.sort_by(|a, b| b.at.cmp(&a.at));
+                all.sort_by_key(|e| std::cmp::Reverse(e.at));
                 all
             }
         };

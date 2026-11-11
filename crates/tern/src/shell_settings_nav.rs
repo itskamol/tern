@@ -28,7 +28,10 @@ pub(super) const GROUPS: [(&str, &[Section]); 4] = [
         &[Section::Appearance, Section::Terminal, Section::Shortcuts],
     ),
     ("Connections", &[Section::Connections, Section::Snippets]),
-    ("Security & sync", &[Section::Vault, Section::Sync]),
+    (
+        "Security & sync",
+        &[Section::Vault, Section::History, Section::Sync],
+    ),
     // A lone section needs no label repeating its own name; spacing sets it apart.
     ("", &[Section::About]),
 ];
@@ -274,6 +277,7 @@ mod tests {
         assert_eq!(of(Section::Connections), 1);
         assert_eq!(of(Section::Snippets), 1);
         assert_eq!(of(Section::Vault), 2);
+        assert_eq!(of(Section::History), 2);
         assert_eq!(of(Section::Sync), 2);
         assert_eq!(of(Section::About), 3);
     }

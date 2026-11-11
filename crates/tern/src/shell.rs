@@ -60,9 +60,12 @@ mod forwards_ui;
 #[path = "shell_sftp.rs"]
 mod sftp_ui;
 pub(crate) use forwards_ui::{ClearTerminal, FillPassword};
+pub(crate) use history_ui::ToggleCommandHistory;
 pub(crate) use sftp_ui::ToggleSftp;
 #[path = "shell_wallpaper_gallery.rs"]
 mod gallery_ui;
+#[path = "shell_history.rs"]
+mod history_ui;
 #[path = "shell_look.rs"]
 mod look;
 #[path = "shell_menu.rs"]
@@ -163,6 +166,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 panels: Default::default(),
                 error: None,
                 picker: None,
+                history: Default::default(),
                 sidebar_tween: None,
                 settings_page: None,
                 theme_picker: None,
@@ -255,6 +259,7 @@ pub struct Shell {
     panels: forwards_ui::Panels,
     error: Option<String>,
     picker: Option<Picker>,
+    history: history_ui::HistoryUi,
     sidebar_tween: Option<WidthTween>,
     settings_page: Option<settings_ui::Section>,
     theme_picker: Option<themes_ui::ThemePicker>,
@@ -654,6 +659,9 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &ToggleHostPicker, w, cx| s.toggle_picker(w, cx)))
             .on_action(cx.listener(|s, _: &FocusHostSearch, w, cx| s.focus_search(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSnippets, w, cx| s.toggle_snippet_picker(w, cx)))
+            .on_action(
+                cx.listener(|s, _: &ToggleCommandHistory, w, cx| s.toggle_command_history(w, cx)),
+            )
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
             .on_action(cx.listener(|s, _: &ToggleSftp, w, cx| s.toggle_sftp(w, cx)))
             .on_action(cx.listener(|s, _: &FillPassword, w, cx| s.fill_password(w, cx)))
@@ -738,6 +746,7 @@ impl Render for Shell {
             .when_some(form, |el, form| el.child(form))
             .when_some(import, |el, i| el.child(i))
             .when_some(snippet_picker, |el, p| el.child(p))
+            .when_some(self.render_command_history(window, cx), |el, p| el.child(p))
             .when_some(snippet_form, |el, f| el.child(f))
             .when_some(theme_picker, |el, p| el.child(p))
             .when_some(context_menu, |el, m| el.child(m))

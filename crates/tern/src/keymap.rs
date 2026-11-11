@@ -50,10 +50,11 @@ pub enum ShortcutId {
     FontReset,
     FillPassword,
     ClearTerminal,
+    CommandHistory,
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 26] = [
+    pub const ALL: [ShortcutId; 27] = [
         ShortcutId::HostPicker,
         ShortcutId::SearchHosts,
         ShortcutId::Snippets,
@@ -80,6 +81,7 @@ impl ShortcutId {
         ShortcutId::FontReset,
         ShortcutId::FillPassword,
         ShortcutId::ClearTerminal,
+        ShortcutId::CommandHistory,
     ];
 
     pub fn label(self) -> &'static str {
@@ -110,6 +112,7 @@ impl ShortcutId {
             ShortcutId::FontReset => "Default text size",
             ShortcutId::FillPassword => "Fill password",
             ShortcutId::ClearTerminal => "Clear scrollback",
+            ShortcutId::CommandHistory => "Command history",
         }
     }
 
@@ -141,6 +144,8 @@ impl ShortcutId {
             ShortcutId::FontReset => "cmd-0",
             ShortcutId::FillPassword => "cmd-\\",
             ShortcutId::ClearTerminal => "cmd-k",
+            // Free in the workspace; cmd-shift-r if it is ever taken.
+            ShortcutId::CommandHistory => "cmd-r",
         }
     }
 
@@ -173,6 +178,8 @@ impl ShortcutId {
             // Ctrl+\ alone is SIGQUIT in a terminal.
             ShortcutId::FillPassword => "ctrl-shift-\\",
             ShortcutId::ClearTerminal => "ctrl-shift-k",
+            // Ctrl+R alone is the shell's reverse search.
+            ShortcutId::CommandHistory => "ctrl-shift-r",
         }
     }
 
@@ -219,6 +226,7 @@ impl ShortcutId {
             ShortcutId::FontReset => Box::new(ResetFontSize),
             ShortcutId::FillPassword => Box::new(crate::shell::FillPassword),
             ShortcutId::ClearTerminal => Box::new(crate::shell::ClearTerminal),
+            ShortcutId::CommandHistory => Box::new(crate::shell::ToggleCommandHistory),
         }
     }
 }

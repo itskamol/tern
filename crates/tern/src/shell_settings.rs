@@ -26,18 +26,20 @@ pub(crate) enum Section {
     Connections,
     Snippets,
     Vault,
+    History,
     Sync,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 8] = [
+    const ALL: [Section; 9] = [
         Section::Appearance,
         Section::Terminal,
         Section::Shortcuts,
         Section::Connections,
         Section::Snippets,
         Section::Vault,
+        Section::History,
         Section::Sync,
         Section::About,
     ];
@@ -50,6 +52,7 @@ impl Section {
             Section::Connections => "Connections",
             Section::Snippets => "Snippets",
             Section::Vault => "Vault",
+            Section::History => "Command history",
             Section::Sync => "Sync",
             Section::About => "About",
         }
@@ -63,6 +66,7 @@ impl Section {
             Section::Connections => crate::icons::SERVER,
             Section::Snippets => crate::icons::FILE_CODE,
             Section::Vault => crate::icons::KEY,
+            Section::History => crate::icons::RESTART,
             Section::Sync => crate::icons::CLOUD,
             Section::About => crate::icons::INFO,
         }
@@ -76,6 +80,7 @@ impl Section {
             Section::Connections => "nav-connections",
             Section::Snippets => "nav-snippets",
             Section::Vault => "nav-vault",
+            Section::History => "nav-history",
             Section::Sync => "nav-sync",
             Section::About => "nav-about",
         }
@@ -193,6 +198,7 @@ impl Shell {
             Section::Connections => self.connections_page(cx),
             Section::Snippets => self.snippets_page(cx),
             Section::Vault => self.vault_page(cx),
+            Section::History => self.history_page(cx),
             Section::Sync => self.sync_page(cx),
             Section::About => self.about_page(cx),
         };

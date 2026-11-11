@@ -109,6 +109,7 @@ fn app_menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Clear Scrollback", crate::shell::ClearTerminal),
                 MenuItem::action("Find Host…", crate::shell::FocusHostSearch),
+                MenuItem::action("Command History…", crate::shell::ToggleCommandHistory),
             ],
         ),
         menu(

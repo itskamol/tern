@@ -246,7 +246,10 @@ mod tests {
             format!("starpass\r\n{STAR_PROMPT} ")
         );
         assert_eq!(shown(&mut shell, &typed, "ab"), "**");
-        assert_eq!(shown(&mut shell, &typed, "\r"), format!("\r\nSorry, try again.\r\n{PROMPT}"));
+        assert_eq!(
+            shown(&mut shell, &typed, "\r"),
+            format!("\r\nSorry, try again.\r\n{PROMPT}")
+        );
         assert_eq!(shown(&mut shell, &typed, "x"), "x");
     }
 }
