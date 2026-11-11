@@ -8,6 +8,7 @@ mod element;
 pub mod frame_stats;
 mod links;
 mod mappings;
+mod osc133;
 mod search;
 mod terminal;
 mod view;
@@ -15,6 +16,7 @@ mod view;
 pub use config::TerminalTheme;
 pub use config::{CursorStyleSetting, TerminalOptions};
 pub use links::Link;
+pub use osc133::{GridPos, PromptMark};
 pub use search::SearchMark;
 pub use terminal::{
     CellColor, CellSnapshot, CursorSnapshot, SCROLLBACK_LINES, Terminal, TerminalEvent,

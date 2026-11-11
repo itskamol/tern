@@ -27,6 +27,7 @@ use gpui::{Context, EventEmitter};
 use crate::config::CursorStyleSetting;
 use crate::config::TerminalTheme;
 use crate::links::Link;
+use crate::osc133::{GridPos, PromptMark, Scanner};
 use crate::search::{Search, SearchMark, mark_at};
 
 pub use alacritty_terminal::index::Side;
@@ -61,6 +62,9 @@ pub enum TerminalEvent {
     /// OSC 52: the remote asks to put text on the clipboard. The view writes it only while
     /// [`crate::TerminalOptions::clipboard_write`] allows; the app can say that it happened.
     ClipboardStore(String),
+    /// OSC 133: the shell marked its prompt. `at` is where the cursor was when the mark was
+    /// written, so [`Terminal::text_from`] can read the command typed after a `CommandStart`.
+    PromptMark { mark: PromptMark, at: GridPos },
 }
 
 /// Viewport dimensions in cells.
@@ -196,6 +200,7 @@ pub(crate) enum Notice {
 pub struct Terminal {
     term: Term<EventCapture>,
     parser: Processor,
+    marks: Scanner,
     capture: EventCapture,
     theme: TerminalTheme,
     /// Cell size in pixels, for text-area size queries and the resize callback.
@@ -233,6 +238,7 @@ impl Terminal {
         Self {
             term,
             parser: Processor::new(),
+            marks: Scanner::default(),
             capture,
             theme: TerminalTheme::default(),
             cell_px: (0.0, 0.0),
@@ -256,12 +262,19 @@ impl Terminal {
     /// The context-free core of [`Self::feed`]: runs the parser, sends replies
     /// through `write`, and returns what still needs a gpui context.
     pub(crate) fn process(&mut self, bytes: &[u8]) -> Vec<Notice> {
-        self.parser.advance(&mut self.term, bytes);
+        let mut notices = Vec::new();
+        let mut from = 0;
+        for (end, mark) in self.marks.scan(bytes) {
+            self.parser.advance(&mut self.term, &bytes[from..end]);
+            from = end;
+            let at = self.cursor_pos();
+            notices.push(Notice::Event(TerminalEvent::PromptMark { mark, at }));
+        }
+        self.parser.advance(&mut self.term, &bytes[from..]);
         if let Some(search) = self.search.as_mut() {
             search.refresh(&self.term);
         }
         let mut reply = Vec::new();
-        let mut notices = Vec::new();
         let events: Vec<Event> = self.capture.events.borrow_mut().drain(..).collect();
         for event in events {
             match event {
@@ -717,6 +730,39 @@ impl Terminal {
             text.pop();
         }
         Some(text)
+    }
+
+    /// Where the cursor is now, for [`Self::text_from`].
+    pub fn cursor_pos(&self) -> GridPos {
+        let at = self.term.grid().cursor.point;
+        GridPos {
+            line: at.line.0,
+            col: at.column.0,
+            history: self.history_size(),
+        }
+    }
+
+    /// The text from `at` to the end of the cursor's line, wrapped rows joined: what has been
+    /// typed since `at`. `None` when `at` is no longer part of the cursor's line (output went
+    /// by, or the screen was cleared). Scrolling since `at` is followed through the history
+    /// length; once the scrollback is full that cannot be told, so only a start on the
+    /// cursor's own row is trusted.
+    pub fn text_from(&self, at: GridPos) -> Option<String> {
+        let cursor = self.term.grid().cursor.point;
+        let grown = self.history_size().checked_sub(at.history)? as i32;
+        let full = self.history_size() >= self.config.scrolling_history;
+        let line = match (grown, full) {
+            (_, true) if cursor.line.0 != at.line => return None,
+            (0, _) | (_, true) => at.line,
+            _ => at.line - grown,
+        };
+        if line > cursor.line.0 || line < -(self.history_size() as i32) {
+            return None;
+        }
+        let from = Point::new(Line(line), Column(at.col.min(self.cols().saturating_sub(1))));
+        let to = Point::new(cursor.line, Column(self.cols().saturating_sub(1)));
+        let text = self.term.bounds_to_string(from, to);
+        (!text.contains('\n')).then_some(text)
     }
 
     /// A viewport row as trimmed text (wide-char spacers skipped).
