@@ -29,3 +29,17 @@ TERN_NOTARY_PROFILE=tern-notary scripts/release.sh
 ```
 
 It signs and notarises the app, staples it, builds the dmg from the stapled app, signs, notarises and staples the dmg, then checks both with `spctl`. Without `TERN_NOTARY_PROFILE` it still signs and skips notarisation, saying so.
+
+## Without a Developer ID
+
+`scripts/release.sh` signs with the local identity "tern local" when no `TERN_SIGN_ID` is set (create it once with `scripts/make-local-identity.sh`). Such a release opens because the Homebrew cask removes the quarantine flag, and it updates itself: an installed tern accepts a download only when it is signed with the same certificate. So keep that identity: export "tern local" from Keychain Access (My Certificates → Export, a `.p12` with a password) and store it safely; a release signed with a new one is refused by every installed copy, which then needs `brew reinstall --cask tern`.
+
+1. With the version committed and pushed, run `scripts/release.sh`.
+2. Create the release with its files in one step, which also creates the tag (the release workflow then only sets the notes):
+
+   ```sh
+   gh release create vX.Y.Z target/release/bundle/tern-X.Y.Z-macos-arm64.{zip,dmg} --repo <owner>/tern \
+     --target main --title "tern vX.Y.Z" --notes-file <(awk '/^## \[X.Y.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)
+   ```
+
+3. Copy `target/release/bundle/tern.rb` to the tap repository `<owner>/homebrew-tern` as `Casks/tern.rb`, commit and push.

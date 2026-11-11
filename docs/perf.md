@@ -66,6 +66,8 @@ The first measurement sets the baseline; every release records a new row and may
 | — | — | app with one idle tab | not yet measured |
 | 2026-10-05 | 2fbea6e | no tab | 84.4 MB RSS · 44 MB footprint |
 | 2026-10-05 | 2fbea6e | one tab, connected to a LAN host, idle shell | 86.6 MB RSS (peak 91.7) · 49 MB footprint |
+| 2026-11-11 | 0.1.3 release (`/Applications/tern.app`), M1 Pro | no tab, empty config, 30 s | 101.6 MB RSS · 68 MB footprint |
+| 2026-11-11 | 0.2.0 release (`target/release/bundle`), M1 Pro | same, two runs | 100.8 / 101.2 MB RSS · 70 / 88 MB footprint |
 
 Baseline, set by the second row: **49 MB footprint / 87 MB RSS**. Measured on an M4 Pro,
 macOS 26.6.2, with the screen locked, so no frames were being composited. A connected tab

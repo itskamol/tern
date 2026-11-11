@@ -16,10 +16,10 @@
 </p>
 
 ```sh
-brew install --cask your-moon/tern/tern
+brew install --cask itskamol/tern/tern
 ```
 
-Or download the DMG from [Releases](https://github.com/your-moon/tern/releases). It is signed and notarised, so it opens without a warning.
+Or download the DMG from [Releases](https://github.com/itskamol/tern/releases). These builds are signed with a local certificate, not notarised: Homebrew clears the quarantine flag for you; a DMG copy needs `xattr -dr com.apple.quarantine /Applications/tern.app` once. tern then updates itself.
 
 ## Why tern
 

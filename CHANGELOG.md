@@ -4,6 +4,8 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-11
+
 ### Added
 
 - tern updates itself on macOS. The daily update check downloads a newer release, keeps it only if it is the same app at the announced version and signed with the same certificate as the installed tern, and installs it when tern quits or on "Restart now" (a toast, and Settings → About). A build signed ad hoc cannot be matched, so it keeps offering the release page. Settings → About → Check for updates turns both off.
@@ -170,7 +172,8 @@ The first release: a daily-driver SSH client for macOS.
 - Secrets are held as zeroizing `SecretString`s and never logged; session output is redacted from `Debug`.
 - RUSTSEC-2023-0071 in `rsa` (via russh) is accepted for now; see [SECURITY.md](SECURITY.md) and #16.
 
-[Unreleased]: https://github.com/your-moon/tern/compare/v0.1.3...main
+[Unreleased]: https://github.com/itskamol/tern/compare/v0.2.0...main
+[0.2.0]: https://github.com/itskamol/tern/releases/tag/v0.2.0
 [0.1.3]: https://github.com/your-moon/tern/releases/tag/v0.1.3
 [0.1.2]: https://github.com/your-moon/tern/releases/tag/v0.1.2
 [0.1.1]: https://github.com/your-moon/tern/releases/tag/v0.1.1
