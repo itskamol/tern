@@ -135,7 +135,10 @@ pub enum Disconnect {
     ServerClosed,
     /// The server could not be reached while connecting (refused, no route, no answer).
     Unreachable,
-    /// Setup failed for a reason retrying will not fix: host key, login, proxy, bad request.
+    /// The server's host key does not match known_hosts. A hard stop: reconnecting only fails
+    /// again, and a changed key is also what an attack looks like.
+    HostKeyChanged,
+    /// Setup failed for a reason retrying will not fix: login, proxy, bad request.
     Failed,
 }
 
@@ -204,6 +207,7 @@ pub(crate) fn classify(f: &Failure, connected: bool) -> Disconnect {
             _ => Disconnect::Unreachable,
         },
         Failure::Transport(_) if connected => Disconnect::ServerClosed,
+        Failure::HostKeyChanged { .. } => Disconnect::HostKeyChanged,
         _ => Disconnect::Failed,
     }
 }
@@ -228,6 +232,7 @@ mod tests {
             Disconnect::Exited(1),
             Disconnect::Signaled("KILL".into()),
             Disconnect::Local,
+            Disconnect::HostKeyChanged,
             Disconnect::Failed,
         ] {
             assert!(!d.is_network(), "{d:?}");
@@ -321,8 +326,22 @@ mod tests {
 
     #[test]
     fn host_key_and_proxy_setup_failures_are_never_retried() {
+        assert_eq!(
+            classify(&Failure::HostKeyChanged { line: 1 }, false),
+            Disconnect::HostKeyChanged
+        );
+        assert_eq!(
+            classify(
+                &Failure::Jump(
+                    "bastion".into(),
+                    Box::new(Failure::HostKeyChanged { line: 2 })
+                ),
+                false
+            ),
+            Disconnect::HostKeyChanged,
+            "a jump host's changed key stops the same way"
+        );
         let setup = [
-            Failure::HostKeyChanged { line: 1 },
             Failure::HostKeyCheck("unreadable".into()),
             Failure::Proxy("exit status 1".into()),
             Failure::BadJump("bob@".into()),

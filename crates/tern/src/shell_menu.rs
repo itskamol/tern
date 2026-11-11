@@ -106,7 +106,7 @@ impl Shell {
             return;
         };
         let alias = tab.alias.clone();
-        let closed = tab.session().read(cx).status.is_dormant();
+        let closed = tab.session().read(cx).status().is_dormant();
         let logging = tab.session().read(cx).is_logging();
         let broadcasting = self.is_broadcasting(tab.id);
         let mut items = Vec::new();

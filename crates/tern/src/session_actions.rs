@@ -125,7 +125,7 @@ impl Session {
 
     /// The shortcut: fills the password if, and only if, the cursor line is a password prompt.
     pub fn fill_password(&mut self, cx: &mut Context<Self>) {
-        if self.status != Status::Connected || self.login.is_some() {
+        if self.life.status() != Status::Connected || self.attempt.login.is_some() {
             return cx.emit(SessionNote::Message("The session is not connected".into()));
         }
         if let Err(why) = self.prompt_guard(cx) {
@@ -189,7 +189,7 @@ impl Session {
     /// Types the password and Enter into the remote, exactly as the keyboard would, unless the
     /// remote has written since the prompt was checked. Not mirrored to broadcast tabs.
     fn type_password(&mut self, secret: &SecretString, seq: u64, cx: &mut Context<Self>) {
-        if self.status != Status::Connected || self.login.is_some() {
+        if self.life.status() != Status::Connected || self.attempt.login.is_some() {
             return;
         }
         if seq != self.output_seq {

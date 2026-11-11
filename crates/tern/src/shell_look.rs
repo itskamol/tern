@@ -15,7 +15,6 @@
 //! The sharp picture is only the empty view's hero, laid out inside the main tile. Sidebar width
 //! is held in whole device pixels so no edge lands between two.
 
-use crate::indicator::Dot;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, Context, Hsla, IntoElement, ParentElement, Styled, Window,
@@ -150,7 +149,7 @@ impl Shell {
         Some(statusline::render(
             &self.theme,
             &session.label(),
-            Dot::of(&session.status, session.is_asking()),
+            session.dot(),
             session.latency(),
             session.elapsed(),
             bg,
@@ -168,7 +167,7 @@ impl Shell {
                     let ticking = s.settings.show_status_line
                         && s.tabs
                             .get(s.active)
-                            .is_some_and(|t| t.session().read(cx).status == Status::Connected);
+                            .is_some_and(|t| t.session().read(cx).status() == Status::Connected);
                     if ticking {
                         cx.notify();
                     }

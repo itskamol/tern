@@ -4,7 +4,7 @@
 
 use gpui::Hsla;
 
-use crate::session::Status;
+use crate::lifecycle::Status;
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -22,7 +22,7 @@ impl Shell {
         if let Some(ix) = self.tabs.iter().position(|tab| tab.alias == host.alias) {
             let session = self.tabs[ix].session().clone();
             session.update(cx, |s, cx| {
-                if s.status.is_dormant() {
+                if s.status().is_dormant() {
                     s.reconnect(cx);
                 }
             });
@@ -106,7 +106,7 @@ impl Shell {
         let mut last = Status::Connecting;
         let repaint =
             cx.observe(&session, move |shell, session, cx| {
-                let status = session.read(cx).status.clone();
+                let status = session.read(cx).status();
                 if status == Status::Closed && last != Status::Closed {
                     let ix = shell
                         .tabs

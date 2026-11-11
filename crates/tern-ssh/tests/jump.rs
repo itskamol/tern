@@ -93,7 +93,7 @@ async fn a_changed_hop_key_stops_the_chain_before_the_target() {
     let mut s = spec(target.port, &dir);
     s.proxy_jump = vec![hop(a.port)];
     let (error, reason) = start(s).await.err().unwrap();
-    assert_eq!(reason, Disconnect::Failed);
+    assert_eq!(reason, Disconnect::HostKeyChanged);
     let error = error.unwrap();
     assert!(error.contains("host key changed"), "{error}");
     assert!(

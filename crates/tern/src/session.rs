@@ -5,27 +5,19 @@ use gpui::{App, AppContext, Context, Entity, Subscription, Task, WeakEntity, Win
 use std::time::{Duration, Instant};
 
 use tern_ssh::{
-    ConnectSpec, Disconnect, InputError, MemoryKey, SecretString, SessionEvent, SessionHandle,
-    TermSize,
+    ConnectSpec, InputError, MemoryKey, SecretString, SessionEvent, SessionHandle, TermSize,
 };
 use tern_term::{Terminal, TerminalEvent, TerminalView};
 
+use crate::indicator::Dot;
 use crate::keeper::Keeper;
+pub use crate::lifecycle::Status;
+use crate::lifecycle::{self, End, Key, Lifecycle, Next, Start};
 use crate::login::Login;
 use crate::password_command::{Approvals, Auth, Purpose, Question};
 use crate::platform::SshRuntime;
-use crate::reconnect::{self, Backoff, Key};
 use crate::session_log::{self, SessionLog};
 use tern_term::TerminalTheme;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Status {
-    /// Restored from the last run and not dialled yet: Enter connects.
-    Idle,
-    Connecting,
-    Connected,
-    Closed,
-}
 
 /// What a new session runs.
 #[derive(Debug, Clone)]
@@ -61,43 +53,38 @@ impl Link {
     }
 }
 
-impl Status {
-    /// Nothing is running; Enter starts it.
-    pub fn is_dormant(&self) -> bool {
-        matches!(self, Status::Idle | Status::Closed)
-    }
-}
-
-struct Retry {
-    reason: &'static str,
-    at: Instant,
-    _tick: Task<()>,
-}
-
-pub struct Session {
-    pub status: Status,
-    /// When the current connection came up, and when it ended; the status line shows the
-    /// time between (or since).
-    connected_at: Option<std::time::Instant>,
-    ended_at: Option<std::time::Instant>,
-    /// Smoothed round-trip time of the live connection; `None` until the first probe answers.
-    latency: Option<Duration>,
+/// What one connection has asked and answered. A new connection starts from nothing, so a
+/// close resets it whole; what outlives a connection (`vault_skipped`) is kept on the session.
+#[derive(Default)]
+struct Attempt {
+    login: Option<Login>,
     flow: Option<vault::Flow>,
-    /// The vault passphrase is being asked for only so the connection can then dial.
-    connect_after_unlock: bool,
     /// The vault entry the open server question would answer.
     asking: Option<tern_vault::Key>,
     /// What the user typed for that question, offered for saving once connected.
     typed: Option<(tern_vault::Key, SecretString)>,
     /// Entries already answered from the vault on this connection.
     tried: Vec<tern_vault::Key>,
-    /// The person skipped opening the vault in this tab, so it is not asked again, also not
-    /// by an automatic reconnect (which would otherwise wait on the question).
-    vault_skipped: bool,
     /// The password command already had its turn on this connection.
     command_tried: bool,
     /// Secrets the user was already asked for on this connection.
     asked: Vec<tern_vault::Key>,
+}
+
+pub struct Session {
+    life: Lifecycle,
+    /// When the current connection came up, and when it ended; the status line shows the
+    /// time between (or since).
+    connected_at: Option<std::time::Instant>,
+    ended_at: Option<std::time::Instant>,
+    /// Smoothed round-trip time of the live connection; `None` until the first probe answers.
+    latency: Option<Duration>,
+    attempt: Attempt,
+    /// The vault passphrase is being asked for only so the connection can then dial.
+    connect_after_unlock: bool,
+    /// The person skipped opening the vault in this tab, so it is not asked again, also not
+    /// by an automatic reconnect (which would otherwise wait on the question).
+    vault_skipped: bool,
     /// How many times the remote has written: a password fill checked the screen at one
     /// count and types only if it is still the same (see `session_fill`).
     output_seq: u64,
@@ -120,12 +107,8 @@ pub struct Session {
     /// Every connection of this session is logged, as the settings ask.
     auto_log: bool,
     size: TermSize,
-    login: Option<Login>,
-    /// Set once a connection reached the shell; only then does a drop retry by itself.
-    ever_connected: bool,
-    backoff: Backoff,
-    /// A countdown to the next automatic dial; dropping it cancels the dial.
-    retry: Option<Retry>,
+    /// Redraws the countdown and dials when it is due; dropping it cancels the dial.
+    retry_tick: Option<Task<()>>,
     /// Forwards running on the current connection.
     forward_handles: Vec<tern_ssh::ForwardHandle>,
     _session_events: Task<()>,
@@ -156,7 +139,7 @@ impl Session {
             });
             let idle = matches!(launch, Launch::SshIdle(_));
             let (Launch::Ssh(spec) | Launch::SshIdle(spec)) = launch;
-            let mut link = Link {
+            let link = Link {
                 spec,
                 handle: None,
                 vault_keys: auth.vault_keys,
@@ -165,31 +148,14 @@ impl Session {
                 proxy_command: auth.proxy_command,
                 approvals: Approvals::here(),
             };
-            // A locked vault is unlocked before dialling, so its keys can be offered.
-            let unlock_first = !idle && Self::keys_need_unlock(&link, cx);
-            let vet_proxy = !idle && !unlock_first && link.proxy_question().is_some();
-            let task = if idle || unlock_first || vet_proxy {
-                Task::ready(())
-            } else {
-                Self::start(&mut link, size, cx)
-            };
             let this = Self {
-                status: if idle {
-                    Status::Idle
-                } else {
-                    Status::Connecting
-                },
+                life: Lifecycle::new(idle),
                 connected_at: None,
                 latency: None,
                 ended_at: None,
-                flow: None,
+                attempt: Attempt::default(),
                 connect_after_unlock: false,
-                asking: None,
-                typed: None,
-                tried: Vec::new(),
                 vault_skipped: false,
-                command_tried: false,
-                asked: Vec::new(),
                 output_seq: 0,
                 filling: false,
                 fill_hinted: false,
@@ -203,26 +169,20 @@ impl Session {
                 mirrors: Vec::new(),
                 auto_log,
                 size,
-                login: None,
-                ever_connected: false,
-                backoff: Backoff::default(),
-                retry: None,
+                retry_tick: None,
                 forward_handles: Vec::new(),
-                _session_events: task,
+                _session_events: Task::ready(()),
                 _terminal_events: subscription,
             };
             if idle {
                 this.show(b"\x1b[2mPress Enter to connect\x1b[0m\r\n", cx);
             }
             let mut this = this;
-            if auto_log && !idle {
-                this.start_auto_log();
-            }
-            if unlock_first {
-                this.ask_vault_before_dialling(cx);
-            }
-            if vet_proxy {
-                this.dial(cx);
+            if !idle {
+                if auto_log {
+                    this.start_auto_log();
+                }
+                this.begin(cx);
             }
             this
         })
@@ -273,7 +233,7 @@ impl Session {
     /// What was typed here also goes to the mirrors, except while a login question is open: a
     /// password typed for this server must not reach another one.
     fn mirror_typed(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-        if self.login.is_some() || !self.accepts_input() {
+        if self.attempt.login.is_some() || !self.accepts_input() {
             return;
         }
         self.mirrors.retain(|m| m.upgrade().is_some());
@@ -283,14 +243,9 @@ impl Session {
         }
     }
 
-    /// A login question is open and waiting for an answer.
-    pub fn is_asking(&self) -> bool {
-        self.login.is_some()
-    }
-
     /// Connected, with no login question waiting for an answer.
     fn accepts_input(&self) -> bool {
-        self.status == Status::Connected && self.login.is_none()
+        self.life.status() == Status::Connected && self.attempt.login.is_none()
     }
 
     /// Input from another tab: delivered only while this session is live, never to a closed
@@ -342,14 +297,14 @@ impl Session {
         self.link
             .handle
             .clone()
-            .filter(|_| self.status == Status::Connected)
+            .filter(|_| self.life.status() == Status::Connected)
     }
 
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
-        self.retry = None;
+        self.retry_tick = None;
         // A restored tab shows only its "Press Enter to connect" hint; clear it rather than leave
         // it above the login banner.
-        if self.status == Status::Idle {
+        if self.life.status() == Status::Idle {
             self.show(b"\x1b[2J\x1b[3J\x1b[H", cx);
         } else {
             self.show(b"\r\n", cx);
@@ -357,16 +312,32 @@ impl Session {
         if self.auto_log && self.log.is_none() {
             self.start_auto_log();
         }
-        self.status = Status::Connecting;
         self.connected_at = None;
         self.ended_at = None;
         self.latency = None;
-        if Self::keys_need_unlock(&self.link, cx) && !self.vault_skipped {
-            self.ask_vault_before_dialling(cx);
-        } else {
-            self.dial(cx);
-        }
+        self.begin(cx);
         cx.notify();
+    }
+
+    /// A tab opening and a reconnect both start here: the vault opens first when the
+    /// connection's keys are in it and it is locked, unless the person skipped it in this tab.
+    fn begin(&mut self, cx: &mut Context<Self>) {
+        let vault_first = Self::keys_need_unlock(&self.link, cx) && !self.vault_skipped;
+        match self.life.start(vault_first) {
+            Start::UnlockFirst => self.ask_vault_before_dialling(cx),
+            Start::Dial => self.dial(cx),
+        }
+    }
+
+    /// Where the connection is.
+    pub fn status(&self) -> Status {
+        self.life.status()
+    }
+
+    /// The tab's dot: the connection's state, with a question waiting for the person shown
+    /// apart from connecting.
+    pub fn dot(&self) -> Dot {
+        self.life.dot(self.attempt.login.is_some())
     }
 
     /// Starts the connection now.
@@ -397,7 +368,8 @@ impl Session {
 
     /// Round-trip time to show: only while the connection is up.
     pub fn latency(&self) -> Option<Duration> {
-        self.latency.filter(|_| self.status == Status::Connected)
+        self.latency
+            .filter(|_| self.life.status() == Status::Connected)
     }
 
     fn on_session_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
@@ -413,11 +385,9 @@ impl Session {
             }
             SessionEvent::Prompt(prompt) => self.on_prompt(prompt, cx),
             SessionEvent::Connected => {
-                self.status = Status::Connected;
+                self.life.connected();
                 self.connected_at = Some(std::time::Instant::now());
                 self.ended_at = None;
-                self.ever_connected = true;
-                self.backoff.reset();
                 self.start_spec_forwards(cx);
                 self.offer_save(cx);
                 cx.notify();
@@ -427,32 +397,26 @@ impl Session {
                 error,
                 reason,
             } => {
-                self.status = Status::Closed;
                 self.forget_forwards();
                 self.ended_at = Some(std::time::Instant::now());
-                self.login = None;
-                self.flow = None;
-                self.asking = None;
-                self.typed = None;
-                self.tried.clear();
-                self.command_tried = false;
-                self.asked.clear();
-                if reconnect::should_retry(&reason, self.ever_connected) {
-                    return self.schedule_retry(&reason, cx);
-                }
+                self.attempt = Attempt::default();
+                let end = match self.life.closed(&reason, Instant::now()) {
+                    Next::RetryAt(at) => return self.schedule_retry(at, cx),
+                    Next::Stop(end) => end,
+                };
                 let reason = match (error, exit_status) {
                     (Some(e), _) => e,
                     (None, Some(code)) => format!("exit status {code}"),
                     (None, None) => "closed".into(),
                 };
-                let next = match reason.starts_with("host key changed") {
+                let next = match end {
                     // Reconnecting only fails again; say how to drop the old key, but leave that
                     // step to the user, because a changed key is also what an attack looks like.
-                    true => format!(
+                    End::HostKeyChanged => format!(
                         "If the server was reinstalled, remove its old key and reconnect:\r\n  {}",
                         forget_key_command(&self.link.spec)
                     ),
-                    false => "Press Enter to reconnect".into(),
+                    End::Ended => "Press Enter to reconnect".into(),
                 };
                 self.show(
                     format!(
@@ -467,16 +431,15 @@ impl Session {
         }
     }
 
-    /// Counts down to the next dial, redrawing one line in the terminal every second.
-    fn schedule_retry(&mut self, reason: &Disconnect, cx: &mut Context<Self>) {
-        let delay = self.backoff.next_delay();
-        let label = reconnect::label(reason);
-        let at = Instant::now() + delay;
-        tracing::info!(
-            reason = label,
-            delay_secs = delay.as_secs(),
-            "session_retry_scheduled"
-        );
+    /// Counts down to the dial at `at`, redrawing one line in the terminal every second.
+    fn schedule_retry(&mut self, at: Instant, cx: &mut Context<Self>) {
+        if let Some((reason, _)) = self.life.retrying() {
+            tracing::info!(
+                reason,
+                delay_secs = at.saturating_duration_since(Instant::now()).as_secs(),
+                "session_retry_scheduled"
+            );
+        }
         let tick = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -495,41 +458,40 @@ impl Session {
                 }
             }
         });
-        self.retry = Some(Retry {
-            reason: label,
-            at,
-            _tick: tick,
-        });
+        self.retry_tick = Some(tick);
         self.show(b"\r\n", cx);
         self.draw_countdown(cx);
         cx.notify();
     }
 
     fn draw_countdown(&self, cx: &mut Context<Self>) {
-        let Some(retry) = &self.retry else { return };
-        let left = retry.at.saturating_duration_since(Instant::now());
+        let Some((reason, at)) = self.life.retrying() else {
+            return;
+        };
+        let left = at.saturating_duration_since(Instant::now());
         // Round up so the line never says 0s while still waiting.
         let secs = left.as_millis().div_ceil(1000) as u64;
-        let line = reconnect::notice(retry.reason, secs);
+        let line = lifecycle::notice(reason, secs);
         self.show(format!("\r\x1b[2K\x1b[2m{line}\x1b[0m").as_bytes(), cx);
     }
 
     /// The window came back to the front (wake from sleep, network returned): do not make a
     /// waiting tab sit out its backoff.
     pub fn nudge(&mut self, cx: &mut Context<Self>) {
-        if self.retry.is_some() {
+        if self.life.retrying().is_some() {
             self.reconnect(cx);
         }
     }
 
     fn on_terminal_event(&mut self, event: &TerminalEvent, cx: &mut Context<Self>) {
         match event {
-            TerminalEvent::Output(bytes) if self.status.is_dormant() => {
-                if self.retry.is_some() {
-                    match reconnect::key(bytes) {
+            TerminalEvent::Output(bytes) if self.life.status().is_dormant() => {
+                if self.life.retrying().is_some() {
+                    match lifecycle::key(bytes) {
                         Key::RetryNow => self.reconnect(cx),
                         Key::Stop => {
-                            self.retry = None;
+                            self.retry_tick = None;
+                            self.life.stop();
                             self.show(
                                 b"\r\n\x1b[2mStopped. Press Enter to reconnect\x1b[0m\r\n",
                                 cx,
@@ -541,12 +503,12 @@ impl Session {
                     self.reconnect(cx);
                 }
             }
-            TerminalEvent::Output(bytes) => match self.login.as_mut() {
+            TerminalEvent::Output(bytes) => match self.attempt.login.as_mut() {
                 Some(login) => {
                     let step = login.input(bytes);
                     let answer = step.done.then(|| login.take_answer()).flatten();
                     if step.done {
-                        self.login = None;
+                        self.attempt.login = None;
                         cx.notify();
                     }
                     self.show(&step.display, cx);
@@ -590,7 +552,7 @@ impl Session {
     /// snippet runs only when it ends with one. False when nothing could take it (not
     /// connected, or a login question is open and would swallow it).
     pub fn insert_text(&self, text: &str) -> bool {
-        if self.status != Status::Connected || self.login.is_some() {
+        if self.life.status() != Status::Connected || self.attempt.login.is_some() {
             return false;
         }
         self.send(text.replace("\r\n", "\r").replace('\n', "\r").into_bytes());

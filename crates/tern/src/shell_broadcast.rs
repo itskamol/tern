@@ -203,7 +203,7 @@ impl Shell {
                 continue;
             }
             any = true;
-            let live = tab.session().read(cx).status == Status::Connected;
+            let live = tab.session().read(cx).status() == Status::Connected;
             let on = self
                 .broadcast
                 .as_ref()

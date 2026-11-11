@@ -116,7 +116,7 @@ impl Shell {
         else {
             return;
         };
-        if session.read(cx).status != Status::Connected {
+        if session.read(cx).status() != Status::Connected {
             panel.error = Some("Not connected.".into());
             return cx.notify();
         }

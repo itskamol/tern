@@ -68,9 +68,9 @@ impl Session {
         let key = crate::login::key_for(&prompt, self.host(), self.port());
         // Each secret is tried from the vault once per connection, so a stale one falls
         // through to asking instead of failing in a loop.
-        if let Some(key) = key.filter(|k| !self.tried.contains(k)) {
+        if let Some(key) = key.filter(|k| !self.attempt.tried.contains(k)) {
             if let Some(secret) = Keeper::lookup(&key, cx) {
-                self.tried.push(key.clone());
+                self.attempt.tried.push(key.clone());
                 self.show(
                     format!(
                         "\x1b[2m[{} from the vault]\x1b[0m\r\n",
@@ -189,28 +189,28 @@ impl Session {
     /// The server's question, asked in the terminal; a typed password is remembered so it can
     /// be offered for saving once the login succeeds.
     fn ask_user(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
-        self.asking = crate::login::key_for(&prompt, self.host(), self.port());
+        self.attempt.asking = crate::login::key_for(&prompt, self.host(), self.port());
         // Asked again for the same secret means the last answer was refused; say so as
         // OpenSSH does, or a retry looks like the same prompt shown twice.
-        if let Some(key) = &self.asking {
-            if self.asked.contains(key) {
+        if let Some(key) = &self.attempt.asking {
+            if self.attempt.asked.contains(key) {
                 self.show(b"Permission denied, please try again.\r\n", cx);
             } else {
-                self.asked.push(key.clone());
+                self.attempt.asked.push(key.clone());
             }
         }
         let (login, question) = Login::start(prompt);
-        self.login = Some(login);
+        self.attempt.login = Some(login);
         self.show(&question, cx);
-        // The tab, sidebar and status dots read `is_asking`; a session nobody is drawing would
+        // The tab, sidebar and status dots read `dot`; a session nobody is drawing would
         // otherwise keep the connecting dot (with Reduce Motion nothing else redraws it).
         cx.notify();
     }
 
     pub(super) fn ask_local(&mut self, text: &str, echo: bool, flow: Flow, cx: &mut Context<Self>) {
         let (login, question) = Login::ask(text, echo);
-        self.login = Some(login);
-        self.flow = Some(flow);
+        self.attempt.login = Some(login);
+        self.attempt.flow = Some(flow);
         self.show(&question, cx);
         cx.notify();
     }
@@ -218,7 +218,7 @@ impl Session {
     /// Asks to save a typed secret once the remote has been quiet for [`QUIET`] (at most
     /// [`QUIET_MAX`] after login), so the question does not land inside the login banner.
     pub(super) fn offer_save(&mut self, cx: &mut Context<Self>) {
-        if self.typed.is_none() {
+        if self.attempt.typed.is_none() {
             return;
         }
         let started = Instant::now();
@@ -233,10 +233,10 @@ impl Session {
                 }
             }
             let _ = this.update(cx, |s, cx| {
-                if s.login.is_some() || s.status != super::Status::Connected {
+                if s.attempt.login.is_some() || s.life.status() != super::Status::Connected {
                     return;
                 }
-                if let Some((key, secret)) = s.typed.take() {
+                if let Some((key, secret)) = s.attempt.typed.take() {
                     let lead = if s.ends_line { "" } else { "\r\n" };
                     let text = format!(
                         "{lead}Save {} in tern's vault? (yes/no) ",
@@ -251,9 +251,9 @@ impl Session {
 
     /// A question finished; `answer` is what was typed, `None` after Ctrl-C.
     pub(super) fn answered(&mut self, answer: Option<SecretString>, cx: &mut Context<Self>) {
-        let Some(flow) = self.flow.take() else {
-            if let (Some(key), Some(secret)) = (self.asking.take(), answer) {
-                self.typed = Some((key, secret));
+        let Some(flow) = self.attempt.flow.take() else {
+            if let (Some(key), Some(secret)) = (self.attempt.asking.take(), answer) {
+                self.attempt.typed = Some((key, secret));
             }
             return;
         };
@@ -412,7 +412,11 @@ impl Session {
             .as_deref()
             .and_then(|c| self.link.approvals.ask(Purpose::Login, c));
         match (
-            pc::plan(command.as_deref(), self.command_tried, question.is_none()),
+            pc::plan(
+                command.as_deref(),
+                self.attempt.command_tried,
+                question.is_none(),
+            ),
             question,
             command,
         ) {
@@ -447,7 +451,7 @@ impl Session {
         match (then, self.link.approvals.answer(question, yes)) {
             (Then::Login(prompt), Some(command)) => self.run_command(command, prompt, cx),
             (Then::Login(prompt), None) => {
-                self.command_tried = true;
+                self.attempt.command_tried = true;
                 self.on_prompt(prompt, cx);
             }
             (Then::Proxy, Some(_)) => self.dial(cx),
@@ -456,7 +460,7 @@ impl Session {
                     "Not connected: the proxy command was not run. Enter asks again.",
                     cx,
                 );
-                self.status = super::Status::Closed;
+                self.life.stop();
                 cx.notify();
             }
             (Then::Fill(seq), Some(command)) => self.run_fill_command(command, seq, cx),
@@ -465,7 +469,7 @@ impl Session {
     }
 
     fn run_command(&mut self, command: String, prompt: Prompt, cx: &mut Context<Self>) {
-        self.command_tried = true;
+        self.attempt.command_tried = true;
         let work = cx.background_spawn(async move { pc::run(&command, pc::TIMEOUT) });
         cx.spawn(async move |this, cx| {
             let result = work.await;
