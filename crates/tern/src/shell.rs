@@ -656,7 +656,7 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &ToggleSnippets, w, cx| s.toggle_snippet_picker(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
             .on_action(cx.listener(|s, _: &ToggleSftp, w, cx| s.toggle_sftp(w, cx)))
-            .on_action(cx.listener(|s, _: &FillPassword, _, cx| s.fill_password(cx)))
+            .on_action(cx.listener(|s, _: &FillPassword, w, cx| s.fill_password(w, cx)))
             .on_action(cx.listener(|s, _: &ClearTerminal, _, cx| s.clear_terminal(cx)))
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
             .on_action(cx.listener(|s, _: &OpenSettings, w, cx| s.toggle_settings(w, cx)))

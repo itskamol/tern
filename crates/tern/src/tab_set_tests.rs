@@ -458,3 +458,49 @@ fn what_is_saved_ignores_layout_and_extra_panes() {
     assert!(saves.take().is_empty(), "layout changes are not saved");
     assert_eq!(tabs.saved().tabs.len(), 1);
 }
+
+/// Panes 1, 2 and 3 side by side in one tab; 3 has the keyboard.
+fn three_panes() -> TabSet<P> {
+    let mut tabs = side_by_side();
+    let id = tabs.new_pane_id();
+    tabs.split(2, Direction::Right, pane(id), floor()).unwrap();
+    tabs
+}
+
+fn asking(ids: &'static [PaneId]) -> impl Fn(&P) -> bool {
+    move |p| ids.contains(&p.0)
+}
+
+#[test]
+fn fill_goes_to_the_focused_pane_when_it_is_waiting_even_if_another_is_too() {
+    let tabs = three_panes();
+    assert_eq!(tabs.active_tab().unwrap().focused(), 3);
+    assert_eq!(tabs.fill_target(asking(&[1, 3])), FillTarget::Pane(3));
+}
+
+#[test]
+fn fill_goes_to_the_one_unfocused_pane_that_is_waiting() {
+    let tabs = three_panes();
+    assert_eq!(tabs.fill_target(asking(&[1])), FillTarget::Pane(1));
+}
+
+#[test]
+fn fill_is_not_guessed_when_two_unfocused_panes_are_waiting() {
+    let tabs = three_panes();
+    assert_eq!(tabs.fill_target(asking(&[1, 2])), FillTarget::Several);
+}
+
+#[test]
+fn fill_has_no_target_when_no_pane_is_waiting() {
+    let tabs = three_panes();
+    assert_eq!(tabs.fill_target(asking(&[])), FillTarget::None);
+}
+
+#[test]
+fn fill_only_looks_at_the_front_tab() {
+    let (mut tabs, _) = set(&["a", "b"]);
+    // Tab "b" (pane 2) is in front; pane 1 is in the tab behind it.
+    assert_eq!(tabs.fill_target(asking(&[1])), FillTarget::None);
+    tabs.activate(0);
+    assert_eq!(tabs.fill_target(asking(&[1])), FillTarget::Pane(1));
+}

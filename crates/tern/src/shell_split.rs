@@ -12,6 +12,7 @@ use gpui::{
 use tern_ssh::{ConnectSpec, HostEntry};
 
 use super::*;
+use crate::keymap::{self, Keymap, ShortcutId};
 use crate::sidebar::DraggedHost;
 use crate::split::{Axis, Direction, Floor, Node, PaneId, Rect, drop_side};
 use crate::theme::{FOCUS_BORDER, UNFOCUSED_OPACITY};
@@ -379,16 +380,20 @@ impl Shell {
             .drop_hint
             .filter(|(p, _)| *p == id)
             .map(|(_, side)| side);
+        // A pane not in front that waits at a password prompt says so; the badge is read from
+        // the session each frame, so it is gone as soon as the prompt is.
+        let asking = split && !focused && pane.session.read(cx).waiting_for_fill(cx);
+        let combo = cx.global::<Keymap>().combo(ShortcutId::FillPassword);
         div()
             .id(("pane", id))
             .relative()
             .size_full()
             // Said aloud when focus lands here, so moving between panes is not only visual.
             .role(Role::Group)
-            .aria_label(if focused && split {
-                format!("{}, focused pane", pane.host)
-            } else {
-                pane.host.clone()
+            .aria_label(match (focused && split, asking) {
+                (_, true) => format!("{}, password asked", pane.host),
+                (true, _) => format!("{}, focused pane", pane.host),
+                _ => pane.host.clone(),
             })
             // Only a split tab marks its focus; a lone pane would just wear a frame.
             .when(split, |el| {
@@ -415,8 +420,30 @@ impl Shell {
                 &pane.session.read(cx).view,
             ))
             .when_some(hint, |el, side| el.child(drop_zone(side, &t)))
+            .when(asking, |el| el.child(password_badge(combo, &t)))
             .into_any_element()
     }
+}
+
+/// "Password asked", in a corner of a pane that is waiting at a prompt; with the Fill shortcut
+/// named only while it is bound.
+fn password_badge(combo: &str, t: &Theme) -> gpui::Div {
+    let text = if combo.is_empty() {
+        "Password asked".to_owned()
+    } else {
+        format!("Password asked · {}", keymap::badge(combo))
+    };
+    div()
+        .absolute()
+        .top(px(8.))
+        .right(px(8.))
+        .px(px(6.))
+        .py(px(2.))
+        .rounded(px(4.))
+        .bg(t.accent)
+        .text_color(t.on_accent)
+        .text_size(px(11.))
+        .child(text)
 }
 
 /// The half of a pane a dropped host would take.

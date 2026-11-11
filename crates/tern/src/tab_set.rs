@@ -28,6 +28,18 @@ pub struct Heading {
     pub others: usize,
 }
 
+/// The pane Fill acts on, chosen from the front tab's panes that are waiting at a password
+/// prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillTarget {
+    /// The focused pane if it is waiting, else the only pane that is.
+    Pane(PaneId),
+    /// Two or more unfocused panes are waiting and the focused one is not: tern does not guess.
+    Several,
+    /// No pane is waiting.
+    None,
+}
+
 /// Where the tab list is saved: `tabs.json` in the app, a recorder in tests.
 pub trait TabStore {
     fn save(&self, tabs: &SavedTabs);
@@ -332,6 +344,23 @@ impl<P: Paned> TabSet<P> {
     pub fn neighbour(&self, dir: Direction) -> Option<PaneId> {
         let tab = self.active_tab()?;
         tab.tree.neighbour(tab.focused, dir)
+    }
+
+    /// Which pane of the front tab Fill acts on: see [`FillTarget`]. `waiting` says whether a
+    /// pane is at a password prompt that could be filled.
+    pub fn fill_target(&self, waiting: impl Fn(&P) -> bool) -> FillTarget {
+        let Some(tab) = self.active_tab() else {
+            return FillTarget::None;
+        };
+        if waiting(tab.front()) {
+            return FillTarget::Pane(tab.focused);
+        }
+        let mut others = tab.panes.iter().filter(|p| waiting(p));
+        match (others.next(), others.next()) {
+            (Some(only), None) => FillTarget::Pane(only.pane_id()),
+            (Some(_), Some(_)) => FillTarget::Several,
+            (None, _) => FillTarget::None,
+        }
     }
 
     /// The "Reopen tabs" setting, as it is now; turned on, the list is saved at once.
