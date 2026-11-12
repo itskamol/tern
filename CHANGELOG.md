@@ -4,11 +4,28 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-12
+
 ### Added
 
+- Check for updates now: tern → Check for Updates… (after About) and a Check now button on Settings → About's Version row check at once, even with the daily check off. A toast and the Version row say what happened: checking, up to date, downloading, ready (Restart now), available (Download) or why the check failed.
+- Splits can be resized: drag the divider, ⌃⌘ and an arrow move it in 5% steps, a double-click puts it back to half and half, and Shell → Equalize Panes evens a whole tab. A pane keeps at least 20 columns and 5 rows; a split that would go under says so instead. The remote hears the new size once the drag ends.
+- Split with another host: ⌥⌘D and Shell → Split Right/Down with Host… open the host picker, and a host dragged from the sidebar onto one half of a pane splits that side. ⌘D and ⇧⌘D still split with the same host.
+- With more than one pane, the focused pane has an accent border and the others are dimmed; the tab's title follows the focused pane's host with a "+N" for the others, unless you renamed the tab. Shell has Focus Pane ←/→/↑/↓, Close Pane and Equalize Panes.
+- Fill in an unfocused pane: a pane waiting at a password prompt shows "Password asked · ⌘\\", the hint names its host, and ⌘\\ moves to that pane and fills it once. With two panes waiting, ⌘\\ asks you to click the one to fill. Fill is still one key press, never automatic.
 - Command history: tern keeps the commands you run on each host, on this Mac only and never synced, up to 5000 per host. ⌘R opens it over the session with fuzzy search, newest first with repeats merged; ⌘A switches between this host and all hosts. Enter puts the line at the prompt, ⌘Enter also runs it, ⌫ deletes it, Esc closes. Lines with password, passwd, secret, token, api_key, apikey or private_key, `--password` or `-p<value>`, lines that start with a space, anything typed at a password prompt, in a full-screen program or while broadcasting are left out. Shells that mark their prompts (OSC 133) give the exact command; other shells are read from the screen. Settings → Command history clears one host's history or all of it.
 - A Files tab (⇧⌘O) with two panels side by side, each the Mac's own files or one host's. A host panel uses the login of an open session, or logs in by itself and asks the host key, password and vault questions in the panel. Files and whole folders copy by dragging between panels or with Copy, also host to host; either panel can make a folder, rename and delete (the Mac's go to the Trash, a host's cannot be undone). Files dragged in from Finder upload to the panel they are dropped on.
 - Copies are written as `name.part` and renamed when whole, removed on cancel or failure. A transfer list shows progress, speed and time left with Cancel and Cancel all; at most two copies run at once and one per destination host. A name that is already taken asks Replace, Keep both or Skip, with "apply to all". Copies keep going after the tab is closed, and quitting with copies running asks first.
+
+### Changed
+
+- The window keeps at most two Metal drawables instead of three, which saves one window-sized buffer (about 18.6 MB in a 1320×880 window, about 31 MB full screen) while output streams or the window resizes.
+- Opening the vault, the sync bundle or the PIN-wrapped passphrase refuses a file that asks for more scrypt work than tern writes (2^18): "this file asks for more work than tern allows". A synced-in file can no longer make tern allocate gigabytes.
+- `scripts/measure-memory.sh` replaces `scripts/measure-idle.sh`: it measures the no-tab, one-connected-tab and start-up peak scenes in a copied bundle and fails a release over its ceilings (RELEASING.md step 5).
+
+### Fixed
+
+- Sync no longer writes a merged `hosts.json` back as version 1: the merge keeps the highest version of its inputs, keeps keys it does not know, and refuses a version newer than this build can merge.
 
 ### Removed
 
@@ -183,7 +200,8 @@ The first release: a daily-driver SSH client for macOS.
 - Secrets are held as zeroizing `SecretString`s and never logged; session output is redacted from `Debug`.
 - RUSTSEC-2023-0071 in `rsa` (via russh) is accepted for now; see [SECURITY.md](SECURITY.md) and #16.
 
-[Unreleased]: https://github.com/itskamol/tern/compare/v0.2.0...main
+[Unreleased]: https://github.com/itskamol/tern/compare/v0.3.0...main
+[0.3.0]: https://github.com/itskamol/tern/releases/tag/v0.3.0
 [0.2.0]: https://github.com/itskamol/tern/releases/tag/v0.2.0
 [0.1.3]: https://github.com/your-moon/tern/releases/tag/v0.1.3
 [0.1.2]: https://github.com/your-moon/tern/releases/tag/v0.1.2
