@@ -19,6 +19,10 @@ use crate::icons::{self, icon};
 use crate::panel_login::Step;
 
 const ROW_HEIGHT: f32 = 26.0;
+/// Column widths shared by the titles and the rows, so the two cannot drift apart.
+const ICON_WIDTH: f32 = 15.0;
+const SIZE_WIDTH: f32 = 64.0;
+const MODIFIED_WIDTH: f32 = 92.0;
 
 use crate::files_tab_parts::{action, icon_button};
 
@@ -199,16 +203,22 @@ impl FilesView {
             .border_color(t.hairline)
             .text_size(px(11.))
             .text_color(t.faint)
-            .child(div().w(px(16.)))
-            .child(div().flex_1().child(title("Name", SortKey::Name)))
+            .child(div().w(px(ICON_WIDTH)).flex_none())
+            .child(div().flex_1().min_w_0().child(title("Name", SortKey::Name)))
             .child(
                 div()
-                    .w(px(64.))
+                    .w(px(SIZE_WIDTH))
+                    .flex_none()
                     .flex()
                     .justify_end()
                     .child(title("Size", SortKey::Size)),
             )
-            .child(div().w(px(92.)).child(title("Modified", SortKey::Modified)));
+            .child(
+                div()
+                    .w(px(MODIFIED_WIDTH))
+                    .flex_none()
+                    .child(title("Modified", SortKey::Modified)),
+            );
         let picked = p.selection.len();
         let footer = div()
             .flex_none()
@@ -621,6 +631,9 @@ impl FilesView {
                 };
                 div()
                     .id(("files-row", side * 1_000_000 + ix))
+                    // A uniform_list lays each row out on its own; without a width it shrinks to
+                    // its name and Size and Modified drift off their column titles.
+                    .w_full()
                     .h(px(ROW_HEIGHT))
                     .flex_none()
                     .px(px(12.))
@@ -647,7 +660,8 @@ impl FilesView {
                         } else {
                             icons::DOCUMENT
                         })
-                        .size(px(15.))
+                        .size(px(ICON_WIDTH))
+                        .flex_none()
                         .text_color(if e.is_dir {
                             t.accent
                         } else {
@@ -663,7 +677,7 @@ impl FilesView {
                     )
                     .child(
                         div()
-                            .w(px(64.))
+                            .w(px(SIZE_WIDTH))
                             .flex_none()
                             .flex()
                             .justify_end()
@@ -676,7 +690,7 @@ impl FilesView {
                     )
                     .child(
                         div()
-                            .w(px(92.))
+                            .w(px(MODIFIED_WIDTH))
                             .flex_none()
                             .truncate()
                             .text_color(t.muted)
