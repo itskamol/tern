@@ -19,6 +19,8 @@ cd "$(dirname "$0")/.."
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 [ -n "$version" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
 tag="v$version"
+repo=$(sed -n 's|^repository = "https://github.com/\(.*\)"|\1|p' Cargo.toml | head -n 1)
+[ -n "$repo" ] || { echo "no GitHub repository in Cargo.toml" >&2; exit 1; }
 
 scripts/bundle-app.sh
 
@@ -33,9 +35,13 @@ ditto -c -k --keepParent "$app" "$zip"
 sha=$(shasum -a 256 "$zip" | awk '{print $1}')
 
 # dmgbuild lives in a venv under target/ at a pinned version, so the system Python is untouched.
+# dmgbuild 1.6.7 needs Python 3.10+; macOS's own python3 is 3.9, so take the newest found.
 venv=target/dmgbuild-venv
 if ! "$venv/bin/python" -c 'import dmgbuild' 2>/dev/null; then
-  python3 -m venv "$venv"
+  py=$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3.10 || true)
+  [ -n "$py" ] || { echo "dmgbuild needs Python 3.10 or newer (brew install python)" >&2; exit 1; }
+  rm -rf "$venv"
+  "$py" -m venv "$venv"
   "$venv/bin/pip" install --quiet "dmgbuild==1.6.7"
 fi
 
@@ -94,7 +100,27 @@ else
 fi
 
 cask="$out/tern.rb"
-sed -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" packaging/homebrew/tern.rb > "$cask"
+sed -e "s|@REPO@|$repo|g" -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" \
+  packaging/homebrew/tern.rb > "$cask"
+
+# The filled cask passes Homebrew's own linter before it goes to the tap: a cask Homebrew cannot
+# read breaks `brew install` for everyone using the tap.
+if command -v brew >/dev/null; then
+  check_tap=local/tern-release-check
+  brew untap "$check_tap" >/dev/null 2>&1 || true
+  brew tap-new --no-git "$check_tap" >/dev/null
+  mkdir -p "$(brew --repository)/Library/Taps/local/homebrew-tern-release-check/Casks"
+  cp "$cask" "$(brew --repository)/Library/Taps/local/homebrew-tern-release-check/Casks/tern.rb"
+  if ! brew style --cask "$check_tap/tern"; then
+    brew untap "$check_tap" >/dev/null 2>&1 || true
+    echo "the cask fails brew style; fix packaging/homebrew/tern.rb" >&2
+    exit 1
+  fi
+  brew untap "$check_tap" >/dev/null 2>&1 || true
+  echo "cask passes brew style"
+else
+  echo "cask not checked (no brew)"
+fi
 
 echo
 echo "dmg:    $dmg"
@@ -104,4 +130,4 @@ echo "cask:   $cask (copy to the tap's Casks/tern.rb)"
 echo
 echo "Not run. When ready, with $tag tagged and pushed:"
 echo
-echo "  gh release create $tag \"$dmg\" \"$zip\" --repo your-moon/tern --title \"tern $version\" --notes-file <(awk '/^## \\[$version\\]/{f=1;next} /^## \\[/{f=0} f' CHANGELOG.md)"
+echo "  gh release create $tag \"$dmg\" \"$zip\" --repo $repo --title \"tern $version\" --notes-file <(awk '/^## \\[$version\\]/{f=1;next} /^## \\[/{f=0} f' CHANGELOG.md)"

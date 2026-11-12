@@ -3,11 +3,10 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, MouseUpEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, point, px,
-    size,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
+    MouseButton, MouseUpEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowOptions, actions, div, point, px, size,
 };
 #[cfg(debug_assertions)]
 use tern_ssh::ConnectSpec;
@@ -20,7 +19,9 @@ use crate::picker::{self, Picker, ToggleHostPicker};
 use crate::session::{Launch, Session, Status};
 use crate::settings::{self, SIDEBAR_DEFAULT, Settings};
 use crate::split::{self, PaneId};
+use crate::tab_set::TabSet;
 use crate::tabs::{self, ActivateTab, CloseTab, NextTab, PrevTab, TabInfo};
+use crate::tabs_store::DiskTabs;
 use crate::theme::{Theme, UI_FONT};
 use crate::{sidebar, statusline};
 
@@ -28,30 +29,44 @@ actions!(
     tern,
     [
         ToggleSidebar,
+        OpenFiles,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
         NewConnection,
         SplitRight,
         SplitDown,
+        SplitRightWithHost,
+        SplitDownWithHost,
+        ResizePaneLeft,
+        ResizePaneRight,
+        ResizePaneUp,
+        ResizePaneDown,
+        EqualizePanes,
+        ClosePane,
         FocusPaneLeft,
         FocusPaneRight,
         FocusPaneUp,
         FocusPaneDown,
-        OpenSettings
+        OpenSettings,
+        ShowAbout,
+        CheckForUpdates
     ]
 );
 
 #[path = "shell_broadcast.rs"]
 mod broadcast_ui;
+#[path = "shell_files.rs"]
+mod files_ui;
+#[path = "shell_pane.rs"]
+mod pane_ui;
+use pane_ui::{Content, Pane, Tab, TermPane};
 #[path = "shell_forwards.rs"]
 mod forwards_ui;
-#[path = "shell_sftp.rs"]
-mod sftp_ui;
-pub(crate) use forwards_ui::FillPassword;
-pub(crate) use sftp_ui::ToggleSftp;
-#[path = "shell_wallpaper_gallery.rs"]
-mod gallery_ui;
+pub(crate) use forwards_ui::{ClearTerminal, FillPassword};
+pub(crate) use history_ui::ToggleCommandHistory;
+#[path = "shell_history.rs"]
+mod history_ui;
 #[path = "shell_look.rs"]
 mod look;
 #[path = "shell_menu.rs"]
@@ -60,6 +75,8 @@ mod menu;
 mod open;
 #[path = "shell_settings.rs"]
 mod settings_ui;
+#[path = "shell_split.rs"]
+mod split_ui;
 #[path = "shell_sync.rs"]
 mod sync_ui;
 #[path = "shell_tabs.rs"]
@@ -74,8 +91,6 @@ mod update_ui;
 mod vault_page_ui;
 #[path = "shell_vault.rs"]
 mod vault_ui;
-#[path = "shell_wallpaper.rs"]
-mod wallpaper_ui;
 
 pub(crate) use toast::CubicBezier;
 
@@ -94,7 +109,7 @@ mod import_ui;
 #[path = "shell_snippets.rs"]
 mod snippets_ui;
 
-pub(crate) use hostlist::FocusHostSearch;
+pub(crate) use hostlist::{FocusHostSearch, RedoHosts, UndoHosts};
 pub(crate) use snippets_ui::ToggleSnippets;
 
 pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
@@ -130,28 +145,33 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
     let window = cx.open_window(options, |_, cx| {
         cx.new(|cx| {
             let theme = Theme::zeron_dark();
+            let settings = settings::dir()
+                .map(|d| Settings::load(&d))
+                .unwrap_or_default();
             let mut shell = Shell {
                 focus: cx.focus_handle(),
-                settings: settings::dir()
-                    .map(|d| Settings::load(&d))
-                    .unwrap_or_default(),
+                tabs: TabSet::new(Box::new(DiskTabs), settings.reopen_tabs),
+                drop_hint: None,
+                settings,
                 theme,
                 hosts: Vec::new(),
                 connections,
                 store_error,
                 form: None,
                 confirm_delete: None,
-                tabs: Vec::new(),
                 renaming: None,
-                restoring: false,
-                next_tab: 0,
-                next_pane: 0,
                 broadcast: None,
                 broadcast_picker: None,
                 panels: Default::default(),
-                active: 0,
+                transfers: cx.new(|cx| {
+                    crate::transfers::Transfers::new(crate::platform::SshRuntime::handle(cx), cx)
+                }),
+                quit_ask: false,
+                conflict_all: false,
+                _transfers_sub: None,
                 error: None,
                 picker: None,
+                history: Default::default(),
                 sidebar_tween: None,
                 settings_page: None,
                 theme_picker: None,
@@ -163,22 +183,35 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 vault_ui: None,
                 last_input: std::time::Instant::now(),
                 toasts: toast::Toasts::new(),
-                tab_scroll: gpui::ScrollHandle::new(),
+                tab_scroll: tabs::StripScroll::default(),
                 context_menu: None,
                 hostlist: hostlist::HostList::new(&theme, recent, cx),
                 snippets: snippets_ui::SnippetsUi::load(),
                 import: None,
-                wp: wallpaper_ui::State::default(),
                 frame: look::FrameState::default(),
                 system_light: false,
+                update_ready: None,
+                update_check: Default::default(),
                 _clock: None,
             };
             shell.refresh_hosts();
+            shell._transfers_sub = Some(cx.subscribe(
+                &shell.transfers,
+                |s, _, done: &crate::transfers::Finished, cx| s.on_transfer_finished(done, cx),
+            ));
             shell
         })
     })?;
+    window.update(cx, |_, window, cx| {
+        // The close button asks first when copies are running.
+        let shell = cx.entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            shell.update(cx, |s, cx| s.close_allowed(cx))
+        });
+    })?;
     window.update(cx, |shell, window, cx| {
-        crate::platform::apply_reduce_motion(shell.settings.reduce_motion, cx);
+        shell.reapply(settings::Reapply::all(), cx);
+        shell.sync_display_preferences(cx);
         crate::drawables::apply(window);
         // Resize, full screen and display changes all move the bounds; re-apply is a no-op
         // while the count holds.
@@ -190,27 +223,33 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
         // comes to the front: the user changes it in System Settings, then switches back.
         cx.observe_window_activation(window, |shell, window, cx| {
             crate::platform::apply_reduce_motion(shell.settings.reduce_motion, cx);
+            shell.sync_display_preferences(cx);
             if window.is_window_active() {
-                for pane in shell.tabs.iter().flat_map(|t| &t.panes) {
-                    pane.session.update(cx, |s, cx| s.nudge(cx));
+                for session in shell
+                    .tabs
+                    .iter()
+                    .flat_map(|t| t.panes())
+                    .filter_map(Pane::session)
+                {
+                    session.update(cx, |s, cx| s.nudge(cx));
                 }
             }
         })
         .detach();
         shell.system_light = is_light(window.appearance());
-        shell.apply_appearance(cx);
+        shell.retheme(cx);
         shell.install_input_colors(cx);
         shell.start_clock(cx);
         cx.observe_window_appearance(window, |shell, window, cx| {
             shell.system_light = is_light(window.appearance());
-            shell.apply_appearance(cx);
+            shell.retheme(cx);
         })
         .detach();
         shell.check_for_updates(cx);
         shell.start_auto_sync(window, cx);
     })?;
     // With no tab open nothing else holds focus, and gpui only dispatches key bindings along
-    // the focused element's path, so the shell itself must be focused for ⌘K to work.
+    // the focused element's path, so the shell itself must be focused for ⌘T to work.
     window.update(cx, |shell, window, cx| window.focus(&shell.focus, cx))?;
     window.update(cx, |shell, window, cx| shell.restore_tabs(window, cx))?;
     window.update(cx, |shell, _, cx| shell.watch_idle(cx))?;
@@ -236,20 +275,26 @@ pub struct Shell {
     store_error: Option<String>,
     form: Option<connections_ui::ConnectionForm>,
     confirm_delete: Option<usize>,
-    tabs: Vec<Tab>,
+    tabs: TabSet<Pane>,
+    /// A host being dragged over a pane: the pane and the side it would take.
+    drop_hint: Option<(PaneId, split::Direction)>,
     /// The tab whose title is being edited in the strip.
     renaming: Option<tabs_ui::Rename>,
-    /// True while the last run's tabs are being reopened, so half a list is never saved.
-    restoring: bool,
     /// Input typed in one tab also going to others, and the list that picks them.
-    next_tab: broadcast_ui::TabId,
-    next_pane: PaneId,
     broadcast: Option<broadcast_ui::Broadcast>,
     broadcast_picker: Option<broadcast_ui::BroadcastPicker>,
     panels: forwards_ui::Panels,
-    active: usize,
+    /// The copies in progress: the queue is the shell's, so closing a Files tab does not stop
+    /// one.
+    transfers: Entity<crate::transfers::Transfers>,
+    /// Quitting with copies running is being asked about.
+    quit_ask: bool,
+    /// The conflict sheet's "apply to all" box.
+    conflict_all: bool,
+    _transfers_sub: Option<Subscription>,
     error: Option<String>,
     picker: Option<Picker>,
+    history: history_ui::HistoryUi,
     sidebar_tween: Option<WidthTween>,
     settings_page: Option<settings_ui::Section>,
     theme_picker: Option<themes_ui::ThemePicker>,
@@ -263,58 +308,29 @@ pub struct Shell {
     /// The last key or mouse input to the window, for the vault's idle lock.
     last_input: std::time::Instant,
     toasts: toast::Toasts,
-    tab_scroll: gpui::ScrollHandle,
+    tab_scroll: tabs::StripScroll,
     context_menu: Option<menu::ContextMenu>,
     hostlist: hostlist::HostList,
     snippets: snippets_ui::SnippetsUi,
     import: Option<import_ui::ImportSheet>,
-    wp: wallpaper_ui::State,
     frame: look::FrameState,
     /// Whether macOS is in its light appearance; what `Appearance: System` follows.
     system_light: bool,
+    /// A downloaded, checked update; it is installed when tern quits, or on "Restart now".
+    update_ready: Option<std::rc::Rc<update_ui::Staged>>,
+    /// Whether an update check runs, and how the last one ended.
+    update_check: crate::update_outcome::CheckState,
     _clock: Option<gpui::Task<()>>,
 }
 
 /// Debug builds: keep scripted logins out of the real ~/.ssh/known_hosts.
 #[cfg(debug_assertions)]
-fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
+pub(crate) fn with_dev_known_hosts(spec: ConnectSpec) -> ConnectSpec {
     ConnectSpec {
         known_hosts: std::env::var_os("TERN_KNOWN_HOSTS")
             .map(Into::into)
             .or(spec.known_hosts),
         ..spec
-    }
-}
-
-/// One terminal in a tab: a connection.
-struct Pane {
-    id: PaneId,
-    session: Entity<Session>,
-    _repaint: Subscription,
-    _bell: Subscription,
-    _notes: Subscription,
-}
-
-struct Tab {
-    id: broadcast_ui::TabId,
-    alias: String,
-    /// The user's name for the tab. It belongs to the tab, not the session, so a reconnect
-    /// keeps it.
-    title: Option<String>,
-    /// How the panes are laid out, and which one has the keyboard.
-    tree: split::Node,
-    focused: PaneId,
-    panes: Vec<Pane>,
-}
-
-impl Tab {
-    /// The focused pane's session: what the strip shows and what typing reaches.
-    fn session(&self) -> &Entity<Session> {
-        match self.panes.iter().find(|p| p.id == self.focused) {
-            Some(pane) => &pane.session,
-            // `focused` always names a pane; the first is the fallback if that ever breaks.
-            None => &self.panes[0].session,
-        }
     }
 }
 
@@ -338,17 +354,6 @@ impl Shell {
     }
 
     /// Applies a settings change and writes it out; a failed write is logged, not fatal.
-    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        change(&mut self.settings);
-        self.settings = self.settings.clone().clamped();
-        if let Some(dir) = settings::dir()
-            && let Err(e) = self.settings.save(&dir)
-        {
-            tracing::warn!(error = %e, "settings_save_failed");
-        }
-        cx.notify();
-    }
-
     fn sidebar_target(&self) -> f32 {
         if self.settings.sidebar_collapsed {
             0.0
@@ -411,7 +416,7 @@ impl Shell {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|shell, _, _, cx| shell.update_settings(|_| {}, cx)),
+                cx.listener(|shell, _, _, _| shell.save_settings()),
             )
     }
 
@@ -425,22 +430,12 @@ impl Shell {
 
     /// Focus back to the active terminal, or the window when there is none.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = match self.tabs.get(self.active) {
-            Some(tab) => tab.session().read(cx).view.focus_handle(cx),
+        let focus = match self.tabs.active_tab() {
+            Some(tab) => tab.focus_handle(cx),
             None => self.focus.clone(),
         };
         window.focus(&focus, cx);
         cx.notify();
-    }
-
-    fn apply_option_as_meta(&self, cx: &mut Context<Self>) {
-        let on = self.settings.option_as_meta;
-        for tab in &self.tabs {
-            for pane in &tab.panes {
-                let view = pane.session.read(cx).view.clone();
-                view.update(cx, |v, _| v.set_option_as_meta(on));
-            }
-        }
     }
 
     pub fn hosts(&self) -> &[HostEntry] {
@@ -470,13 +465,10 @@ impl Shell {
             .enumerate()
             .map(|(ix, tab)| TabInfo {
                 alias: tab.alias.clone(),
-                title: tab.title.clone(),
-                logging: tab.session().read(cx).is_logging(),
+                heading: tab.heading(),
+                logging: tab.session().is_some_and(|s| s.read(cx).is_logging()),
                 broadcast: self.is_broadcasting(tab.id),
-                dot: {
-                    let s = tab.session().read(cx);
-                    Dot::of(&s.status, s.is_asking())
-                },
+                dot: tab.session().map_or(Dot::Idle, |s| s.read(cx).dot()),
                 rename: self
                     .renaming
                     .as_ref()
@@ -486,15 +478,9 @@ impl Shell {
             .collect()
     }
 
-    /// The main panel's content: the active tab's panes, or the empty view, which carries the
-    /// wallpaper `hero` (the picture filling the tile) under its text.
-    fn panel_content(
-        &self,
-        hero: Option<AnyElement>,
-        panel_bg: gpui::Hsla,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if let Some(tab) = self.tabs.get(self.active) {
+    /// The main panel's content: the active tab's panes, or the empty view.
+    fn panel_content(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(tab) = self.tabs.active_tab() {
             return self.render_panes(tab, cx);
         }
         let t = self.theme;
@@ -523,9 +509,6 @@ impl Shell {
             ),
             None => ("No session open".into(), None),
         };
-        // Over the picture the text sits below its upper part, on a plate of the panel colour,
-        // so it never depends on what the picture holds.
-        let on_picture = hero.is_some();
         div()
             .size_full()
             .relative()
@@ -534,14 +517,12 @@ impl Shell {
             .items_center()
             .justify_center()
             .gap(px(16.))
-            .children(hero)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
                     .gap(px(4.))
-                    .when(on_picture, |el| look::plate(el, panel_bg))
                     .child(div().text_size(px(15.)).text_color(t.text).child(title))
                     .when_some(detail, |el, d| {
                         el.child(div().text_sm().text_color(t.muted).child(d))
@@ -574,7 +555,6 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .when(on_picture, |el| look::plate(el, panel_bg))
                     .child(hint(crate::keymap::ShortcutId::HostPicker, "Find a host"))
                     .child(hint(
                         crate::keymap::ShortcutId::NewConnection,
@@ -588,18 +568,18 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timed = tern_term::frame_stats::start(tern_term::frame_stats::Span::ShellRender);
         // Whatever held focus can disappear (a field hidden after sync, a closed form or tab);
         // with nothing focused gpui dispatches no keys at all, so the window takes it back.
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
         }
         self.sync_density(window);
-        self.sync_wallpaper(cx);
         self.sync_frame(window);
         let t = self.theme;
         let infos = self.tab_infos(cx);
-        let active_alias = infos.get(self.active).map(|i| i.alias.clone());
-        let strip = tabs::strip(&infos, self.active, &self.tab_scroll, &t, cx);
+        let active_alias = infos.get(self.tabs.active()).map(|i| i.alias.clone());
+        let strip = tabs::strip(&infos, self.tabs.active(), &self.tab_scroll, &t, cx);
         let query = self.search_query(cx);
         let sidebar = sidebar::render(
             &sidebar::SidebarState {
@@ -611,6 +591,7 @@ impl Render for Shell {
                 collapsed_groups: &self.hostlist.collapsed_groups,
                 query: &query,
                 search: &self.hostlist.search,
+                selected: self.sidebar_selection(window, cx),
             },
             &t,
             cx,
@@ -620,9 +601,7 @@ impl Render for Shell {
         let snippet_picker = self.render_snippet_picker(window, cx);
         let snippet_form = self.render_snippet_form(window, cx);
         let panel_bg = self.panel_background();
-        let hero = self.empty_view_hero(window);
-        let layers = self.backdrop();
-        let status_line = self.render_status_line(self.veil(panel_bg), cx);
+        let status_line = self.render_status_line(panel_bg, cx);
         let theme_picker = self.render_theme_picker(window, cx);
         let toast = self.render_toast(window, cx);
         let context_menu = self.render_menu(cx);
@@ -649,43 +628,35 @@ impl Render for Shell {
             .flex()
             .flex_col()
             .bg(self.window_base())
-            .children(layers)
             .font_family(UI_FONT)
             .text_color(t.text)
             .on_action(cx.listener(|s, _: &CloseTab, w, cx| s.close_pane_or_tab(w, cx)))
-            .on_action(
-                cx.listener(|s, _: &SplitRight, w, cx| s.split_pane(split::Axis::Row, w, cx)),
-            )
-            .on_action(
-                cx.listener(|s, _: &SplitDown, w, cx| s.split_pane(split::Axis::Column, w, cx)),
-            )
-            .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| {
-                s.move_pane_focus(split::Direction::Left, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| {
-                s.move_pane_focus(split::Direction::Right, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneUp, w, cx| {
-                s.move_pane_focus(split::Direction::Up, w, cx)
-            }))
-            .on_action(cx.listener(|s, _: &FocusPaneDown, w, cx| {
-                s.move_pane_focus(split::Direction::Down, w, cx)
-            }))
+            .map(|el| split_ui::pane_actions(el, cx))
             .on_action(cx.listener(|s, _: &NextTab, w, cx| {
-                s.show_tab(tabs::step(s.active, s.tabs.len(), 1), w, cx)
+                s.show_tab(tabs::step(s.tabs.active(), s.tabs.len(), 1), w, cx)
             }))
             .on_action(cx.listener(|s, _: &PrevTab, w, cx| {
-                s.show_tab(tabs::step(s.active, s.tabs.len(), -1), w, cx)
+                s.show_tab(tabs::step(s.tabs.active(), s.tabs.len(), -1), w, cx)
             }))
             .on_action(cx.listener(|s, a: &ActivateTab, w, cx| s.show_tab(a.0, w, cx)))
             .on_action(cx.listener(|s, _: &ToggleHostPicker, w, cx| s.toggle_picker(w, cx)))
             .on_action(cx.listener(|s, _: &FocusHostSearch, w, cx| s.focus_search(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSnippets, w, cx| s.toggle_snippet_picker(w, cx)))
+            .on_action(
+                cx.listener(|s, _: &ToggleCommandHistory, w, cx| s.toggle_command_history(w, cx)),
+            )
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
-            .on_action(cx.listener(|s, _: &ToggleSftp, w, cx| s.toggle_sftp(w, cx)))
-            .on_action(cx.listener(|s, _: &FillPassword, _, cx| s.fill_password(cx)))
+            .on_action(cx.listener(|s, _: &OpenFiles, w, cx| s.open_files_tab(None, w, cx)))
+            .on_action(cx.listener(|s, _: &FillPassword, w, cx| s.fill_password(w, cx)))
+            .on_action(cx.listener(|s, _: &ClearTerminal, _, cx| s.clear_terminal(cx)))
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
             .on_action(cx.listener(|s, _: &OpenSettings, w, cx| s.toggle_settings(w, cx)))
+            .on_action(cx.listener(|s, _: &ShowAbout, w, cx| s.open_settings_at_about(w, cx)))
+            .when(!self.update_check_running(), |d| {
+                d.on_action(cx.listener(|s, _: &CheckForUpdates, _, cx| s.check_now(cx)))
+            })
+            .on_action(cx.listener(|s, _: &UndoHosts, w, cx| s.undo_hosts(w, cx)))
+            .on_action(cx.listener(|s, _: &RedoHosts, w, cx| s.redo_hosts(w, cx)))
             // Capture phase: the terminal handles Escape itself, and ending a broadcast must
             // not depend on which pane has focus.
             .capture_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, _, cx| {
@@ -713,13 +684,13 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|s, _: &IncreaseFontSize, _, cx| {
-                s.change_font(|st| st.step_font(1.0), cx)
+                s.update_settings(|st| st.step_font(1.0), cx)
             }))
             .on_action(cx.listener(|s, _: &DecreaseFontSize, _, cx| {
-                s.change_font(|st| st.step_font(-1.0), cx)
+                s.update_settings(|st| st.step_font(-1.0), cx)
             }))
             .on_action(cx.listener(|s, _: &ResetFontSize, _, cx| {
-                s.change_font(|st| st.terminal_font_size = settings::FONT_DEFAULT, cx)
+                s.update_settings(|st| st.terminal_font_size = settings::FONT_DEFAULT, cx)
             }))
             .on_drag_move(
                 cx.listener(|s, e: &gpui::DragMoveEvent<SidebarResize>, _, cx| {
@@ -731,7 +702,6 @@ impl Render for Shell {
                 window.is_fullscreen(),
                 !self.settings.sidebar_collapsed,
                 strip,
-                self.tile_tint(t.shell),
                 cx,
             ))
             .child(match self.settings_page {
@@ -744,12 +714,7 @@ impl Render for Shell {
                     .child(self.side_tile(sidebar_now, sidebar))
                     .child(
                         self.main_tile(panel_bg)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .child(self.panel_content(hero, panel_bg, cx)),
-                            )
+                            .child(div().flex_1().min_h_0().child(self.panel_content(cx)))
                             .when_some(status_line, |el, line| el.child(line)),
                     )
                     .children(handle)
@@ -758,11 +723,14 @@ impl Render for Shell {
             .when_some(form, |el, form| el.child(form))
             .when_some(import, |el, i| el.child(i))
             .when_some(snippet_picker, |el, p| el.child(p))
+            .when_some(self.render_command_history(window, cx), |el, p| el.child(p))
             .when_some(snippet_form, |el, f| el.child(f))
             .when_some(theme_picker, |el, p| el.child(p))
             .when_some(context_menu, |el, m| el.child(m))
             .when_some(self.render_broadcast_picker(cx), |el, p| el.child(p))
-            .children(self.render_panels(window, cx))
+            .children(self.render_panels(cx))
+            .children(self.render_conflict_sheet(window, cx))
+            .children(self.render_quit_sheet(window, cx))
             .when_some(toast, |el, t| el.child(t))
             .when_some(self.picker.as_ref(), |el, p| {
                 el.child(picker::render(

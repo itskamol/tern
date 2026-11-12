@@ -63,6 +63,10 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     geometry: Option<GridGeometry>,
     resize_task: Option<Task<()>>,
+    /// The remote is not told of size changes until released (a divider is being dragged).
+    resize_held: bool,
+    /// A size change happened while held: the remote still has to hear of it.
+    resize_owed: bool,
     selection_drag: Option<SelectionDrag>,
     selection_scroll_task: Option<Task<()>>,
     scroll_remainder: f32,
@@ -74,6 +78,8 @@ pub struct TerminalView {
     hover_link: Option<Link>,
     last_pointer: Option<gpui::Point<Pixels>>,
     options: TerminalOptions,
+    /// Text an input method is composing.
+    ime: Ime,
     /// Blink phase: whether a blinking cursor is currently drawn.
     cursor_on: bool,
     last_input: Instant,
@@ -84,6 +90,9 @@ pub struct TerminalView {
     bell_task: Option<Task<()>>,
     _bell_subscription: Subscription,
     _subscription: Subscription,
+    /// Prepaints so far; tests count them to tell a rebuilt view from a reused one.
+    #[cfg(test)]
+    prepaints: usize,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -104,6 +113,7 @@ impl TerminalView {
         terminal.update(cx, |t, _| t.set_theme(theme));
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
+        let ime = Ime::new(&focus_handle, window, cx);
         // Repaint exactly when the model changes.
         let subscription = cx.observe(&terminal, |this, _, cx| {
             // Output moved the grid under any hover; the next pointer move or
@@ -115,6 +125,11 @@ impl TerminalView {
             if this.options.flashes_on(event) {
                 this.flash(cx);
             }
+            if let TerminalEvent::ClipboardStore(text) = event
+                && this.options.clipboard_write
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }
         });
         Self {
             terminal,
@@ -122,6 +137,8 @@ impl TerminalView {
             focus_handle,
             geometry: None,
             resize_task: None,
+            resize_held: false,
+            resize_owed: false,
             selection_drag: None,
             selection_scroll_task: None,
             scroll_remainder: 0.0,
@@ -130,6 +147,7 @@ impl TerminalView {
             hover_link: None,
             last_pointer: None,
             options: TerminalOptions::default(),
+            ime,
             cursor_on: true,
             last_input: Instant::now(),
             _blink_task: Self::blink_loop(cx),
@@ -138,7 +156,20 @@ impl TerminalView {
             bell_task: None,
             _bell_subscription: bell_subscription,
             _subscription: subscription,
+            #[cfg(test)]
+            prepaints: 0,
         }
+    }
+
+    /// `view` as a child that fills its parent and is rebuilt only when it changes: when it or
+    /// its terminal notifies (output, selection, theme, options, blink phase, find, bell), when
+    /// its bounds or inherited text style change, or when the window is refreshed (a focus
+    /// change, a scale change). A parent that re-renders around an unchanged terminal then
+    /// replays the terminal's last frame instead of snapshotting and shaping the grid again.
+    /// The size is definite (the parent's), as GPUI's cache needs.
+    pub fn cached_child(view: &Entity<Self>) -> impl IntoElement {
+        view.clone()
+            .cached(gpui::StyleRefinement::default().size_full())
     }
 
     pub fn terminal(&self) -> &Entity<Terminal> {
@@ -156,35 +187,6 @@ impl TerminalView {
 
     fn mode(&self, cx: &App) -> TermMode {
         self.terminal.read(cx).mode()
-    }
-
-    /// Called from element prepaint with the frame's measured grid. Resizes
-    /// the local grid immediately and debounces the remote notification.
-    pub(crate) fn on_grid_metrics(&mut self, geometry: GridGeometry, cx: &mut Context<Self>) {
-        self.geometry = Some(geometry);
-        let changed = self.terminal.update(cx, |t, _| {
-            t.resize(
-                geometry.cols,
-                geometry.rows,
-                geometry.cell_w,
-                geometry.line_h,
-            )
-        });
-        if !changed {
-            return;
-        }
-        self.resize_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(RESIZE_DEBOUNCE_MS))
-                .await;
-            // Read the current size: later prepaints may have resized again
-            // inside the debounce window.
-            let _ = this.update(cx, |view, cx| {
-                view.terminal.update(cx, |t, cx| t.notify_remote_resize(cx));
-            });
-        }));
-        // No cx.notify(): this runs during prepaint, which already paints the
-        // resized grid.
     }
 
     // ---- keyboard ----
@@ -216,6 +218,23 @@ impl TerminalView {
             return;
         }
         let mode = self.mode(cx);
+        // The alternate screen has no scrollback; the program there gets these keys.
+        if let Some(key) = scrollback_key(ks).filter(|_| !mode.contains(TermMode::ALT_SCREEN)) {
+            self.terminal.update(cx, |t, cx| {
+                let page = t.rows() as i32;
+                match key {
+                    ScrollbackKey::PageUp => t.scroll(page),
+                    ScrollbackKey::PageDown => t.scroll(-page),
+                    ScrollbackKey::Top => t.scroll(t.history_size() as i32),
+                    ScrollbackKey::Bottom => t.scroll_to_bottom(),
+                }
+                cx.notify();
+            });
+            cx.stop_propagation();
+            return;
+        }
+        // Only keys the mapping owns are written here. Typed text, dead keys and composition are
+        // left unhandled so GPUI offers them to the input handler (see `ime`), once.
         let bytes = keystroke_bytes(ks, mode, self.option_as_meta);
         if let Some(bytes) = bytes {
             self.send_input(bytes, cx);
@@ -685,7 +704,12 @@ pub fn cell_at(x: f32, y: f32, cell_w: f32, line_h: f32, cols: usize, rows: usiz
 /// Wrap pasted text for the remote (bracketed-paste aware; strips the one
 /// control sequence a paste could use to break out of the bracket).
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    let sanitized = text.replace("\x1b[201~", "");
+    // Until none is left: removing one can join the bytes around it into another
+    // (`\x1b[20\x1b[201~1~`), which would end the paste early and run the rest.
+    let mut sanitized = text.to_owned();
+    while sanitized.contains("\x1b[201~") {
+        sanitized = sanitized.replace("\x1b[201~", "");
+    }
     if bracketed {
         let mut out = b"\x1b[200~".to_vec();
         out.extend_from_slice(sanitized.as_bytes());
@@ -700,7 +724,46 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 #[path = "view_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "view_cache_tests.rs"]
+mod cache_tests;
+
+#[cfg(test)]
+#[path = "view_ime_tests.rs"]
+mod ime_tests;
+
 mod cursor;
 mod find_links;
+mod ime;
+mod resize;
 use cursor::{BELL_FLASH_MS, BELL_PEAK_OPACITY};
 use find_links::{find_status, is_find_chord};
+use ime::Ime;
+
+/// Moving through the scrollback from the keyboard, as Terminal.app does.
+#[derive(Debug, PartialEq, Eq)]
+enum ScrollbackKey {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
+/// ⇧PageUp and ⇧PageDown move a page; ⌘Home and ⌘End (Ctrl+Shift+Home/End off macOS) go to
+/// the ends. Plain PageUp and Home still reach the remote.
+fn scrollback_key(ks: &gpui::Keystroke) -> Option<ScrollbackKey> {
+    let m = &ks.modifiers;
+    let ends = if cfg!(target_os = "macos") {
+        m.platform && !m.shift && !m.control && !m.alt
+    } else {
+        m.control && m.shift && !m.alt && !m.platform
+    };
+    let page = m.shift && !m.platform && !m.control && !m.alt;
+    match ks.key.as_str() {
+        "pageup" if page => Some(ScrollbackKey::PageUp),
+        "pagedown" if page => Some(ScrollbackKey::PageDown),
+        "home" if ends => Some(ScrollbackKey::Top),
+        "end" if ends => Some(ScrollbackKey::Bottom),
+        _ => None,
+    }
+}

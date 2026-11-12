@@ -6,22 +6,76 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- Command history: tern keeps the commands you run on each host, on this Mac only and never synced, up to 5000 per host. ⌘R opens it over the session with fuzzy search, newest first with repeats merged; ⌘A switches between this host and all hosts. Enter puts the line at the prompt, ⌘Enter also runs it, ⌫ deletes it, Esc closes. Lines with password, passwd, secret, token, api_key, apikey or private_key, `--password` or `-p<value>`, lines that start with a space, anything typed at a password prompt, in a full-screen program or while broadcasting are left out. Shells that mark their prompts (OSC 133) give the exact command; other shells are read from the screen. Settings → Command history clears one host's history or all of it.
+- A Files tab (⇧⌘O) with two panels side by side, each the Mac's own files or one host's. A host panel uses the login of an open session, or logs in by itself and asks the host key, password and vault questions in the panel. Files and whole folders copy by dragging between panels or with Copy, also host to host; either panel can make a folder, rename and delete (the Mac's go to the Trash, a host's cannot be undone). Files dragged in from Finder upload to the panel they are dropped on.
+- Copies are written as `name.part` and renamed when whole, removed on cancel or failure. A transfer list shows progress, speed and time left with Cancel and Cancel all; at most two copies run at once and one per destination host. A name that is already taken asks Replace, Keep both or Skip, with "apply to all". Copies keep going after the tab is closed, and quitting with copies running asks first.
+
+### Removed
+
+- The SFTP side panel and its Browse files shortcut slot: ⇧⌘O now opens the Files tab, which does what the panel did and more.
+- The wallpaper: the picture behind the window, Settings → Appearance → Wallpaper and its gallery, the effects (scanlines, ASCII, halftone, dither), theme colours taken from the picture, the seven built-in pictures (about 3.8 MB of the app) and the cache of rendered pictures. The window is always macOS's own blur, and opaque under Reduce transparency. The `wallpaper*` keys in `settings.json` are no longer read; a file that still has them loads, and the next save drops them. The `wallpapers/` folder (copies of your pictures and the cache) in tern's data folder is no longer used and can be deleted.
+
+## [0.2.0] - 2026-11-11
+
+### Added
+
+- tern updates itself on macOS. The daily update check downloads a newer release, keeps it only if it is the same app at the announced version and signed with the same certificate as the installed tern, and installs it when tern quits or on "Restart now" (a toast, and Settings → About). A build signed ad hoc cannot be matched, so it keeps offering the release page. Settings → About → Check for updates turns both off.
+- The app bundle carries the licences: `LICENSE`, `NOTICE.md` and `THIRD-PARTY.txt` in `tern.app/Contents/Resources`. The last is written at bundle time by `scripts/third-party.py`, offline, from `cargo metadata`: every crate linked into the binary with its licence and each distinct licence text once.
+- `HashKnownHosts yes` in `~/.ssh/config` is honoured: a host key accepted in tern is written to known_hosts with the host name hashed (`|1|salt|hmac`), as `ssh` writes it, so the file does not list the hosts you connect to. A new known_hosts file is created 0600.
+- On macOS the open vault locks when the Mac goes to sleep, the screen locks or another user takes over the session, like Lock now: open sessions keep running and a secret is asked for again. Settings → Vault → "Lock the vault when the Mac sleeps or the screen locks" turns it off.
+- From the sidebar's search box (⇧⌘F), ↑ and ↓ move through the hosts shown, skipping folded groups, and Return connects to the selected one rather than always the top match.
+- A full menu bar: tern (About, Services), File, Edit, View, Shell, Window and Help, so every shortcut can be found in a menu; ⌃⌘F enters full screen.
+- ⌘Z and ⇧⌘Z undo and redo adding, editing, removing and moving hosts (Edit → Undo); the toast's Undo is the same step. An edit is not undone once sync or an import has changed the list since.
+- Hosts in the sidebar can be dragged: onto another host to take its place (and its group), or onto a group's header to move to the end of that group. The order is saved in `hosts.json`.
 - A session stopped at a password, passphrase or host-key question shows an amber ring instead of the pulsing connecting dot, and the status line says "Waiting for your answer" (#31).
 - README keyboard table lists Windows and Linux shortcuts alongside macOS (#41).
+- Once the tabs no longer fit, a button at the end of the strip lists every tab with the one in front checked; choosing one shows it. It appears only while the tabs overflow.
+- `TERN_FRAME_STATS=1` logs once a second the frames drawn and the mean and worst time of the shell's render and of a terminal's prepaint (`frame_stats` in the log). Off, it costs one atomic read per frame.
+- The terminal takes input from the system's input methods: Chinese, Japanese and Korean composition shows underlined at the cursor and is sent when committed, dead keys (Option+e, then e gives é) and the character picker work, and the candidate window sits at the cursor. Keys the terminal maps itself (arrows, ctrl combinations, Option as Meta) are unchanged; with Option as Meta off, Option composes characters. Holding a letter that has accents offers them, as in other Mac apps.
+- With Option as Meta on, an Option combination that your layout makes a printable ASCII character is typed instead of sent as Meta: @ on ⌥L, [ on ⌥5 and | on ⌥7 on a German keyboard. On US layouts ⌥ keys are still Meta.
 
 ### Changed
 
+- One tern runs per settings folder. `tern web-01` while tern is open hands the host to the open window, which connects and comes to the front, instead of starting a second process whose saves to `hosts.json` and the vault would overwrite the first's. A tern that holds the folder but does not answer is reported rather than run beside.
+- A program on the server setting the clipboard (OSC 52, as tmux and vim copy over SSH) is no longer silent: a toast names the host and how much it copied, at most once a minute per session, and Settings → Terminal → "Programs can copy to the clipboard" turns it off (a blocked attempt says where to allow it). Reading the clipboard stays refused.
+- ⌘K clears the scrollback and the screen above the prompt, as in Terminal.app, iTerm2 and Ghostty (Edit → Clear Scrollback; Ctrl+Shift+K on Windows and Linux). The host picker moves to ⌘T, the new-tab shortcut of other Mac apps (Ctrl+Shift+T); a shortcut rebound in Settings keeps its binding.
+- VoiceOver reads host rows (name, address, connection state), group headers (name, count, collapsed or expanded), session tabs (title, badges, state, selected) and the sidebar's Sync and empty-state buttons.
+- Dragging a host shows a line where it will land instead of tinting the row, and a collapsed group opens after the drag rests on its header for a moment.
+- The BCAST and LOG badges are 10 pt and a tab's close button is 20 x 20 pt.
 - Empty states show an icon, one line and a primary button: no hosts (sidebar and ⌘K picker), no snippets (Settings page and the snippet picker, which now opens empty instead of showing a toast) and an empty folder in the file browser (#32).
 - Scrollback rows keep only the cells they use, so a full history of short lines takes about a sixth of the memory (#89).
 - Starting with a wallpaper already rendered no longer decodes the picture, which took about 35 MB of memory at launch; the colours are cached beside it (#33).
+- A streaming terminal costs less per frame: a row is shaped only up to its last visible glyph, not to the window's right edge. In a headless run (243 x 59 grid, 30 new lines a frame) a frame took 3.0 ms, now 1.8 ms.
+- A terminal that did not change is replayed, not rebuilt, when the window around it redraws (a toast, a fading hover, a streaming split pane): 0.7 ms a frame, now 0.25 ms in the same run.
+- The panel opacity over a full-window wallpaper is worked out when the palette, the default scheme or the picture changes, not several times every frame.
 
 ### Fixed
 
+- A first sync on a Mac with no vault, with a passphrase that does not open the remote's vault, no longer leaves a new local vault under that passphrase behind; before, the right passphrase then failed with "Wrong vault passphrase."
+- When a jump host's key changes, the hint under "connection closed" gives the `ssh-keygen -R` line for that jump host, not for the server behind it.
+- A vault passphrase or PIN that finishes checking only after the vault was locked (the Mac slept meanwhile) leaves the vault shut and says so, instead of opening it.
+- Unlocking from Settings → Vault no longer replaces a vault another tab opened (and saved to) while the unlock ran; like the terminal's unlock, it keeps the open one.
+- A Keychain read still running when the Mac slept or the screen locked (its system dialog left on screen, say) no longer opens the vault once it returns: the lock wins, and the next need asks again.
+- A yes to running a saved password, fill or proxy command now holds for the rest of that tab's session even when `approved-commands.json` cannot be written, so an automatic reconnect does not stop at the question again; before, only the proxy question behaved this way. The password command that runs is always the text the question showed, even if the connection was edited while it was on screen.
+- A sync pull checks what it downloaded before using it. Each push now seals a manifest beside the files (every item's hash, the vault's included, and a bundle number), so a remote whose `vault.age` was swapped for another, whose `tern-meta.json` was edited, or that was rolled back to a bundle older than one this Mac already synced is refused with a message and nothing is written. A bundle pushed by an older tern is still taken when it matches its meta, but cannot be dated.
+- The log folder (`~/Library/Logs/tern`) is readable by you only, and an older log or folder another user could read is made private at launch; `panic.log` is created 0600 like session logs. App logs name hosts and users.
+- A keyboard-interactive login (a code or OTP prompt) shows the server's name, instructions and prompt text with control characters escaped (`^[`), so a server cannot move the cursor, retitle the tab, write the clipboard or draw a fake prompt there.
+- A saved connection's ProxyCommand runs only once this Mac has approved it, as password commands already did: `hosts.json` also arrives by sync and import, and its ProxyCommand ran through `sh -c` without a word. The first connect asks in the terminal; one saved from the form, or imported from this Mac's ~/.ssh/config, counts as approved, and a `~/.ssh/config` host runs its own as ssh does.
+- Saving a password to the vault no longer makes it look locked: the open vault used to be taken out while scrypt ran (about a second, longer during a sync), so another tab asked for the passphrase again and an edit made then could be lost. Every write now goes through one ordered path, and a sync works on a copy, keeping a change made here while it ran. Two saves at once (two tern processes) no longer share a temp file, which could leave a vault that does not open.
+- A new host's key can be read at leisure: the 15-second connect timeout no longer counts the time its fingerprint question is open, which used to drop the connection while it was being compared (jump hosts too).
+- A file downloaded over SFTP stays in ~/Downloads: a name the server sends with a `/`, `..` or an absolute path is refused instead of written where it points.
+- A paste can no longer end bracketed paste early: an end marker hidden inside another (`ESC[20ESC[201~1~`) is removed too, so the rest of the text is not run as typed commands.
+- With many tabs the strip scrolled sideways (wheel, two-finger swipe) but nothing showed it: the tabs past the window's edge were out of sight with no hint they were there. The button above lists them, and the tab in front now stays on screen when tabs open, close, move or switch, and when the window is made smaller.
+- A dark terminal scheme under the light appearance and a full-window wallpaper no longer turns the terminal a flat grey and hides the picture: the wallpaper's tint leans a scheme toward its own lightness rather than the appearance's, the status line under it takes the palette that suits that background, and small secondary text is plain muted while the panels are see-through, so the panels no longer sit at their most opaque.
+- Settings is readable under a wallpaper with a dark terminal scheme in the light appearance: the page sat on the active tab's scheme background, a near-black veil over the picture that washed out its headings and descriptions. It now sits on the app's own surface, like the sidebar.
+- Text fields edit by word and line as other macOS fields do: ⌥←/→ moves by word, ⇧⌥←/→ and ⇧⌘←/→ select, ⌘←/→ go to the ends, ⌥⌫ and ⌘⌫ delete, a double click selects a word and a triple click everything. Masked fields count as one word.
+- The sidebar behaves like Finder's and Mail's: pointing at a host or a group changes nothing (no hover fill, no "..." button, arrow cursor), only the active or keyboard-selected host is filled, and a host's actions are in the menu a right-click or Control-click opens. The address tooltip shows only where the row cuts the address short.
 - The offer to save a password in the vault no longer shares its line with a shell prompt that arrives late: what the server writes while tern asks is shown once the question is answered (#105).
 - Keychain unlock no longer reads the Keychain or runs scrypt at launch: the Keychain is asked once, the first time tern needs the vault, and a refusal falls back to the prompt without asking again (#91).
 - Clicking a session tab while Settings is open now closes Settings and shows the session, with typing going to its terminal (#63).
 - SFTP panel file sizes just under a unit boundary round up to the next unit (e.g. `1.0 MB` instead of `1024 KB`) and sizes just under 10 omit decimals (`10 KB` instead of `10.0 KB`) (#39).
 - Plain-text `ftps://` links are now detected and clickable in terminal output (#40).
+- Secondary text (sidebar host addresses and section labels) keeps 4.5:1 contrast in both themes, and tern follows macOS Increase contrast (full-strength secondary text, stronger borders) and Reduce transparency (opaque window and panels, no wallpaper showing through).
 
 ### Security
 
@@ -129,7 +183,8 @@ The first release: a daily-driver SSH client for macOS.
 - Secrets are held as zeroizing `SecretString`s and never logged; session output is redacted from `Debug`.
 - RUSTSEC-2023-0071 in `rsa` (via russh) is accepted for now; see [SECURITY.md](SECURITY.md) and #16.
 
-[Unreleased]: https://github.com/your-moon/tern/compare/v0.1.3...main
+[Unreleased]: https://github.com/itskamol/tern/compare/v0.2.0...main
+[0.2.0]: https://github.com/itskamol/tern/releases/tag/v0.2.0
 [0.1.3]: https://github.com/your-moon/tern/releases/tag/v0.1.3
 [0.1.2]: https://github.com/your-moon/tern/releases/tag/v0.1.2
 [0.1.1]: https://github.com/your-moon/tern/releases/tag/v0.1.1

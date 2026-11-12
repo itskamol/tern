@@ -16,14 +16,14 @@
 </p>
 
 ```sh
-brew install --cask your-moon/tern/tern
+brew install --cask itskamol/tern/tern
 ```
 
-Or download the DMG from [Releases](https://github.com/your-moon/tern/releases). It is signed and notarised, so it opens without a warning.
+Or download the DMG from [Releases](https://github.com/itskamol/tern/releases). These builds are signed with a local certificate, not notarised: Homebrew clears the quarantine flag for you; a DMG copy needs `xattr -dr com.apple.quarantine /Applications/tern.app` once. tern then updates itself.
 
 ## Why tern
 
-tern does what Termius and Tabby do for a list of servers (saved hosts, ⌘K to any of them, SFTP, splits, snippets and port forwards), but as one small native process. One connected tab takes 76 MB where Tabby takes 580 MB ([how I measured it](docs/perf.md)).
+tern does what Termius and Tabby do for a list of servers (saved hosts, ⌘T to any of them, SFTP, splits, snippets and port forwards), but as one small native process. One connected tab takes 76 MB where Tabby takes 580 MB ([how I measured it](docs/perf.md)).
 
 Passwords come from your SSH key, from a password-manager command such as `gopass show -o work/ssh/web-01`, or from tern's age-encrypted vault. At a `sudo` prompt, ⌘\\ types the password. It never types one on its own.
 
@@ -34,24 +34,24 @@ Hosts, snippets and settings sync to a private Git repository you own, encrypted
 | | |
 | --- | --- |
 | <img src="docs/screenshots/docker.jpg" alt="sudo docker ps with the sudo password filled by ⌘\"><br>**⌘\\ fills `sudo`**: the password comes from your password manager, typed only when you ask and only at a password prompt. | <img src="docs/screenshots/snippets.jpg" alt="The snippets picker filtering docker commands"><br>**Snippets (⇧⌘S)**: saved commands. ↵ marks the ones that run when picked; the rest are typed for you to finish. |
-| <img src="docs/screenshots/split.jpg" alt="Two panes side by side with find in scrollback"><br>**Splits and find**: ⌘D and ⌘⇧D split a tab; ⌘F searches the scrollback. | <img src="docs/screenshots/sftp.jpg" alt="The SFTP side panel listing a remote home folder"><br>**Files (⇧⌘O)**: browse the remote side over SFTP; download, or drop files to upload. |
-| <img src="docs/screenshots/settings.jpg" alt="Settings, Appearance, with the wallpaper gallery"><br>**Wallpapers and fonts**: seven public-domain artworks built in, or any image; light, dark or follow macOS; any monospace font. | <img src="docs/screenshots/light.jpg" alt="tern in light appearance over Van Gogh's Wheat Field"><br>**Light and dark**: the window takes its colours from the wallpaper, and body text stays at least 4.5:1 against it. |
+| <img src="docs/screenshots/split.jpg" alt="Two panes side by side with find in scrollback"><br>**Splits and find**: ⌘D and ⌘⇧D split a tab; ⌘F searches the scrollback. | <img src="docs/screenshots/sftp.jpg" alt="The SFTP side panel listing a remote home folder"><br>**Files tab (⇧⌘O)**: two panels, the Mac and a host; drag files and folders between them, or drop files from Finder to upload. |
+| <img src="docs/screenshots/settings.jpg" alt="Settings, Appearance"><br>**Appearance and fonts**: light, dark or follow macOS; any monospace font. | <img src="docs/screenshots/light.jpg" alt="tern in light appearance"><br>**Light and dark**: the window is macOS's own blur (opaque under Reduce transparency), and body text stays at least 4.5:1 against it. |
 
 ## Also in the box
 
 - **Connections:** groups and tags, a one-time import from `~/.ssh/config`, ProxyJump chains, local, remote and SOCKS forwards, agent forwarding, and two-factor logins.
 - **Staying connected:** automatic reconnect after a network drop, but never after you type `exit`. A changed host key stops the connection and shows the exact `ssh-keygen -R` line to fix one you trust.
 - **Terminal:** tabs that reopen on launch, broadcast input to chosen tabs, ⌘-click links (including OSC 8), session logging, and a status line with latency.
-- **Vault:** passwords and SSH keys in an age-encrypted file that unlocks with a PIN or the Keychain and locks when you're idle. A password command that arrives through sync must be approved once on each Mac.
+- **Vault:** passwords and SSH keys in an age-encrypted file that unlocks with a PIN or the Keychain and locks when you're idle or the Mac sleeps or locks its screen (macOS). A password command that arrives through sync must be approved once on each Mac.
 - **Sync:** runs on its own, merges per host when both Macs changed, and only asks about a real conflict.
 
 Every shortcut can be rebound in Settings. The full list, with the Windows and Linux keys, is in [docs/keyboard.md](docs/keyboard.md).
 
 ## Security
 
-- Host keys are checked against `~/.ssh/known_hosts`. A changed key refuses the connection.
+- Host keys are checked against `~/.ssh/known_hosts`. A changed key refuses the connection. A key you accept is recorded with the host name hashed when `~/.ssh/config` says `HashKnownHosts yes`, as `ssh` does.
 - Secrets live in the vault (age, scrypt) or in your password manager. They are never written to logs, and never typed into the terminal unless you press ⌘\\.
-- Sync data is encrypted before it leaves your Mac. The repository sees `.age` files and a plain `tern-meta.json` (hash and time, nothing else).
+- Sync data is encrypted before it leaves your Mac. The repository sees `.age` files and a plain `tern-meta.json` (hash, time and a bundle number, nothing else). A pull checks the downloaded files against a manifest sealed inside them, so a remote whose files were swapped, edited or rolled back to an older copy is refused.
 - Losing a Mac doesn't lose your setup: see [docs/recovery.md](docs/recovery.md). Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 ## Other platforms and building

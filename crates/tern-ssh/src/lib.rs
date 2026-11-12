@@ -10,12 +10,17 @@
 mod authn;
 mod config;
 mod error;
+mod files;
+mod files_local;
+mod files_sftp;
 mod forward;
 mod hostkey;
 mod session;
 mod sftp;
 mod socks;
 mod sshconf;
+mod transfer;
+mod transfer_plan;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,10 +30,18 @@ use tokio::sync::mpsc;
 
 pub use config::load_ssh_config_hosts;
 pub use error::{Disconnect, Error, ForwardError, InputError, Result};
+pub use files::{
+    Call, FileEntry, FileError, FileSource, LocalFs, PART_SUFFIX, Reader, SftpFiles, Writer,
+    file_name, join, keep_both, parent,
+};
 pub use forward::{Forward, ForwardHandle, ForwardInfo};
 pub use futures::channel::oneshot;
 pub use secrecy::{self, ExposeSecret, SecretString};
-pub use sftp::{Progress, Sftp, SftpEntry, SftpError};
+pub use sftp::{Sftp, SftpError};
+pub use transfer::{
+    Conflict, CopyJob, Event, MAX_RUNNING, Progress as TransferProgress, Question, Summary,
+    TransferQueue,
+};
 
 /// Keep-alive probe interval when the host sets no `ServerAliveInterval`.
 pub const DEFAULT_SERVER_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -305,6 +318,21 @@ pub fn connect(
     let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
     let forwards = Arc::new(forward::Registry::default());
     let (etx, erx) = async_channel::bounded(session::EVENT_QUEUE);
-    rt.spawn(session::run(spec, size, rx, etx, forwards.clone()));
+    rt.spawn(session::run(spec, Some(size), rx, etx, forwards.clone()));
+    (SessionHandle { tx, forwards }, erx)
+}
+
+/// Starts a connection with no shell, no pty and no agent forwarding, for work that only needs
+/// the connection ([`SessionHandle::open_sftp`]). Prompts, [`SessionEvent::Connected`] and
+/// [`SessionEvent::Closed`] come as for [`connect`]; it never sends [`SessionEvent::Data`].
+#[must_use = "the connection runs only while its events are received"]
+pub fn connect_files(
+    spec: ConnectSpec,
+    rt: &tokio::runtime::Handle,
+) -> (SessionHandle, async_channel::Receiver<SessionEvent>) {
+    let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
+    let forwards = Arc::new(forward::Registry::default());
+    let (etx, erx) = async_channel::bounded(session::EVENT_QUEUE);
+    rt.spawn(session::run(spec, None, rx, etx, forwards.clone()));
     (SessionHandle { tx, forwards }, erx)
 }

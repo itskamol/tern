@@ -2,11 +2,13 @@
 //!
 //! What is uploaded: the vault file as it is (already age-encrypted), and the other files
 //! (hosts, settings, keymap) sealed with the vault passphrase by the caller, plus a small
-//! plain `tern-meta.json` holding the bundle hash and time. Nothing readable leaves the Mac.
+//! plain `tern-meta.json` holding the bundle hash, time and number. Nothing readable leaves the
+//! Mac. The meta is not trusted: the app seals a manifest beside the files and checks it.
 //!
 //! Deciding what to do needs no network: compare the local and remote bundle hashes with the
 //! hash both sides had at the last sync ([`decide`]).
 
+pub mod bundle;
 mod github;
 mod gitrepo;
 mod merge;

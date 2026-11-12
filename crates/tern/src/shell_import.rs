@@ -90,6 +90,10 @@ impl Shell {
         }
         let mut next = self.connections.clone();
         let count = fresh.len();
+        // Copied from this Mac's own ~/.ssh/config, which runs these already.
+        for connection in &fresh {
+            crate::password_command::approve_saved(connection);
+        }
         next.extend(fresh);
         if let Some(dir) = crate::settings::dir()
             && let Err(e) = connections::save(&dir, &next)

@@ -69,6 +69,8 @@ pub fn render(
     elapsed: Option<Duration>,
     bg: Hsla,
 ) -> impl IntoElement + use<> {
+    // `bg` is the terminal scheme's, which may be dark under the light appearance.
+    let t = &t.on(bg);
     let disc = div().size(px(6.)).rounded_full();
     let marker = if dot.hollow() {
         disc.border_1().border_color(dot.color(t))

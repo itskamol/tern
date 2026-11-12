@@ -106,14 +106,21 @@ impl Shell {
             return;
         };
         let alias = tab.alias.clone();
-        let closed = tab.session().read(cx).status.is_dormant();
-        let logging = tab.session().read(cx).is_logging();
+        let Some(session) = tab.session() else {
+            // A Files tab has nothing of a session's to offer but closing.
+            let items = vec![destructive(icons::CLOSE, "Close tab", move |s, w, cx| {
+                s.close_tab_at(ix, w, cx)
+            })];
+            self.context_menu = Some(ContextMenu { position, items });
+            return cx.notify();
+        };
+        let closed = session.read(cx).status().is_dormant();
+        let logging = session.read(cx).is_logging();
         let broadcasting = self.is_broadcasting(tab.id);
         let mut items = Vec::new();
         if closed {
             items.push(action(icons::RESTART, "Reconnect", move |s, w, cx| {
-                if let Some(tab) = s.tabs.get(ix) {
-                    let session = tab.session().clone();
+                if let Some(session) = s.tabs.get(ix).and_then(|t| t.session().cloned()) {
                     session.update(cx, |s, cx| s.reconnect(cx));
                 }
                 s.show_tab(ix, w, cx);
@@ -150,8 +157,8 @@ impl Shell {
                 s.start_logging(ix, cx)
             }));
         }
-        items.push(action(icons::FOLDER, "Browse files", move |s, w, cx| {
-            s.open_sftp(ix, w, cx)
+        items.push(action(icons::FOLDER, "Open Files tab", move |s, w, cx| {
+            s.open_files_tab(Some(ix), w, cx)
         }));
         items.push(action(icons::GLOBE, "Port forwards…", move |s, w, cx| {
             s.open_forwards_panel(ix, position, w, cx)
@@ -171,6 +178,29 @@ impl Shell {
                 move |s, w, cx| s.close_other_tabs(ix, w, cx),
             ));
         }
+        self.context_menu = Some(ContextMenu { position, items });
+        cx.notify();
+    }
+
+    /// The button at the end of an overflowing tab strip: every tab by name, the one in front
+    /// checked, so a tab scrolled out of sight is one click away.
+    pub(crate) fn open_tabs_menu(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let items = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, tab)| {
+                let name = crate::tabs::middle_ellipsis(tab.title().unwrap_or(&tab.alias), 40);
+                let label = if ix == self.tabs.active() {
+                    format!("{name}  ✓")
+                } else {
+                    name
+                };
+                action(icons::TERMINAL, label, move |s, w, cx| {
+                    s.show_tab(ix, w, cx)
+                })
+            })
+            .collect();
         self.context_menu = Some(ContextMenu { position, items });
         cx.notify();
     }
@@ -206,13 +236,11 @@ impl Shell {
     }
 
     fn close_other_tabs(&mut self, keep: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if keep >= self.tabs.len() {
+        if self.tabs.close_others(keep).is_empty() {
             return;
         }
-        let kept = self.tabs.remove(keep);
-        self.tabs = vec![kept];
         self.sync_broadcast(cx);
-        self.activate_tab(0, window, cx);
+        self.front_tab_changed(window, cx);
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {

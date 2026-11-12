@@ -16,7 +16,7 @@ use tern_sync::{Plan, TokenSource};
 use super::{Shell, ToastKind};
 use crate::keeper::Keeper;
 use crate::settings_widgets as w;
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 
 #[path = "shell_sync_engine.rs"]
 mod engine;
@@ -106,12 +106,7 @@ impl Shell {
             return;
         }
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let token_input =
             cx.new(|cx| TextInput::new("ghp_… with the gist scope", true, colors, cx));
         let pass_input = cx.new(|cx| TextInput::new("Vault passphrase", true, colors, cx));
@@ -244,7 +239,10 @@ impl Shell {
             Some(ui.pass_input.read(cx).text().to_owned()).filter(|p| !p.is_empty())
         };
         let remote_url = self.settings.sync_remote.clone();
-        let open = Keeper::take(cx);
+        // A copy: the open vault stays in the keeper, so tabs keep reading it while the network
+        // is slow, and writes made meanwhile are not lost (see `Keeper::sync_done`).
+        let open = Keeper::snapshot(cx);
+        let (opening, since) = (open.is_none(), Keeper::writes(cx));
         if open.is_none() && passphrase.is_none() {
             if !auto {
                 self.notify_toast(
@@ -274,7 +272,8 @@ impl Shell {
             let (vault, result) = work.await;
             let _ = this.update_in(cx, |s, window, cx| {
                 if let Some(v) = vault {
-                    Keeper::put(v, cx);
+                    let downloaded = matches!(result, Ok(Outcome::Pulled | Outcome::Merged));
+                    Keeper::sync_done(v, opening, downloaded, since, cx);
                 }
                 // The passphrase field may now be hidden; a hidden field must not keep focus,
                 // or Escape and every shortcut go nowhere. A background run leaves focus be.
@@ -473,10 +472,8 @@ impl Shell {
         let Some(dir) = crate::settings::dir() else {
             return;
         };
-        self.settings = crate::settings::Settings::load(&dir);
-        crate::platform::apply_reduce_motion(self.settings.reduce_motion, cx);
-        self.apply_appearance(cx);
-        self.refresh_theme(cx);
+        let old = std::mem::replace(&mut self.settings, crate::settings::Settings::load(&dir));
+        self.reapply(old.reapply(&self.settings), cx);
         cx.set_global(crate::keymap::Keymap::load(&dir));
         crate::keymap::apply(cx);
         match crate::connections::load(&dir) {
@@ -487,8 +484,6 @@ impl Shell {
             Err(e) => self.store_error = Some(e.to_string()),
         }
         self.refresh_hosts();
-        self.restyle_tabs(cx);
-        self.apply_option_as_meta(cx);
     }
 
     pub(super) fn sync_page(&self, cx: &mut Context<Self>) -> gpui::Div {

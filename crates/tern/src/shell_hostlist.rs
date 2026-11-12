@@ -1,6 +1,6 @@
 // Adapted from zeron crates/ui/src/popover.rs (search_input_frame) (MIT), see sidebar.rs.
 //! The sidebar's moving parts that are not drawing: the search box, the recent hosts, which
-//! group folders are folded, and the order the ⌘K picker lists hosts in.
+//! group folders are folded, and the order the host picker lists hosts in.
 //!
 //! Hosts connected to lately, newest first, in `recent.json`. It is per device (when you
 //! last used a host here), so it is not synced.
@@ -11,37 +11,47 @@ use super::Shell;
 use crate::connections::{self, Connection};
 use crate::picker;
 use crate::sidebar;
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 use crate::theme::Theme;
 use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-actions!(tern, [FocusHostSearch]);
+actions!(tern, [FocusHostSearch, UndoHosts, RedoHosts]);
 
 pub(super) struct HostList {
     pub search: Entity<TextInput>,
     pub collapsed_groups: Vec<String>,
     pub recent: Recent,
+    pub history: crate::host_history::HostHistory,
+    /// The row ↑ and ↓ have reached while the search box has focus, as a position in
+    /// [`visible_order`]; a new query starts again at the top.
+    pub cursor: usize,
+    query: String,
     _repaint: Subscription,
 }
 
 impl HostList {
     pub fn new(t: &Theme, recent: Recent, cx: &mut Context<Shell>) -> Self {
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let search = cx.new(|cx| TextInput::new("Search hosts", false, colors, cx));
         // The list under the box re-filters on every keystroke.
-        let repaint = cx.observe(&search, |_, _, cx| cx.notify());
+        let repaint = cx.observe(&search, |shell: &mut Shell, search, cx| {
+            let query = search.read(cx).text();
+            if shell.hostlist.query != query {
+                shell.hostlist.query = query.to_owned();
+                shell.hostlist.cursor = 0;
+            }
+            cx.notify();
+        });
         Self {
             search,
             collapsed_groups: Vec::new(),
             recent,
+            history: crate::host_history::HostHistory::default(),
+            cursor: 0,
+            query: String::new(),
             _repaint: repaint,
         }
     }
@@ -71,8 +81,25 @@ impl Shell {
             .update(cx, |input, cx| input.set_text("", cx));
     }
 
-    /// Escape clears the query and gives the terminal its keys back; Enter connects to the
-    /// top match.
+    /// The rows the sidebar shows, top to bottom.
+    fn visible_hosts(&self, cx: &gpui::App) -> Vec<usize> {
+        visible_order(
+            &self.search_query(cx),
+            &self.connections,
+            &self.hostlist.collapsed_groups,
+        )
+    }
+
+    /// The host ↑/↓ point at, drawn selected while the search box has focus.
+    pub(super) fn sidebar_selection(&self, window: &Window, cx: &gpui::App) -> Option<usize> {
+        let focused = self.hostlist.search.focus_handle(cx).is_focused(window);
+        focused
+            .then(|| self.visible_hosts(cx).get(self.hostlist.cursor).copied())
+            .flatten()
+    }
+
+    /// Escape clears the query and gives the terminal its keys back; ↑ and ↓ move through the
+    /// rows shown (stopping at the ends, as a macOS list does) and Enter connects to that one.
     pub(crate) fn on_search_key(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -84,10 +111,18 @@ impl Shell {
                 self.clear_search(cx);
                 self.restore_focus(window, cx);
             }
+            "down" | "up" => {
+                let last = self.visible_hosts(cx).len().saturating_sub(1);
+                let at = &mut self.hostlist.cursor;
+                *at = match event.keystroke.key.as_str() {
+                    "down" => (*at + 1).min(last),
+                    _ => at.saturating_sub(1),
+                };
+                cx.notify();
+            }
             "enter" => {
-                let query = self.search_query(cx);
-                let top = sidebar::search(&query, &self.connections).first().copied();
-                if let Some(host) = top.and_then(|ix| self.hosts.get(ix).cloned()) {
+                let at = self.visible_hosts(cx).get(self.hostlist.cursor).copied();
+                if let Some(host) = at.and_then(|ix| self.hosts.get(ix).cloned()) {
                     self.clear_search(cx);
                     self.connect_host(host, window, cx);
                 }
@@ -118,7 +153,7 @@ impl Shell {
         }
     }
 
-    /// Hosts the ⌘K picker lists for its current query, in order: the ranked matches, or on
+    /// Hosts the host picker lists for its current query, in order: the ranked matches, or on
     /// an empty query the recents first.
     pub fn picker_matches(&self) -> Vec<usize> {
         let labels: Vec<String> = self.connections.iter().map(sidebar::search_label).collect();
@@ -142,17 +177,116 @@ impl Shell {
         // A command typed in this form is approved by saving it.
         crate::password_command::approve_saved(&connection);
         let mut next = self.connections.clone();
-        match editing.and_then(|ix| next.get_mut(ix)) {
-            Some(slot) => *slot = connection,
-            None => next.push(connection),
-        }
+        let what = match editing.and_then(|ix| next.get_mut(ix)) {
+            Some(slot) => {
+                *slot = connection;
+                format!("Edit {}", slot.name)
+            }
+            None => {
+                let what = format!("Add {}", connection.name);
+                next.push(connection);
+                what
+            }
+        };
         if let Some(dir) = crate::settings::dir() {
             connections::save(&dir, &next).map_err(|e| e.to_string())?;
         }
-        self.connections = next;
-        self.refresh_hosts();
+        self.commit_hosts(next, what);
         Ok(())
     }
+
+    /// The list after an edit made here, already written: shown, and kept for ⌘Z.
+    pub(super) fn commit_hosts(&mut self, next: Vec<Connection>, what: String) {
+        let before = std::mem::replace(&mut self.connections, next);
+        self.hostlist
+            .history
+            .record(before, self.connections.clone(), what);
+        self.refresh_hosts();
+    }
+
+    pub(super) fn undo_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let step = self.hostlist.history.undo(&self.connections);
+        self.restore_hosts(step, "Undo", window, cx);
+    }
+
+    pub(super) fn redo_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let step = self.hostlist.history.redo(&self.connections);
+        self.restore_hosts(step, "Redo", window, cx);
+    }
+
+    /// Writes back a list from the history and names what changed ("Undo Remove web-01").
+    /// Nothing to undo, or a list changed by sync since, only beeps.
+    fn restore_hosts(
+        &mut self,
+        step: Option<(Vec<Connection>, String)>,
+        verb: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((list, what)) = step else {
+            return window.play_system_bell();
+        };
+        if let Some(dir) = crate::settings::dir()
+            && let Err(e) = connections::save(&dir, &list)
+        {
+            self.hostlist.history.clear();
+            return self.notify_toast(
+                super::ToastKind::Critical,
+                format!("Could not {}: {e}", verb.to_lowercase()),
+                cx,
+            );
+        }
+        self.connections = list;
+        self.refresh_hosts();
+        self.notify_toast(super::ToastKind::Default, format!("{verb} {what}"), cx);
+        cx.notify();
+    }
+
+    /// A host dragged in the sidebar: moved (into the group it landed in) and written to
+    /// `hosts.json`. A failed write leaves the list as it was, and says so.
+    pub(crate) fn move_host(
+        &mut self,
+        from: usize,
+        to: &connections::Spot,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next = self.connections.clone();
+        if !connections::move_to(&mut next, from, to) {
+            return;
+        }
+        if let Some(dir) = crate::settings::dir()
+            && let Err(e) = connections::save(&dir, &next)
+        {
+            tracing::warn!(error = %e, "hosts_move_save_failed");
+            return self.notify_toast(
+                super::ToastKind::Critical,
+                format!("Could not move the host: {e}"),
+                cx,
+            );
+        }
+        let moved = self
+            .connections
+            .get(from)
+            .map_or("host", |c| c.name.as_str());
+        let what = format!("Move {moved}");
+        self.commit_hosts(next, what);
+        cx.notify();
+    }
+}
+
+/// The connections the sidebar lists, in screen order: the ranked matches for a query, else
+/// the ungrouped hosts then each group by name, leaving out the folded ones.
+fn visible_order(query: &str, connections: &[Connection], folded: &[String]) -> Vec<usize> {
+    if !query.trim().is_empty() {
+        return sidebar::search(query, connections);
+    }
+    let layout = sidebar::layout(connections);
+    let open = layout
+        .groups
+        .into_iter()
+        .filter(|(name, _)| !folded.contains(name))
+        .flat_map(|(_, rows)| rows);
+    layout.ungrouped.into_iter().chain(open).collect()
 }
 
 const FILE_NAME: &str = "recent.json";
@@ -232,6 +366,34 @@ pub fn now() -> u64 {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn conn(name: &str, group: Option<&str>) -> Connection {
+        Connection {
+            name: name.into(),
+            host: format!("{name}.example.com"),
+            group: group.map(Into::into),
+            ..Connection::default()
+        }
+    }
+
+    #[test]
+    fn arrows_walk_the_rows_in_screen_order_skipping_folded_groups() {
+        let all = [
+            conn("web", Some("prod")),
+            conn("laptop", None),
+            conn("db", Some("prod")),
+            conn("ci", Some("build")),
+        ];
+        assert_eq!(visible_order("", &all, &[]), [1, 3, 0, 2]);
+        assert_eq!(visible_order("", &all, &["prod".into()]), [1, 3]);
+        assert_eq!(visible_order("  ", &all, &["build".into()]), [1, 0, 2]);
+    }
+
+    #[test]
+    fn with_a_query_the_arrows_walk_the_matches_even_in_folded_groups() {
+        let all = [conn("web", Some("prod")), conn("laptop", None)];
+        assert_eq!(visible_order("web", &all, &["prod".into()]), [0]);
+    }
 
     fn aliases(r: &Recent) -> Vec<&str> {
         r.aliases().collect()

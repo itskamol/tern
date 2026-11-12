@@ -134,9 +134,10 @@ impl Shell {
         if save {
             self.update_settings(apply, cx);
         } else {
+            // A preview: shown, not saved.
             apply(&mut self.settings);
+            self.restyle_tabs(cx);
         }
-        self.restyle_tabs(cx);
         cx.notify();
     }
 

@@ -28,7 +28,10 @@ pub(super) const GROUPS: [(&str, &[Section]); 4] = [
         &[Section::Appearance, Section::Terminal, Section::Shortcuts],
     ),
     ("Connections", &[Section::Connections, Section::Snippets]),
-    ("Security & sync", &[Section::Vault, Section::Sync]),
+    (
+        "Security & sync",
+        &[Section::Vault, Section::History, Section::Sync],
+    ),
     // A lone section needs no label repeating its own name; spacing sets it apart.
     ("", &[Section::About]),
 ];
@@ -149,7 +152,7 @@ pub(super) fn render(
         .read(cx)
         .clone();
     let reduced = cx.reduce_motion();
-    let faint = th.muted.opacity(theme::by_dpi(0.7, 1.0));
+    let faint = th.secondary();
 
     let header = div()
         .flex_none()
@@ -274,6 +277,7 @@ mod tests {
         assert_eq!(of(Section::Connections), 1);
         assert_eq!(of(Section::Snippets), 1);
         assert_eq!(of(Section::Vault), 2);
+        assert_eq!(of(Section::History), 2);
         assert_eq!(of(Section::Sync), 2);
         assert_eq!(of(Section::About), 3);
     }

@@ -30,10 +30,15 @@ pub enum ShortcutId {
     NewConnection,
     SplitRight,
     SplitDown,
+    SplitRightWithHost,
     PaneLeft,
     PaneRight,
     PaneUp,
     PaneDown,
+    ResizeLeft,
+    ResizeRight,
+    ResizeUp,
+    ResizeDown,
     Settings,
     ToggleSidebar,
     BrowseFiles,
@@ -44,20 +49,27 @@ pub enum ShortcutId {
     FontSmaller,
     FontReset,
     FillPassword,
+    ClearTerminal,
+    CommandHistory,
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 20] = [
+    pub const ALL: [ShortcutId; 27] = [
         ShortcutId::HostPicker,
         ShortcutId::SearchHosts,
         ShortcutId::Snippets,
         ShortcutId::NewConnection,
         ShortcutId::SplitRight,
         ShortcutId::SplitDown,
+        ShortcutId::SplitRightWithHost,
         ShortcutId::PaneLeft,
         ShortcutId::PaneRight,
         ShortcutId::PaneUp,
         ShortcutId::PaneDown,
+        ShortcutId::ResizeLeft,
+        ShortcutId::ResizeRight,
+        ShortcutId::ResizeUp,
+        ShortcutId::ResizeDown,
         ShortcutId::Settings,
         ShortcutId::ToggleSidebar,
         ShortcutId::BrowseFiles,
@@ -68,23 +80,30 @@ impl ShortcutId {
         ShortcutId::FontSmaller,
         ShortcutId::FontReset,
         ShortcutId::FillPassword,
+        ShortcutId::ClearTerminal,
+        ShortcutId::CommandHistory,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            ShortcutId::HostPicker => "Open host picker",
+            ShortcutId::HostPicker => "New tab (pick a host)",
             ShortcutId::SearchHosts => "Search hosts",
             ShortcutId::Snippets => "Snippets",
             ShortcutId::NewConnection => "New connection",
             ShortcutId::SplitRight => "Split right",
             ShortcutId::SplitDown => "Split down",
+            ShortcutId::SplitRightWithHost => "Split right with host",
             ShortcutId::PaneLeft => "Focus pane left",
             ShortcutId::PaneRight => "Focus pane right",
             ShortcutId::PaneUp => "Focus pane up",
             ShortcutId::PaneDown => "Focus pane down",
+            ShortcutId::ResizeLeft => "Move divider left",
+            ShortcutId::ResizeRight => "Move divider right",
+            ShortcutId::ResizeUp => "Move divider up",
+            ShortcutId::ResizeDown => "Move divider down",
             ShortcutId::Settings => "Open settings",
             ShortcutId::ToggleSidebar => "Toggle sidebar",
-            ShortcutId::BrowseFiles => "Browse files",
+            ShortcutId::BrowseFiles => "Files tab",
             ShortcutId::CloseTab => "Close tab",
             ShortcutId::NextTab => "Next tab",
             ShortcutId::PrevTab => "Previous tab",
@@ -92,21 +111,28 @@ impl ShortcutId {
             ShortcutId::FontSmaller => "Smaller text",
             ShortcutId::FontReset => "Default text size",
             ShortcutId::FillPassword => "Fill password",
+            ShortcutId::ClearTerminal => "Clear scrollback",
+            ShortcutId::CommandHistory => "Command history",
         }
     }
 
     fn mac_combo(self) -> &'static str {
         match self {
-            ShortcutId::HostPicker => "cmd-k",
+            ShortcutId::HostPicker => "cmd-t",
             ShortcutId::SearchHosts => "cmd-shift-f",
             ShortcutId::Snippets => "cmd-shift-s",
             ShortcutId::NewConnection => "cmd-n",
             ShortcutId::SplitRight => "cmd-d",
             ShortcutId::SplitDown => "cmd-shift-d",
+            ShortcutId::SplitRightWithHost => "alt-cmd-d",
             ShortcutId::PaneLeft => "alt-cmd-left",
             ShortcutId::PaneRight => "alt-cmd-right",
             ShortcutId::PaneUp => "alt-cmd-up",
             ShortcutId::PaneDown => "alt-cmd-down",
+            ShortcutId::ResizeLeft => "ctrl-cmd-left",
+            ShortcutId::ResizeRight => "ctrl-cmd-right",
+            ShortcutId::ResizeUp => "ctrl-cmd-up",
+            ShortcutId::ResizeDown => "ctrl-cmd-down",
             ShortcutId::Settings => "cmd-,",
             ShortcutId::ToggleSidebar => "cmd-b",
             ShortcutId::BrowseFiles => "cmd-shift-o",
@@ -117,21 +143,29 @@ impl ShortcutId {
             ShortcutId::FontSmaller => "cmd--",
             ShortcutId::FontReset => "cmd-0",
             ShortcutId::FillPassword => "cmd-\\",
+            ShortcutId::ClearTerminal => "cmd-k",
+            // Free in the workspace; cmd-shift-r if it is ever taken.
+            ShortcutId::CommandHistory => "cmd-r",
         }
     }
 
     fn other_combo(self) -> &'static str {
         match self {
-            ShortcutId::HostPicker => "ctrl-shift-k",
+            ShortcutId::HostPicker => "ctrl-shift-t",
             ShortcutId::SearchHosts => "ctrl-alt-f",
             ShortcutId::Snippets => "ctrl-alt-s",
             ShortcutId::NewConnection => "ctrl-shift-n",
             ShortcutId::SplitRight => "ctrl-shift-d",
             ShortcutId::SplitDown => "ctrl-alt-d",
+            ShortcutId::SplitRightWithHost => "ctrl-shift-alt-d",
             ShortcutId::PaneLeft => "ctrl-alt-left",
             ShortcutId::PaneRight => "ctrl-alt-right",
             ShortcutId::PaneUp => "ctrl-alt-up",
             ShortcutId::PaneDown => "ctrl-alt-down",
+            ShortcutId::ResizeLeft => "ctrl-shift-alt-left",
+            ShortcutId::ResizeRight => "ctrl-shift-alt-right",
+            ShortcutId::ResizeUp => "ctrl-shift-alt-up",
+            ShortcutId::ResizeDown => "ctrl-shift-alt-down",
             ShortcutId::Settings => "ctrl-,",
             ShortcutId::ToggleSidebar => "ctrl-shift-b",
             ShortcutId::BrowseFiles => "ctrl-alt-o",
@@ -143,6 +177,9 @@ impl ShortcutId {
             ShortcutId::FontReset => "ctrl-0",
             // Ctrl+\ alone is SIGQUIT in a terminal.
             ShortcutId::FillPassword => "ctrl-shift-\\",
+            ShortcutId::ClearTerminal => "ctrl-shift-k",
+            // Ctrl+R alone is the shell's reverse search.
+            ShortcutId::CommandHistory => "ctrl-shift-r",
         }
     }
 
@@ -157,8 +194,9 @@ impl ShortcutId {
     fn action(self) -> Box<dyn Action> {
         use crate::shell::{
             DecreaseFontSize, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-            IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize, SplitDown, SplitRight,
-            ToggleSidebar,
+            IncreaseFontSize, NewConnection, OpenSettings, ResetFontSize, ResizePaneDown,
+            ResizePaneLeft, ResizePaneRight, ResizePaneUp, SplitDown, SplitRight,
+            SplitRightWithHost, ToggleSidebar,
         };
         use crate::tabs::{CloseTab, NextTab, PrevTab};
         match self {
@@ -168,13 +206,18 @@ impl ShortcutId {
             ShortcutId::NewConnection => Box::new(NewConnection),
             ShortcutId::SplitRight => Box::new(SplitRight),
             ShortcutId::SplitDown => Box::new(SplitDown),
+            ShortcutId::SplitRightWithHost => Box::new(SplitRightWithHost),
             ShortcutId::PaneLeft => Box::new(FocusPaneLeft),
             ShortcutId::PaneRight => Box::new(FocusPaneRight),
             ShortcutId::PaneUp => Box::new(FocusPaneUp),
             ShortcutId::PaneDown => Box::new(FocusPaneDown),
+            ShortcutId::ResizeLeft => Box::new(ResizePaneLeft),
+            ShortcutId::ResizeRight => Box::new(ResizePaneRight),
+            ShortcutId::ResizeUp => Box::new(ResizePaneUp),
+            ShortcutId::ResizeDown => Box::new(ResizePaneDown),
             ShortcutId::Settings => Box::new(OpenSettings),
             ShortcutId::ToggleSidebar => Box::new(ToggleSidebar),
-            ShortcutId::BrowseFiles => Box::new(crate::shell::ToggleSftp),
+            ShortcutId::BrowseFiles => Box::new(crate::shell::OpenFiles),
             ShortcutId::CloseTab => Box::new(CloseTab),
             ShortcutId::NextTab => Box::new(NextTab),
             ShortcutId::PrevTab => Box::new(PrevTab),
@@ -182,13 +225,15 @@ impl ShortcutId {
             ShortcutId::FontSmaller => Box::new(DecreaseFontSize),
             ShortcutId::FontReset => Box::new(ResetFontSize),
             ShortcutId::FillPassword => Box::new(crate::shell::FillPassword),
+            ShortcutId::ClearTerminal => Box::new(crate::shell::ClearTerminal),
+            ShortcutId::CommandHistory => Box::new(crate::shell::ToggleCommandHistory),
         }
     }
 }
 
 /// Chords tern keeps for itself outside the keymap: the menu's (quit, hide, minimise),
 /// clipboard, and tab slots.
-const RESERVED_MAC: [&str; 7] = [
+const RESERVED_MAC: [&str; 10] = [
     "cmd-q",
     "cmd-h",
     "alt-cmd-h",
@@ -196,6 +241,9 @@ const RESERVED_MAC: [&str; 7] = [
     "cmd-c",
     "cmd-v",
     "cmd-a",
+    "ctrl-cmd-f",
+    "cmd-z",
+    "shift-cmd-z",
 ];
 
 /// Quit, and the terminal's copy / paste / find (see `tern-term`'s `view`).
@@ -453,9 +501,9 @@ mod tests {
     #[test]
     fn overrides_fall_back_to_defaults_and_conflicts_name_the_owner() {
         let (picker, quit) = if cfg!(target_os = "macos") {
-            ("cmd-k", "cmd-q")
+            ("cmd-t", "cmd-q")
         } else {
-            ("ctrl-shift-k", "ctrl-shift-q")
+            ("ctrl-shift-t", "ctrl-shift-q")
         };
         let mut k = Keymap::default();
         assert_eq!(k.combo(ShortcutId::HostPicker), picker);
@@ -463,7 +511,7 @@ mod tests {
         assert_eq!(k.combo(ShortcutId::HostPicker), "cmd-p");
         assert!(!k.is_default(ShortcutId::HostPicker));
         let refusal = k.refusal(ShortcutId::Settings, "cmd-p").unwrap();
-        assert!(refusal.contains("Open host picker"), "{refusal}");
+        assert!(refusal.contains("New tab (pick a host)"), "{refusal}");
         assert!(k.refusal(ShortcutId::Settings, picker).is_none());
         // Re-recording a shortcut's own chord is not a conflict with itself.
         assert!(k.refusal(ShortcutId::HostPicker, "cmd-p").is_none());

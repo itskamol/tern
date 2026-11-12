@@ -3,9 +3,9 @@
 
 use std::collections::VecDeque;
 
-use tern_ssh::SecretString;
 use tern_ssh::oneshot::Sender;
-use tern_ssh::{ChallengePrompt, Prompt};
+use tern_ssh::{ChallengePrompt, ExposeSecret, Prompt, SecretString};
+use tern_vault::Key;
 
 /// What the terminal should show after a keystroke, and whether the question is answered.
 #[derive(Debug, PartialEq, Eq)]
@@ -73,12 +73,12 @@ impl Login {
                 let pending: VecDeque<_> = prompts.into();
                 let mut display = Vec::new();
                 for line in [name, instructions].iter().filter(|l| !l.is_empty()) {
-                    display.extend_from_slice(line.replace('\n', "\r\n").as_bytes());
+                    display.extend_from_slice(&from_server(line));
                     display.extend_from_slice(b"\r\n");
                 }
                 let echo = pending.front().is_some_and(|p| p.echo);
                 if let Some(first) = pending.front() {
-                    display.extend_from_slice(first.text.as_bytes());
+                    display.extend_from_slice(&from_server(&first.text));
                 }
                 let kind = Kind::Challenge {
                     pending,
@@ -191,7 +191,7 @@ impl Login {
                 answers.push(SecretString::from(line));
                 if let Some(next) = pending.front() {
                     self.echo = next.echo;
-                    return Some(next.text.as_bytes().to_vec());
+                    return Some(from_server(&next.text));
                 }
                 if let Some(r) = reply.take() {
                     let _ = r.send(Some(std::mem::take(answers)));
@@ -220,6 +220,69 @@ impl Login {
                 }
             }
         }
+    }
+}
+
+/// Text the server chose (keyboard-interactive name, instructions, prompts), made safe to
+/// write into the terminal: line breaks and tabs stay, every other control character is shown
+/// in caret notation (`^[`), so a server cannot move the cursor, retitle the tab, write the
+/// clipboard or draw a fake prompt. OpenSSH escapes these the same way.
+fn from_server(text: &str) -> Vec<u8> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\n' => out.push_str("\r\n"),
+            '\t' => out.push(c),
+            c if (c as u32) < 0x20 => {
+                out.push('^');
+                out.push(char::from(c as u8 + b'@'));
+            }
+            '\u{7f}' => out.push_str("^?"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.into_bytes()
+}
+
+/// The vault entry that answers `prompt` on a connection to `host:port`; `None` for questions
+/// a vault does not answer (host keys, keyboard-interactive).
+pub fn key_for(prompt: &Prompt, host: &str, port: u16) -> Option<Key> {
+    match prompt {
+        Prompt::Password { user, .. } => Some(Key::Password {
+            user: user.clone(),
+            host: host.to_owned(),
+            port,
+        }),
+        Prompt::KeyPassphrase { path, .. } => Some(Key::KeyPassphrase {
+            path: path.display().to_string(),
+        }),
+        Prompt::Challenge { .. } | Prompt::UnknownHostKey { .. } => None,
+    }
+}
+
+/// Answers a password or passphrase prompt without asking; any other prompt is returned.
+pub fn answer(prompt: Prompt, secret: SecretString) -> Option<Prompt> {
+    match prompt {
+        Prompt::Password { reply, .. } | Prompt::KeyPassphrase { reply, .. } => {
+            let _ = reply.send(Some(secret));
+            None
+        }
+        other => Some(other),
+    }
+}
+
+pub fn is_yes(answer: Option<&SecretString>) -> bool {
+    answer.is_some_and(|a| matches!(a.expose_secret().trim(), "y" | "yes" | "Y" | "Yes"))
+}
+
+pub fn describe(key: &Key) -> String {
+    match key {
+        Key::Password { user, host, .. } => format!("the password for {user}@{host}"),
+        Key::KeyPassphrase { path } => format!("the passphrase for {path}"),
+        Key::SshKey { name } => format!("the key {name}"),
     }
 }
 
@@ -346,6 +409,32 @@ mod tests {
     }
 
     #[test]
+    fn challenge_text_from_the_server_cannot_drive_the_terminal() {
+        let (tx, _rx) = oneshot::channel();
+        let (mut login, shown) = Login::start(Prompt::Challenge {
+            name: "\x1b]0;pwned\x07".into(),
+            instructions: "line one\r\nline two\u{9b}2J".into(),
+            prompts: vec![
+                ChallengePrompt {
+                    text: "\x1b[2KPassword: ".into(),
+                    echo: false,
+                },
+                ChallengePrompt {
+                    text: "OTP:\x1b]52;c;aGk=\x07 ".into(),
+                    echo: false,
+                },
+            ],
+            reply: tx,
+        });
+        assert_eq!(
+            String::from_utf8(shown).unwrap(),
+            "^[]0;pwned^G\r\nline one\r\nline two\\u{9b}2J\r\n^[[2KPassword: "
+        );
+        let step = login.input(b"x\r");
+        assert_eq!(step.display, b"\r\nOTP:^[]52;c;aGk=^G ");
+    }
+
+    #[test]
     fn a_typed_password_is_kept_for_the_offer_to_save() {
         let (mut login, rx, _) = password();
         assert!(login.input(b"hunter2\r").done);
@@ -365,5 +454,62 @@ mod tests {
         let (mut login, _) = Login::ask("Vault passphrase: ", false);
         assert!(login.input(b"abc\x03").done);
         assert!(login.take_answer().is_none());
+    }
+
+    #[test]
+    fn password_key_uses_the_prompt_user_and_the_connection_address() {
+        let (reply, _rx) = oneshot::channel();
+        let prompt = Prompt::Password {
+            user: "deploy".into(),
+            host: "alias".into(),
+            reply,
+        };
+        assert_eq!(
+            key_for(&prompt, "10.0.0.5", 2222),
+            Some(Key::Password {
+                user: "deploy".into(),
+                host: "10.0.0.5".into(),
+                port: 2222
+            })
+        );
+    }
+
+    #[test]
+    fn host_key_questions_are_never_answered_from_the_vault() {
+        let (reply, _rx) = oneshot::channel();
+        let prompt = Prompt::UnknownHostKey {
+            host: "h".into(),
+            port: 22,
+            algorithm: "ed25519".into(),
+            fingerprint_sha256: "SHA256:x".into(),
+            reply,
+        };
+        assert_eq!(key_for(&prompt, "h", 22), None);
+        assert!(super::answer(prompt, SecretString::from("x".to_owned())).is_some());
+    }
+
+    #[test]
+    fn answering_sends_the_secret() {
+        let (reply, mut rx) = oneshot::channel();
+        let prompt = Prompt::Password {
+            user: "u".into(),
+            host: "h".into(),
+            reply,
+        };
+        assert!(super::answer(prompt, SecretString::from("hunter2".to_owned())).is_none());
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().unwrap().expose_secret(),
+            "hunter2"
+        );
+    }
+
+    #[test]
+    fn only_yes_saves() {
+        let s = |t: &str| SecretString::from(t.to_owned());
+        assert!(is_yes(Some(&s("yes"))));
+        assert!(is_yes(Some(&s("y"))));
+        assert!(!is_yes(Some(&s("no"))));
+        assert!(!is_yes(Some(&s(""))));
+        assert!(!is_yes(None));
     }
 }

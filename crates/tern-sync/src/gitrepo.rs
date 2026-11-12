@@ -25,6 +25,10 @@ struct Meta {
     hash: String,
     updated_at: u64,
     device: String,
+    /// The pusher's bundle number, a hint for the next one; 0 from a tern before numbering.
+    /// The checked number travels sealed (the app's `tern-bundle` manifest).
+    #[serde(default)]
+    seq: u64,
 }
 
 #[derive(Debug)]
@@ -169,6 +173,7 @@ impl GitRepo {
             hash: meta.hash,
             updated_at: meta.updated_at,
             device: meta.device,
+            seq: meta.seq,
             vault: read(VAULT)?,
             sealed: read(DATA)?,
         }))
@@ -181,6 +186,7 @@ impl GitRepo {
     pub fn push(
         &self,
         hash: &str,
+        seq: u64,
         device: &str,
         vault: &[u8],
         sealed: &[u8],
@@ -194,6 +200,7 @@ impl GitRepo {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             device: device.to_owned(),
+            seq,
         };
         let write = |name: &str, bytes: &[u8]| {
             std::fs::write(self.dir.join(name), bytes).map_err(|e| GithubError::Http(e.to_string()))
@@ -326,7 +333,7 @@ mod tests {
             a.fetch().unwrap().is_none(),
             "an empty remote has nothing yet"
         );
-        a.push("h1", "mac-a", b"vault-bytes", b"sealed-bytes")
+        a.push("h1", 1, "mac-a", b"vault-bytes", b"sealed-bytes")
             .unwrap();
 
         let b = GitRepo::new(url.clone(), tmp.path().join("b"));
@@ -337,7 +344,7 @@ mod tests {
         assert_eq!(got.sealed, b"sealed-bytes");
 
         // A second push from b is seen by a on its next fetch.
-        b.push("h2", "mac-b", b"v2", b"s2").unwrap();
+        b.push("h2", 2, "mac-b", b"v2", b"s2").unwrap();
         assert_eq!(a.fetch().unwrap().unwrap().hash, "h2");
     }
 
@@ -364,7 +371,7 @@ mod tests {
         // A device name that long would not fit on a command line (Windows allows 32 KiB), so the
         // oversized file is committed by hand into the first clone.
         let a = GitRepo::new(url.clone(), tmp.path().join("a"));
-        a.push("h1", "mac-a", b"v", b"s").unwrap();
+        a.push("h1", 1, "mac-a", b"v", b"s").unwrap();
         std::fs::write(a.dir.join(META), vec![b' '; 128 * 1024]).unwrap();
         let dir = Some(a.dir.as_path());
         ok(run(dir, &["add", META]).unwrap(), "add").unwrap();

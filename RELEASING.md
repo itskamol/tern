@@ -4,9 +4,9 @@ Releases are cut from `main` by pushing a `vX.Y.Z` tag. The [release workflow](.
 
 1. Check that `main` is green in CI and that every issue in the milestone is closed.
 2. Pick the version per [SemVer](https://semver.org/): before 1.0, bump the minor for anything breaking or notable, the patch for fixes.
-3. Set `version` under `[workspace.package]` in `Cargo.toml`, then run `cargo check --workspace` so `Cargo.lock` follows.
+3. Set `version` under `[workspace.package]` in `Cargo.toml`, and the same version on the four `tern-*` entries under `[workspace.dependencies]`, then run `cargo check --workspace` so `Cargo.lock` follows.
 4. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above it, and update the compare links at the bottom.
-5. Record the release's idle RSS in `docs/perf.md`; a regression of more than 10% blocks the release.
+5. Record the release's idle memory in `docs/perf.md` from `scripts/measure-idle.sh` (the median of three runs, with the range); a regression of more than 10% blocks the release. Compare against the previous release measured the same way on the same Mac.
 6. Commit as `Release vX.Y.Z`, then tag and push:
 
    ```sh
@@ -29,3 +29,17 @@ TERN_NOTARY_PROFILE=tern-notary scripts/release.sh
 ```
 
 It signs and notarises the app, staples it, builds the dmg from the stapled app, signs, notarises and staples the dmg, then checks both with `spctl`. Without `TERN_NOTARY_PROFILE` it still signs and skips notarisation, saying so.
+
+## Without a Developer ID
+
+`scripts/release.sh` signs with the local identity "tern local" when no `TERN_SIGN_ID` is set (create it once with `scripts/make-local-identity.sh`). Such a release opens because the Homebrew cask removes the quarantine flag, and it updates itself: an installed tern accepts a download only when it is signed with the same certificate. So keep that identity: export "tern local" from Keychain Access (My Certificates → Export, a `.p12` with a password) and store it safely; a release signed with a new one is refused by every installed copy, which then needs `brew reinstall --cask tern`.
+
+1. With the version committed and pushed, run `scripts/release.sh`.
+2. Create the release with its files in one step, which also creates the tag (the release workflow then only sets the notes):
+
+   ```sh
+   gh release create vX.Y.Z target/release/bundle/tern-X.Y.Z-macos-arm64.{zip,dmg} --repo <owner>/tern \
+     --target main --title "tern vX.Y.Z" --notes-file <(awk '/^## \[X.Y.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)
+   ```
+
+3. Copy `target/release/bundle/tern.rb` to the tap repository `<owner>/homebrew-tern` as `Casks/tern.rb`, commit and push.

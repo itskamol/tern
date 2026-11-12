@@ -24,6 +24,15 @@ actions!(
         SelectAll,
         Home,
         End,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        SelectHome,
+        SelectEnd,
+        DeleteWordLeft,
+        DeleteWordRight,
+        DeleteToStart,
         ShowCharacterPalette,
         Paste,
         Cut,
@@ -51,9 +60,14 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-x", Cut, Some(CONTEXT)),
         KeyBinding::new("home", Home, Some(CONTEXT)),
         KeyBinding::new("end", End, Some(CONTEXT)),
+        KeyBinding::new("shift-home", SelectHome, Some(CONTEXT)),
+        KeyBinding::new("shift-end", SelectEnd, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(CONTEXT)),
     ]
+    .into_iter()
+    .chain(words::bindings())
+    .collect()
 }
 
 /// Field colours, from tern's theme. The shell also installs the current ones as a global.
@@ -213,6 +227,11 @@ impl TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.click_count > 1 {
+            self.is_selecting = false;
+            let at = self.index_for_mouse_position(event.position);
+            return self.select_by_clicks(at, event.click_count, cx);
+        }
         self.is_selecting = true;
 
         if event.modifiers.shift {
@@ -727,6 +746,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .map(|el| Self::word_actions(el, cx))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
@@ -751,7 +771,7 @@ mod tests {
     use super::*;
     use gpui::{KeyContext, Keystroke};
 
-    fn resolves_to<A: gpui::Action>(keys: &str) -> bool {
+    pub(super) fn resolves_to<A: gpui::Action>(keys: &str) -> bool {
         let keymap = gpui::Keymap::new(bindings());
         let stroke = Keystroke::parse(keys).expect("valid keystroke");
         let ctx = KeyContext::parse(CONTEXT).expect("valid context");
@@ -765,3 +785,6 @@ mod tests {
         assert!(resolves_to::<Backspace>("shift-backspace"));
     }
 }
+
+#[path = "text_input_words.rs"]
+mod words;

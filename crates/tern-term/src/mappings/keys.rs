@@ -219,6 +219,21 @@ pub fn to_esc_str(
     {
         let key = keystroke.key.chars().next()?;
 
+        // A printable ASCII character the layout types with Option (@ on German, [ on French)
+        // is typed, not Meta: left to the input handler, which writes `key_char`. On US/ABC the
+        // Option layer is all non-ASCII, so Meta is unaffected there.
+        if !keystroke.modifiers.control
+            && let Some(typed) = keystroke.key_char.as_deref()
+            && let mut chars = typed.chars()
+            && let Some(ch) = chars.next()
+            && chars.next().is_none()
+            && ('\x21'..='\x7e').contains(&ch)
+            && ch != key
+            && ch != key.to_ascii_uppercase()
+        {
+            return None;
+        }
+
         if modifiers == TerminalModifiers::Alt {
             return Some(Cow::Owned(format!("\x1b{key}")));
         } else if keystroke.modifiers.shift {
@@ -234,26 +249,15 @@ pub fn to_esc_str(
     None
 }
 
-/// Bytes to send for a key press: the escape-sequence mapping, else the typed
-/// character (layout- and shift-aware) when no ctrl/cmd/fn modifier is held.
-/// `None` means the key is not ours.
+/// Bytes for a key press the mapping owns: special keys, ctrl combos, and Option-as-Meta.
+/// `None` means GPUI should hand the key to the input handler, which is where plain typed text,
+/// dead keys and composition come from, so a character is never written by both paths.
 pub fn keystroke_bytes(
     keystroke: &Keystroke,
     mode: Modes,
     option_as_meta: bool,
 ) -> Option<Vec<u8>> {
-    if let Some(esc) = to_esc_str(keystroke, mode, option_as_meta) {
-        return Some(esc.as_bytes().to_vec());
-    }
-    let m = &keystroke.modifiers;
-    if m.control || m.platform || m.function {
-        return None;
-    }
-    keystroke
-        .key_char
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_bytes().to_vec())
+    to_esc_str(keystroke, mode, option_as_meta).map(|esc| esc.as_bytes().to_vec())
 }
 
 ///   Code     Modifiers
@@ -319,17 +323,54 @@ mod test {
     }
 
     #[test]
-    fn typed_text_falls_back_to_key_char() {
+    fn typed_text_is_left_to_the_input_handler() {
+        // A plain or shifted character is not ours: the input handler writes it.
         let mut ks = Keystroke::parse("shift-a").unwrap();
         ks.key_char = Some("A".into());
+        assert_eq!(keystroke_bytes(&ks, Modes::empty(), true), None);
+        // Option with the setting off is a dead key or a composed character, also its.
+        let mut alt = Keystroke::parse("alt-e").unwrap();
+        alt.key_char = Some("\u{b4}".into());
+        assert_eq!(keystroke_bytes(&alt, Modes::empty(), false), None);
         assert_eq!(
-            keystroke_bytes(&ks, Modes::empty(), true),
-            Some(b"A".to_vec())
+            keystroke_bytes(&alt, Modes::empty(), true),
+            Some(b"\x1be".to_vec())
         );
         // Cmd+letter is the app's, not the remote's.
         let mut cmd = Keystroke::parse("cmd-a").unwrap();
         cmd.key_char = Some("a".into());
         assert_eq!(keystroke_bytes(&cmd, Modes::empty(), true), None);
+    }
+
+    #[test]
+    fn option_types_a_layout_character_that_is_printable_ascii() {
+        let alt = |key: &str, key_char: &str| {
+            let mut ks = Keystroke::parse(&format!("alt-{key}")).unwrap();
+            ks.key_char = Some(key_char.into());
+            ks
+        };
+        // German: Option+L is "@", Option+7 is "|". Not Meta, left to the input handler.
+        let german = alt("l", "@");
+        assert_eq!(keystroke_bytes(&german, Modes::empty(), true), None);
+        assert_eq!(keystroke_bytes(&alt("7", "|"), Modes::empty(), true), None);
+        // US/ABC: the Option layer is non-ASCII, so Meta stays.
+        let us = alt("b", "\u{222b}");
+        assert_eq!(
+            keystroke_bytes(&us, Modes::empty(), true),
+            Some(b"\x1bb".to_vec())
+        );
+        // Same character as the key (or its capital) is just Meta.
+        assert_eq!(
+            keystroke_bytes(&alt("b", "b"), Modes::empty(), true),
+            Some(b"\x1bb".to_vec())
+        );
+        // Ctrl+Alt is untouched.
+        let mut ctrl_alt = Keystroke::parse("ctrl-alt-l").unwrap();
+        ctrl_alt.key_char = Some("@".into());
+        assert_eq!(
+            keystroke_bytes(&ctrl_alt, Modes::empty(), true),
+            Some(b"\x1b\x0c".to_vec())
+        );
     }
 
     #[test]

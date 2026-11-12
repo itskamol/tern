@@ -8,19 +8,21 @@ use crate::hover::Accessible as _;
 use crate::hover::HoverFade as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, Entity, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Transformation, div,
-    percentage, px,
+    AppContext as _, Context, Entity, Hsla, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
+    Transformation, div, percentage, px,
 };
 use tern_ssh::HostEntry;
 
-use crate::connections::Connection;
+use crate::connections::{Connection, Spot};
 use crate::icons::{self, icon};
 use crate::indicator::Dot;
 use crate::shell::Shell;
 use crate::tabs::{self, TabInfo};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
+pub(crate) use drag::DraggedHost;
+use drag::{drop_line, spring_load};
 
 /// `hosts[i]` is `connections[i].entry()`: the sidebar lists tern's own connections only.
 pub struct SidebarState<'a> {
@@ -33,6 +35,8 @@ pub struct SidebarState<'a> {
     /// Indices into `hosts`, newest first, already limited to what the section shows.
     pub query: &'a str,
     pub search: &'a Entity<TextInput>,
+    /// The connection ↑/↓ reached from the search box, drawn selected.
+    pub selected: Option<usize>,
 }
 
 /// How the Saved section is laid out: ungrouped hosts first, then one folder per group.
@@ -79,7 +83,7 @@ pub fn search_label(connection: &Connection) -> String {
     )
 }
 
-/// Connections matching `query`, best first (the ranking the ⌘K picker uses).
+/// Connections matching `query`, best first (the ranking the host picker uses).
 pub fn search(query: &str, connections: &[Connection]) -> Vec<usize> {
     let labels: Vec<String> = connections.iter().map(search_label).collect();
     let names: Vec<&str> = connections.iter().map(|c| c.name.as_str()).collect();
@@ -101,7 +105,7 @@ pub fn render(
         .px(px(8.));
     // What a row has to lay out: the sidebar less list padding, row padding, dot and gaps.
     let inner = s.width - 61.;
-    let one = |scope: &'static str, ix: usize, top: bool, cx: &mut Context<Shell>| {
+    let one = |scope: &'static str, ix: usize, cx: &mut Context<Shell>| {
         let host = &s.hosts[ix];
         let status = s
             .open
@@ -110,13 +114,14 @@ pub fn render(
             .find(|tab| tab.alias == host.alias)
             .map(|tab| tab.dot);
         let active = s.active_alias == Some(host.alias.as_str());
-        row(scope, ix, host, status, active, top, inner, t, cx)
+        let selected = s.selected == Some(ix);
+        row(scope, ix, host, status, active, selected, inner, t, cx)
     };
     if !s.query.trim().is_empty() {
         let found = search(s.query, s.connections);
         let mut body = div().pt(px(8.)).flex().flex_col().gap(px(2.));
-        for (n, &ix) in found.iter().enumerate() {
-            body = body.child(one("found", ix, n == 0, cx));
+        for &ix in &found {
+            body = body.child(one("found", ix, cx));
         }
         list = list.child(body);
         if found.is_empty() {
@@ -138,13 +143,15 @@ pub fn render(
                 let layout = layout(s.connections);
                 let mut body = div().pt(px(4.)).flex().flex_col().gap(px(2.));
                 for &ix in &layout.ungrouped {
-                    body = body.child(one("host", ix, false, cx));
+                    body = body.child(one("host", ix, cx));
                 }
                 list = list.child(body);
                 for (n, (name, rows)) in layout.groups.iter().enumerate() {
                     let folded = s.collapsed_groups.contains(name);
                     let toggled = name.clone();
-                    list = list.child(section_header(
+                    let into = Spot::EndOf(Some(name.clone()));
+                    let accent = t.accent;
+                    let header = section_header(
                         ("group-header", n),
                         SharedString::from(format!("{name} · {}", rows.len())),
                         folded,
@@ -152,11 +159,25 @@ pub fn render(
                         t,
                         cx,
                         move |shell, cx| shell.toggle_group(&toggled, cx),
+                    )
+                    .role(Role::Button)
+                    .aria_label(a11y::group_label(name, rows.len(), folded))
+                    .aria_expanded(!folded)
+                    .drag_over::<DraggedHost>(move |s, _, _, _| s.bg(accent.opacity(0.25)))
+                    .on_drop(cx.listener(
+                        move |shell, from: &DraggedHost, _, cx| {
+                            shell.move_host(from.ix, &into, cx);
+                        },
                     ));
+                    list = list.child(if folded {
+                        spring_load(header, name.clone(), cx)
+                    } else {
+                        header
+                    });
                     if !folded {
                         let mut body = div().pt(px(4.)).pl(px(12.)).flex().flex_col().gap(px(2.));
                         for &ix in rows {
-                            body = body.child(one("host", ix, false, cx));
+                            body = body.child(one("host", ix, cx));
                         }
                         list = list.child(body);
                     }
@@ -196,13 +217,14 @@ fn empty_state(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
         .child(
             div()
                 .id("empty-new")
+                .role(Role::Button)
+                .aria_label("New connection")
                 .h(px(28.))
                 .px(px(12.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(8.))
-                .cursor_pointer()
                 .text_size(px(13.))
                 .bg(t.accent)
                 .text_color(t.on_accent)
@@ -212,13 +234,14 @@ fn empty_state(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
         .child(
             div()
                 .id("empty-import")
+                .role(Role::Button)
+                .aria_label("Import from SSH config")
                 .h(px(28.))
                 .px(px(12.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(8.))
-                .cursor_pointer()
                 .text_size(px(13.))
                 .hover_fade("import-ssh-config", t.row_hover, t.row_active)
                 .text_color(t.text)
@@ -284,9 +307,8 @@ fn section_header(
     cx: &mut Context<Shell>,
     on_toggle: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    let faint = t.muted.opacity(crate::theme::by_dpi(0.7, 1.0));
+    let faint = t.secondary();
     let id = id.into();
-    let key = format!("section-{id}");
     div()
         .id(id)
         .mt(px(if nested { 4. } else { 12. }))
@@ -297,8 +319,6 @@ fn section_header(
         .items_center()
         .gap(px(8.))
         .rounded(px(8.))
-        .cursor_pointer()
-        .hover_fade(key, gpui::transparent_black(), t.row_hover)
         .on_click(cx.listener(move |s, _, _, cx| on_toggle(s, cx)))
         .child(
             icon(icons::CHEVRON_RIGHT)
@@ -341,16 +361,9 @@ fn status_dot(status: Option<Dot>, t: &Theme) -> impl IntoElement + use<> {
         })
 }
 
-/// The "..." button's element id, distinct per section so a host listed twice has two.
-fn scope_more(scope: &'static str) -> &'static str {
-    match scope {
-        "recent" => "recent-more",
-        "found" => "found-more",
-        _ => "host-more",
-    }
-}
-
-/// One host on one line, as zeron's session row: dot, name, the address faint at the end.
+/// One host on one line: dot, name, the address faint at the end. As in Finder's and Mail's
+/// sidebars (HIG: Sidebars) pointing at a row changes nothing; only the active or keyboard-
+/// selected host is filled, and its actions are in the menu a secondary click opens.
 #[allow(clippy::too_many_arguments)]
 fn row(
     scope: &'static str,
@@ -365,13 +378,20 @@ fn row(
 ) -> impl IntoElement + use<> {
     let target = host.clone();
     let menu_host = host.clone();
-    let more_host = host.clone();
-    let group: SharedString = format!("host-row-{scope}-{ix}").into();
+    let click_host = host.clone();
     let meta_size = if crate::theme::low_dpi() { 12. } else { 11. };
     let meta = fit_meta(host, inner, meta_size);
+    let dragged = DraggedHost {
+        ix,
+        label: SharedString::from(tabs::middle_ellipsis(&host.alias, 26)),
+        background: t.popup,
+        color: t.text,
+    };
+    let accent = t.accent;
     div()
         .id((scope, ix))
-        .group(group.clone())
+        .role(Role::Button)
+        .aria_label(a11y::host_label(host, status))
         .relative()
         .h(px(29.))
         .px(px(8.))
@@ -379,16 +399,23 @@ fn row(
         .flex()
         .items_center()
         .gap(px(8.))
-        .cursor_pointer()
-        .hover_fade(
-            format!("host-{scope}-{ix}"),
-            gpui::transparent_black(),
-            t.ink(0.11),
-        )
         .when(active || top, |el| el.bg(t.ink(0.11)))
-        .on_click(cx.listener(move |shell, _, window, cx| {
-            shell.connect_host(target.clone(), window, cx);
+        // Control-click is the secondary click on a Mac with one button.
+        .on_click(cx.listener(move |shell, e: &gpui::ClickEvent, window, cx| {
+            if e.modifiers().control {
+                shell.open_host_menu(&click_host, ix, e.position(), cx);
+            } else {
+                shell.connect_host(target.clone(), window, cx);
+            }
         }))
+        // Only the full list reorders: a search result's place says nothing about the order.
+        .when(scope == "host", |el| {
+            el.on_drag(dragged, |host, _, _, cx| cx.new(|_| host.clone()))
+                .drag_over::<DraggedHost>(move |s, from, _, _| drop_line(s, from.ix, ix, accent))
+                .on_drop(cx.listener(move |shell, from: &DraggedHost, _, cx| {
+                    shell.move_host(from.ix, &Spot::At(ix), cx);
+                }))
+        })
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |shell, e: &MouseDownEvent, _, cx| {
@@ -418,41 +445,14 @@ fn row(
                 div()
                     .flex_none()
                     .text_size(px(meta_size))
-                    .text_color(t.muted.opacity(crate::theme::by_dpi(0.6, 0.85)))
+                    .text_color(t.secondary())
                     .child(SharedString::from(text)),
             )
         })
+        // A tooltip only where the row does not already show the whole address.
         .when(
             meta.as_deref() != Some(short_address(host).as_str()),
             |el| el.hint(address(host), t),
-        )
-        // zeron's hover corner: floats over the end of the row, so it reserves no width.
-        .child(
-            div()
-                .id((scope_more(scope), ix))
-                .icon_button("Host actions", t)
-                .absolute()
-                .right(px(4.))
-                .top(px(5.))
-                .size(px(19.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(5.))
-                .bg(t.popup)
-                .invisible()
-                .group_hover(group, |s| s.visible())
-                .hover(|s| s.bg(t.ink(0.18)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |shell, e: &gpui::ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    shell.open_host_menu(&more_host, ix, e.position(), cx);
-                }))
-                .child(
-                    icon(icons::MORE)
-                        .size(px(crate::theme::fit(19., 13.)))
-                        .text_color(t.muted),
-                ),
         )
 }
 
@@ -468,13 +468,14 @@ fn footer(t: &Theme, cx: &mut Context<Shell>) -> impl IntoElement + use<> {
         .child(
             div()
                 .id("footer-sync")
+                .role(Role::Button)
+                .aria_label("Sync")
                 .h(px(28.))
                 .px(px(8.))
                 .flex()
                 .items_center()
                 .gap(px(8.))
                 .rounded(px(8.))
-                .cursor_pointer()
                 .text_size(px(13.))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(t.text.opacity(crate::theme::by_dpi(0.8, 0.9)))
@@ -507,7 +508,6 @@ pub fn icon_button(
         .items_center()
         .justify_center()
         .rounded(px(6.))
-        .cursor_pointer()
         .hover_fade(key, gpui::transparent_black(), t.ink(0.11))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
@@ -562,6 +562,11 @@ fn short_address(host: &HostEntry) -> String {
         meta
     }
 }
+
+#[path = "sidebar_a11y.rs"]
+mod a11y;
+#[path = "sidebar_drag.rs"]
+mod drag;
 
 #[cfg(test)]
 mod tests {

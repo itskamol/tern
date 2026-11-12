@@ -23,7 +23,7 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 | Titlebar | transparent, custom-drawn strip, app owns drag | `crates/ui/src/lib.rs:393` |
 | Traffic lights | at (14, 14), 38px titlebar row | `lib.rs:398` (code wins over inventory's 14,15) |
 | Fullscreen | traffic lights hidden → chrome cluster reflows left | inventory §1.1 |
-| Window background | macOS `Blurred`, frosted shell; opaque elsewhere | `theme.rs:1130`, `lib.rs:423` |
+| Window background | macOS `Blurred` (material `Selection`), frosted shell, no picture; opaque under Reduce transparency and elsewhere | `theme.rs:1130`, `lib.rs:423` |
 | Glass | blur 44, saturate 1.8, brightness 1.18 | inventory §1.12 |
 | Type | Geist (UI), Geist Mono (terminal) | inventory §1.12 |
 | Surfaces | `bg` → `surface` (+1 step) → `surface_raised` → `overlay`; hairline white borders | `theme.rs:610-640` |
@@ -33,7 +33,7 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 | Feature | Value | Source |
 | --- | --- | --- |
 | Width | drag-resize 208–400px, default 256, persisted | inventory §1.3 |
-| Collapse | width → 0 over 200ms ease-out; main pane goes full-bleed (radius/border melt) | inventory §1.3 |
+| Collapse | width → 0 over 200ms ease-out; main area goes full-bleed (radius/border melt) | inventory §1.3 |
 | Separator | double-click resets width; arrow keys nudge ±16px | inventory §1.3 |
 | Rows | host alias, `user@host`, live status dot (connected / connecting / error) | §1.6, adapted |
 | Grouping | flat or grouped (ssh config file / tag), persisted | §1.6 |
@@ -74,5 +74,4 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 
 ## Later (not in the first version)
 
-- Right pane: SFTP file browser, same resize/transition rules as zeron's diff pane (360–760px, default 520, cap 52%).
 - Theme library with VS Code theme import (zeron `crates/theme/src/vscode.rs`).

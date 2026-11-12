@@ -29,6 +29,10 @@ pub struct Auth {
     pub password_command: Option<String>,
     /// The "Sudo password command"; see `session_fill`.
     pub sudo_command: Option<String>,
+    /// The saved connection's ProxyCommand. Like the password command it may have come in
+    /// through sync or an import, so it runs only once this Mac approved it. A `~/.ssh/config`
+    /// host's is not here: that file is the person's own, and runs as ssh would run it.
+    pub proxy_command: Option<String>,
 }
 
 /// What to do about the command when a password prompt arrives.
@@ -252,19 +256,120 @@ impl Approved {
     }
 }
 
+/// What a local command is run for; it decides how the question reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// The login password (`password_command`).
+    Login,
+    /// The saved connection's ProxyCommand, before dialling.
+    Proxy,
+    /// A password fill after login (`session_fill`).
+    Fill,
+}
+
+/// A question about running one command. The command that runs on yes is the one the question
+/// showed, never one read again from a connection that may have changed meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    purpose: Purpose,
+    command: String,
+}
+
+impl Question {
+    /// What the person reads; control characters in the command cannot reach the terminal.
+    pub fn text(&self) -> String {
+        let shown = self.command.replace(char::is_control, " ");
+        match self.purpose {
+            Purpose::Login => {
+                format!("This connection runs `{shown}` to get its password. Run it? (yes/no) ")
+            }
+            Purpose::Proxy => format!(
+                "This connection reaches the server by running `{shown}` on this Mac. Run it? (yes/no) "
+            ),
+            Purpose::Fill => {
+                format!("\r\nThis connection runs `{shown}` to get a password. Run it? (yes/no) ")
+            }
+        }
+    }
+}
+
+/// "Run this here once?" for one session: the commands this Mac approved, read from
+/// [`Approved`] each time so another tab's yes counts, plus the ones said yes to here whose save
+/// failed. A yes holds for the session either way, so an automatic reconnect never stops at the
+/// same question again.
+#[derive(Debug, Default)]
+pub struct Approvals {
+    dir: Option<PathBuf>,
+    unsaved: Vec<String>,
+}
+
+impl Approvals {
+    /// Approvals kept in the settings folder.
+    pub fn here() -> Self {
+        Self::in_dir(crate::settings::dir())
+    }
+
+    pub fn in_dir(dir: Option<PathBuf>) -> Self {
+        Self {
+            dir,
+            unsaved: Vec::new(),
+        }
+    }
+
+    pub fn approved(&self, command: &str) -> bool {
+        self.unsaved.iter().any(|c| c == command)
+            || self
+                .dir
+                .as_deref()
+                .is_some_and(|d| Approved::load(d).contains(command))
+    }
+
+    /// `None` when `command` may run now; otherwise the question to ask first.
+    #[must_use]
+    pub fn ask(&self, purpose: Purpose, command: &str) -> Option<Question> {
+        (!self.approved(command)).then(|| Question {
+            purpose,
+            command: command.to_owned(),
+        })
+    }
+
+    /// Records the answer. Returns the command to run on yes, `None` on no. A yes whose save
+    /// fails is logged and still holds for this session.
+    pub fn answer(&mut self, question: Question, yes: bool) -> Option<String> {
+        if !yes {
+            return None;
+        }
+        let saved = match &self.dir {
+            Some(dir) => Approved::approve(dir, &question.command),
+            None => Err(std::io::Error::other("no settings folder")),
+        };
+        if let Err(e) = saved {
+            tracing::warn!(error = %e, purpose = ?question.purpose, "command_approval_not_saved");
+            if !self.unsaved.contains(&question.command) {
+                self.unsaved.push(question.command.clone());
+            }
+        }
+        Some(question.command)
+    }
+}
+
 /// A command saved from this Mac's form counts as seen, so it is approved with the save.
 pub fn approve_saved(connection: &crate::connections::Connection) {
-    let Some(dir) = crate::settings::dir() else {
-        return;
-    };
+    if let Some(dir) = crate::settings::dir() {
+        approve_saved_in(&dir, connection);
+    }
+}
+
+fn approve_saved_in(dir: &Path, connection: &crate::connections::Connection) {
     for command in [
         &connection.password_command,
         &connection.sudo_password_command,
+        &connection.proxy_command,
     ]
     .into_iter()
     .flatten()
     {
-        let _ = Approved::approve(&dir, command);
+        let _ = Approved::approve(dir, command);
     }
 }
 
@@ -371,6 +476,20 @@ mod tests {
     }
 
     #[test]
+    fn saving_a_connection_here_approves_its_proxy_command_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = crate::connections::Connection {
+            proxy_command: Some("ssh -W %h:%p bastion".into()),
+            password_command: Some("gopass show -o web".into()),
+            ..crate::connections::Connection::default()
+        };
+        approve_saved_in(dir.path(), &connection);
+        let approved = Approved::load(dir.path());
+        assert!(approved.contains("ssh -W %h:%p bastion"));
+        assert!(approved.contains("gopass show -o web"));
+    }
+
+    #[test]
     fn approval_is_per_exact_command_and_survives_the_file() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!Approved::load(dir.path()).contains("gopass show -o a"));
@@ -391,5 +510,72 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(APPROVED_FILE), b"{not json").unwrap();
         assert!(!Approved::load(dir.path()).contains("x"));
+    }
+
+    #[test]
+    fn an_unapproved_command_is_asked_about_and_a_no_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut here = Approvals::in_dir(Some(dir.path().to_owned()));
+        let q = here.ask(Purpose::Login, "gopass show -o a").unwrap();
+        assert_eq!(here.answer(q, false), None);
+        assert!(here.ask(Purpose::Login, "gopass show -o a").is_some());
+        assert!(!Approved::load(dir.path()).contains("gopass show -o a"));
+    }
+
+    #[test]
+    fn a_yes_runs_the_command_the_question_showed_and_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut here = Approvals::in_dir(Some(dir.path().to_owned()));
+        let q = here.ask(Purpose::Fill, "pass show web").unwrap();
+        assert_eq!(here.answer(q, true).as_deref(), Some("pass show web"));
+        assert!(here.ask(Purpose::Fill, "pass show web").is_none());
+        // Another session, or the next run, reads the file.
+        let other = Approvals::in_dir(Some(dir.path().to_owned()));
+        assert!(other.approved("pass show web"));
+        assert!(
+            other.ask(Purpose::Proxy, "pass show web ").is_some(),
+            "edited text is new"
+        );
+    }
+
+    #[test]
+    fn a_yes_whose_save_fails_still_holds_for_the_session_only() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the folder should be: every write fails.
+        let blocked = dir.path().join("not-a-dir");
+        std::fs::write(&blocked, b"").unwrap();
+        let mut here = Approvals::in_dir(Some(blocked.clone()));
+        let q = here.ask(Purpose::Proxy, "ssh -W %h:%p jump").unwrap();
+        assert_eq!(here.answer(q, true).as_deref(), Some("ssh -W %h:%p jump"));
+        assert!(here.ask(Purpose::Proxy, "ssh -W %h:%p jump").is_none());
+        assert!(!Approvals::in_dir(Some(blocked)).approved("ssh -W %h:%p jump"));
+        let mut nowhere = Approvals::in_dir(None);
+        let q = nowhere.ask(Purpose::Login, "x").unwrap();
+        assert_eq!(nowhere.answer(q, true).as_deref(), Some("x"));
+        assert!(nowhere.approved("x"));
+    }
+
+    #[test]
+    fn the_question_names_its_purpose_and_cannot_write_control_characters() {
+        let mut here = Approvals::in_dir(None);
+        let text = |p| here.ask(p, "a\x1b[2Jb\nc").unwrap().text();
+        assert_eq!(
+            text(Purpose::Login),
+            "This connection runs `a [2Jb c` to get its password. Run it? (yes/no) "
+        );
+        assert_eq!(
+            text(Purpose::Proxy),
+            "This connection reaches the server by running `a [2Jb c` on this Mac. Run it? (yes/no) "
+        );
+        assert_eq!(
+            text(Purpose::Fill),
+            "\r\nThis connection runs `a [2Jb c` to get a password. Run it? (yes/no) "
+        );
+        let q = here.ask(Purpose::Login, "a\x1bb").unwrap();
+        assert_eq!(
+            here.answer(q, true).as_deref(),
+            Some("a\x1bb"),
+            "what runs is the exact text, not the shown one"
+        );
     }
 }

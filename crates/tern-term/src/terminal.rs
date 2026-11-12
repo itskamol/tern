@@ -28,9 +28,11 @@ use crate::config::CursorStyleSetting;
 use crate::config::TerminalTheme;
 use crate::links::Link;
 use crate::search::{Search, SearchMark, mark_at};
+use osc133::Scanner;
 
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
+pub use osc133::{GridPos, PromptMark};
 
 /// The most text one OSC 52 request may put on the clipboard. The program on the other end of
 /// the connection chooses the payload, so a larger one is dropped rather than copied.
@@ -58,6 +60,15 @@ pub enum TerminalEvent {
     /// OSC 0/2 title change. An empty string means "reset to default".
     TitleChanged(String),
     Bell,
+    /// OSC 52: the remote asks to put text on the clipboard. The view writes it only while
+    /// [`crate::TerminalOptions::clipboard_write`] allows; the app can say that it happened.
+    ClipboardStore(String),
+    /// OSC 133: the shell marked its prompt. `at` is where the cursor was when the mark was
+    /// written, so [`Terminal::text_from`] can read the command typed after a `CommandStart`.
+    PromptMark {
+        mark: PromptMark,
+        at: GridPos,
+    },
 }
 
 /// Viewport dimensions in cells.
@@ -193,6 +204,7 @@ pub(crate) enum Notice {
 pub struct Terminal {
     term: Term<EventCapture>,
     parser: Processor,
+    marks: Scanner,
     capture: EventCapture,
     theme: TerminalTheme,
     /// Cell size in pixels, for text-area size queries and the resize callback.
@@ -230,6 +242,7 @@ impl Terminal {
         Self {
             term,
             parser: Processor::new(),
+            marks: Scanner::default(),
             capture,
             theme: TerminalTheme::default(),
             cell_px: (0.0, 0.0),
@@ -244,9 +257,7 @@ impl Terminal {
         for notice in self.process(bytes) {
             match notice {
                 Notice::Event(event) => cx.emit(event),
-                Notice::ClipboardStore(text) => {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
-                }
+                Notice::ClipboardStore(text) => cx.emit(TerminalEvent::ClipboardStore(text)),
             }
         }
         cx.notify();
@@ -255,12 +266,19 @@ impl Terminal {
     /// The context-free core of [`Self::feed`]: runs the parser, sends replies
     /// through `write`, and returns what still needs a gpui context.
     pub(crate) fn process(&mut self, bytes: &[u8]) -> Vec<Notice> {
-        self.parser.advance(&mut self.term, bytes);
+        let mut notices = Vec::new();
+        let mut from = 0;
+        for (end, mark) in self.marks.scan(bytes) {
+            self.parser.advance(&mut self.term, &bytes[from..end]);
+            from = end;
+            let at = self.cursor_pos();
+            notices.push(Notice::Event(TerminalEvent::PromptMark { mark, at }));
+        }
+        self.parser.advance(&mut self.term, &bytes[from..]);
         if let Some(search) = self.search.as_mut() {
             search.refresh(&self.term);
         }
         let mut reply = Vec::new();
-        let mut notices = Vec::new();
         let events: Vec<Event> = self.capture.events.borrow_mut().drain(..).collect();
         for event in events {
             match event {
@@ -374,6 +392,11 @@ impl Terminal {
         }
     }
 
+    /// A cell's width and height in pixels, as of the last frame drawn; zero before the first.
+    pub fn cell_px(&self) -> (f32, f32) {
+        self.cell_px
+    }
+
     pub fn cols(&self) -> usize {
         self.term.columns()
     }
@@ -403,6 +426,26 @@ impl Terminal {
 
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// ⌘K: forgets the scrollback and what is on screen above the cursor's line, which moves
+    /// to the top, so the prompt being typed at stays (as iTerm2's Clear Buffer and Ghostty's
+    /// clear_screen keep it). Nothing is sent to the remote. On the alternate screen (vim,
+    /// htop) only the history goes: that screen belongs to the program, which repaints it.
+    pub fn clear(&mut self) {
+        use alacritty_terminal::vte::ansi::{ClearMode, Handler};
+        self.term.scroll_display(Scroll::Bottom);
+        if !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            let cursor = self.term.grid().cursor.point;
+            let above = cursor.line.0.max(0) as usize;
+            if above > 0 {
+                self.term.scroll_up(above);
+                self.term.goto(0, cursor.column.0);
+            }
+        }
+        self.term.clear_screen(ClearMode::Saved);
+        self.term.selection = None;
+        self.clear_search();
     }
 
     // ---- selection ----
@@ -661,20 +704,23 @@ impl Terminal {
 
     /// Cursor in viewport coordinates; `None` when hidden or scrolled out.
     pub fn cursor(&self) -> Option<CursorSnapshot> {
-        let content = self.term.renderable_content();
-        if content.cursor.shape == CursorShape::Hidden {
+        let shape = self.term.renderable_content().cursor.shape;
+        if shape == CursorShape::Hidden {
             return None;
         }
-        let Point { line, column } = content.cursor.point;
+        let (row, col) = self.cursor_cell()?;
+        Some(CursorSnapshot { row, col, shape })
+    }
+
+    /// The cell the cursor is on as (row, column) in the viewport, hidden or not; `None` only
+    /// when it is scrolled out. An input method anchors its text here.
+    pub fn cursor_cell(&self) -> Option<(usize, usize)> {
+        let Point { line, column } = self.term.renderable_content().cursor.point;
         let row = line.0 + self.display_offset() as i32;
         if row < 0 || row >= self.rows() as i32 {
             return None;
         }
-        Some(CursorSnapshot {
-            row: row as usize,
-            col: column.0,
-            shape: content.cursor.shape,
-        })
+        Some((row as usize, column.0))
     }
 
     /// The text on the cursor's row up to (not including) the cursor, trailing blanks
@@ -710,9 +756,16 @@ impl Terminal {
     }
 }
 
+#[path = "osc133.rs"]
+mod osc133;
+
 #[cfg(test)]
 #[path = "terminal_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "terminal_bench_tests.rs"]
+mod bench_tests;
 
 #[cfg(test)]
 #[path = "history_trim_tests.rs"]

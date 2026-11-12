@@ -9,13 +9,13 @@ use gpui::{
     Subscription, Window, anchored, deferred, div, point, px,
 };
 use tern_ssh::SecretString;
-use tern_vault::{Key, Vault, VaultError};
+use tern_vault::{Key, Vault};
 
 use super::{Shell, Toast, ToastKind};
 use crate::connections::{self, Connection, DEFAULT_KEEP_ALIVE, Draft};
-use crate::keeper::Keeper;
+use crate::keeper::{Keeper, Tried, Typed};
 use crate::sidebar;
-use crate::text_input::{InputColors, TextInput};
+use crate::text_input::TextInput;
 use crate::theme::Theme;
 
 #[path = "shell_connection_advanced.rs"]
@@ -102,12 +102,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let mut field = |placeholder: &str, masked: bool, value: String| {
             cx.new(|cx| {
                 let mut input = TextInput::new(placeholder.to_owned(), masked, colors, cx);
@@ -212,12 +207,7 @@ impl Shell {
     /// A blank port-forward row, focused.
     fn add_forward_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let input = cx.new(|cx| TextInput::new(FORWARD_HINT.to_owned(), false, colors, cx));
         window.focus(&input.focus_handle(cx), cx);
         if let Some(form) = self.form.as_mut() {
@@ -415,8 +405,9 @@ impl Shell {
         );
     }
 
-    /// Unlocks or creates the vault as needed, stores the password and saves, all off the UI
-    /// thread (scrypt takes about a second).
+    /// Unlocks or creates the vault as needed, stores the password and saves, the scrypt work
+    /// off the UI thread (about a second each). An open vault never leaves the keeper, so other
+    /// tabs keep reading it while this writes, and the write is ordered with every other one.
     fn save_password(
         &mut self,
         key: Key,
@@ -424,49 +415,45 @@ impl Shell {
         vault_pass: SecretString,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = Keeper::path(cx) else {
-            return;
+        // A locked vault opens with the passphrase typed in the form; with no vault yet, that
+        // passphrase starts one.
+        let unlocking = if Keeper::locked(cx) {
+            Some(Keeper::try_unlock(Typed::Passphrase(vault_pass), cx))
+        } else {
+            if !Keeper::exists(cx) {
+                Keeper::adopt(Vault::new(vault_pass), cx);
+            }
+            None
         };
-        let open = Keeper::take(cx);
-        let exists = path.exists();
-        let work = cx.background_spawn(async move {
-            let mut vault = match open {
-                Some(v) => v,
-                None if exists => match Vault::unlock(&path, vault_pass) {
-                    Ok(v) => v,
-                    Err(e) => return (None, Err(e)),
-                },
-                None => Vault::new(vault_pass),
-            };
-            vault.set(key, password);
-            let saved = vault.save(&path);
-            (Some(vault), saved)
-        });
         cx.spawn(async move |this, cx| {
-            let (vault, result) = work.await;
-            let _ = this.update_in(cx, |shell, window, cx| {
-                if let Some(v) = vault {
-                    Keeper::put(v, cx);
+            let opened = match unlocking {
+                Some(task) => match task.await {
+                    Tried::Opened => Ok(()),
+                    Tried::Again { message, .. } | Tried::Failed(message) => Err(message),
+                },
+                None => Ok(()),
+            };
+            let result = match opened {
+                Ok(()) => match this.update(cx, |_, cx| Keeper::store(key, password, cx)) {
+                    Ok(Some(task)) => task.await,
+                    Ok(None) => Err("Vault: it was locked before the password was saved.".into()),
+                    Err(_) => return,
+                },
+                Err(message) => Err(format!(
+                    "{message} The connection is saved; the password is not."
+                )),
+            };
+            let _ = this.update_in(cx, |shell, window, cx| match result {
+                Ok(()) => {
+                    shell.notify_toast(ToastKind::Positive, "Password saved in the vault", cx);
+                    shell.close_form(window, cx);
                 }
-                match result {
-                    Ok(()) => {
-                        shell.notify_toast(ToastKind::Positive, "Password saved in the vault", cx);
-                        shell.close_form(window, cx);
+                Err(message) => {
+                    if let Some(form) = shell.form.as_mut() {
+                        form.busy = false;
+                        form.error = Some(message);
                     }
-                    Err(e) => {
-                        if let Some(form) = shell.form.as_mut() {
-                            form.busy = false;
-                            form.error = Some(match e {
-                                VaultError::WrongPassphrase => {
-                                    "Wrong vault passphrase. The connection is saved; the \
-                                     password is not."
-                                        .into()
-                                }
-                                other => format!("Vault: {other}"),
-                            });
-                        }
-                        cx.notify();
-                    }
+                    cx.notify();
                 }
             });
         })
@@ -490,27 +477,16 @@ impl Shell {
         };
         match saved {
             Ok(()) => {
-                let removed = self.connections.get(ix).cloned();
-                self.connections = next;
-                self.refresh_hosts();
-                if let Some(c) = removed {
-                    let name = c.name.clone();
+                let name = self.connections.get(ix).map(|c| c.name.clone());
+                self.commit_hosts(
+                    next,
+                    format!("Remove {}", name.as_deref().unwrap_or("host")),
+                );
+                if let Some(name) = name {
+                    // The same step as ⌘Z, so the toast and Edit → Undo never disagree.
                     self.toast(
-                        Toast::new(ToastKind::Default, format!("Removed {name}")).action(
-                            "Undo",
-                            move |s, _, cx| {
-                                let at = ix.min(s.connections.len());
-                                let mut next = s.connections.clone();
-                                next.insert(at, c.clone());
-                                if let Some(dir) = crate::settings::dir()
-                                    && connections::save(&dir, &next).is_ok()
-                                {
-                                    s.connections = next;
-                                    s.refresh_hosts();
-                                    cx.notify();
-                                }
-                            },
-                        ),
+                        Toast::new(ToastKind::Default, format!("Removed {name}"))
+                            .action("Undo", |s, w, cx| s.undo_hosts(w, cx)),
                         cx,
                     );
                 }

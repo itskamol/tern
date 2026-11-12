@@ -33,7 +33,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
-        let faint = t.muted.opacity(crate::theme::by_dpi(0.7, 1.0));
+        let faint = t.secondary();
         let open = form.advanced_open;
         let header = div()
             .id("form-advanced")

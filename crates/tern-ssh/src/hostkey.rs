@@ -2,6 +2,9 @@
 // learn helpers, with our own match policy on top — OpenSSH semantics (known if any recorded key
 // matches, changed only if none does; see `verdict`) plus the prompt / hard-fail layering.
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use futures::channel::oneshot;
 use russh::client;
@@ -75,6 +78,79 @@ fn physical_line(path: &Path, counted: usize) -> usize {
 
 /// Algorithms already recorded for this host, so the server is asked for those first
 /// (otherwise a server offering a different key type would look "unknown", not "changed").
+/// Records an accepted key the way `ssh` would: with the host name hashed when the user's
+/// `~/.ssh/config` says `HashKnownHosts yes`, so the file does not list where this Mac
+/// connects; in plain text otherwise, OpenSSH's default.
+fn learn(host: &str, port: u16, key: &PublicKey, path: Option<&Path>) -> Result<(), String> {
+    if !hashes_known_hosts(host) {
+        return match path {
+            Some(p) => known_hosts::learn_known_hosts_path(host, port, key, p),
+            None => known_hosts::learn_known_hosts(host, port, key),
+        }
+        .map_err(|e| e.to_string());
+    }
+    let path = match path {
+        Some(p) => p.to_path_buf(),
+        None => crate::config::home_dir()
+            .ok_or("no home directory")?
+            .join(".ssh/known_hosts"),
+    };
+    let salt: [u8; 20] = rand::random();
+    let line = format!(
+        "{} {}",
+        hashed_name(&salt, host, port),
+        key.to_openssh().map_err(|e| e.to_string())?
+    );
+    append_line(&path, &line).map_err(|e| e.to_string())
+}
+
+fn hashes_known_hosts(host: &str) -> bool {
+    crate::config::load_config().is_some_and(|c| hashes_in(&c.text, host))
+}
+
+/// Whether ssh config `text` sets `HashKnownHosts yes` for `host`; the first value wins.
+fn hashes_in(text: &str, host: &str) -> bool {
+    crate::sshconf::first(&crate::sshconf::directives(text, host), "hashknownhosts")
+        .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
+}
+
+/// OpenSSH's hashed host field: `|1|base64(salt)|base64(HMAC-SHA1(salt, name))`, where the
+/// name is `host` on port 22 and `[host]:port` elsewhere.
+fn hashed_name(salt: &[u8], host: &str, port: u16) -> String {
+    use base64::Engine as _;
+    use hmac::{KeyInit as _, Mac as _};
+    let name = if port == 22 {
+        host.to_owned()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(salt)
+        .map(|m| m.chain_update(name.as_bytes()).finalize().into_bytes())
+        .map(|bytes| b64.encode(bytes))
+        .unwrap_or_default();
+    format!("|1|{}|{mac}", b64.encode(salt))
+}
+
+/// Adds `line` at the end of `path`, starting a new line if the file does not end in one. A
+/// new file is the user's only, as ssh-keygen creates it.
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).append(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    let mut last = [0; 1];
+    let ends_in_newline = file.seek(SeekFrom::End(-1)).is_err()
+        || (file.read_exact(&mut last).is_ok() && last[0] == b'\n');
+    let lead = if ends_in_newline { "" } else { "\n" };
+    file.write_all(format!("{lead}{line}\n").as_bytes())
+}
+
 pub(crate) fn known_algorithms(host: &str, port: u16, path: Option<&Path>) -> Vec<Algorithm> {
     let keys = match path {
         Some(p) => known_hosts::known_host_keys_path(host, port, p),
@@ -90,6 +166,57 @@ pub(crate) fn known_algorithms(host: &str, port: u16, path: Option<&Path>) -> Ve
     out
 }
 
+/// Set while the person is shown a host key to accept: the connect timeout is for a network
+/// that does not answer, not for someone comparing a fingerprint, so its clock stops meanwhile.
+#[derive(Clone, Default)]
+pub(crate) struct Asking(Arc<AtomicBool>);
+
+/// Clears [`Asking`] when the question is over, however it ends.
+struct Held(Arc<AtomicBool>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+impl Asking {
+    fn hold(&self) -> Held {
+        self.0.store(true, Ordering::Relaxed);
+        Held(self.0.clone())
+    }
+
+    fn held(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// `fut`, or `None` once it has taken `limit` not counting the time a host key question was
+/// open. Checked every `TICK`, so the count is off by at most that much.
+pub(crate) async fn within<T>(
+    limit: Duration,
+    asking: &Asking,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    const TICK: Duration = Duration::from_millis(50);
+    tokio::pin!(fut);
+    let mut left = limit;
+    loop {
+        let started = tokio::time::Instant::now();
+        tokio::select! {
+            out = &mut fut => return Some(out),
+            () = tokio::time::sleep(TICK.min(left)) => {
+                if !asking.held() {
+                    left = left.saturating_sub(started.elapsed());
+                    if left.is_zero() {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) struct Handler {
     pub host: String,
     pub port: u16,
@@ -101,6 +228,8 @@ pub(crate) struct Handler {
     pub remote: RemoteTargets,
     /// The local agent socket to wire server-opened agent channels to; `None` refuses them.
     pub agent_socket: Option<PathBuf>,
+    /// Stops the connect timeout while the host key question is open.
+    pub asking: Asking,
 }
 
 impl client::Handler for Handler {
@@ -130,6 +259,7 @@ impl client::Handler for Handler {
             }
             Verdict::Unknown => {
                 tracing::info!(host = %self.host, port = self.port, "ssh_host_key_unknown");
+                let _held = self.asking.hold();
                 let (tx, rx) = oneshot::channel();
                 let prompt = Prompt::UnknownHostKey {
                     host: self.host.clone(),
@@ -149,11 +279,7 @@ impl client::Handler for Handler {
                 if !rx.await.unwrap_or(false) {
                     return Err(Failure::HostKeyRejected);
                 }
-                let learned = match self.known_hosts.as_deref() {
-                    Some(p) => known_hosts::learn_known_hosts_path(&self.host, self.port, key, p),
-                    None => known_hosts::learn_known_hosts(&self.host, self.port, key),
-                };
-                if let Err(e) = learned {
+                if let Err(e) = learn(&self.host, self.port, key, self.known_hosts.as_deref()) {
                     // Same as OpenSSH: the user accepted, so continue, but say we could not persist it.
                     tracing::warn!(host = %self.host, port = self.port, error = %e, "ssh_known_hosts_write_failed");
                 }
@@ -308,6 +434,51 @@ mod tests {
     }
 
     #[test]
+    fn hash_known_hosts_is_read_from_the_ssh_config_like_ssh() {
+        assert!(!hashes_in("", "web"));
+        assert!(hashes_in("Host *\n  HashKnownHosts yes\n", "web"));
+        assert!(!hashes_in(
+            "Host web\n  HashKnownHosts no\nHost *\n  HashKnownHosts yes\n",
+            "web"
+        ));
+        assert!(hashes_in(
+            "Host web\n  HashKnownHosts no\nHost *\n  HashKnownHosts yes\n",
+            "db"
+        ));
+    }
+
+    #[test]
+    fn a_hashed_name_is_written_as_ssh_keygen_writes_it() {
+        use base64::Engine as _;
+        let salt = base64::engine::general_purpose::STANDARD
+            .decode("Vtyj+xDWIGS+plsnabmvtfEd/R8=")
+            .unwrap();
+        let (name, _) = HASHED_STRONG_B.split_once(' ').unwrap();
+        assert_eq!(hashed_name(&salt, "strong-b", 22), name);
+    }
+
+    #[test]
+    fn a_hashed_line_appended_is_known_and_does_not_name_the_host() {
+        let p = tmp("learn-hashed", &format!("other {KEY_B}"));
+        let line = format!(
+            "{} {KEY_A}",
+            hashed_name(&rand::random::<[u8; 20]>(), "strong-b", 2222)
+        );
+        append_line(&p, &line).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("strong-b"));
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(
+            verdict("strong-b", 2222, &key(KEY_A), Some(&p)),
+            Verdict::Known
+        );
+        assert_eq!(
+            verdict("strong-b", 22, &key(KEY_A), Some(&p)),
+            Verdict::Unknown
+        );
+    }
+
+    #[test]
     fn comma_separated_names_on_one_line_all_match() {
         let p = tmp("aliases", &format!("strong-b,10.0.0.5 {KEY_A}\n"));
         for host in ["strong-b", "10.0.0.5"] {
@@ -386,5 +557,17 @@ mod tests {
             verdict("strong-b", 22, &key(KEY_A), Some(&p)),
             Verdict::Known
         );
+    }
+
+    #[tokio::test]
+    async fn the_connect_clock_stops_while_a_host_key_is_being_read() {
+        let slow = || tokio::time::sleep(Duration::from_millis(400));
+        let limit = Duration::from_millis(150);
+        assert_eq!(super::within(limit, &Asking::default(), slow()).await, None);
+        let asking = Asking::default();
+        let held = asking.hold();
+        assert_eq!(super::within(limit, &asking, slow()).await, Some(()));
+        drop(held);
+        assert!(!asking.held());
     }
 }

@@ -32,6 +32,23 @@ So the default scrollback is **5,000 lines**, configurable. A fresh tab pays onl
 
 That is 0.13% of a 60 fps frame, with no steady-state memory, so it stays (#3 closed wontfix).
 
+### Frame cost while a terminal streams (2026-11-05)
+
+Release build on an M-series Mac, no GPU and no window: `crates/tern-term/examples/frame_cost.rs`
+draws a 243×59 terminal through GPUI's `TestApp` with the real CoreText shaper. `TERN_FRAME_STATS=1`
+logs the same per-second figures from the app (`frame_stats`).
+
+| Frame | Before | After | What changed |
+| --- | --- | --- | --- |
+| Streaming, 30 new log lines a frame | 3.0 ms | 1.8 ms | rows shaped to their last glyph, not to the right edge |
+| Terminal idle, parent re-renders | 1.8 ms | 0.25 ms | the same, and the terminal a cached child |
+| Parse, mixed ANSI, 20 MiB in 64 KiB chunks | 110–140 MiB/s | unchanged | `parse_throughput` (ignored test) |
+
+Before the change a streaming frame was 57 µs of grid snapshot, 1.16 ms in `shape_line`, 0.22 ms
+building the runs, and the rest layout and painting; the snapshot and the parser are not where the
+time goes. The headless run cannot show GPU time (not measured at all) or the real `Shell::render`,
+which `TERN_FRAME_STATS=1` measures in the app.
+
 ## Budget
 
 Idle memory with one connected tab, release build: RSS from `scripts/measure-rss.sh` (30 s
@@ -48,6 +65,8 @@ The first measurement sets the baseline; every release records a new row and may
 | — | — | app with one idle tab | not yet measured |
 | 2026-10-05 | 2fbea6e | no tab | 84.4 MB RSS · 44 MB footprint |
 | 2026-10-05 | 2fbea6e | one tab, connected to a LAN host, idle shell | 86.6 MB RSS (peak 91.7) · 49 MB footprint |
+| 2026-11-11 | 0.1.3 release (`/Applications/tern.app`), M1 Pro | no tab, empty config, 30 s | 101.6 MB RSS · 68 MB footprint |
+| 2026-11-11 | 0.2.0 release (`target/release/bundle`), M1 Pro | same, two runs | 100.8 / 101.2 MB RSS · 70 / 88 MB footprint |
 
 Baseline, set by the second row: **49 MB footprint / 87 MB RSS**. Measured on an M4 Pro,
 macOS 26.6.2, with the screen locked, so no frames were being composited. A connected tab

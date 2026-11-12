@@ -15,10 +15,6 @@ pub const SIDEBAR_DEFAULT: f32 = 256.0;
 pub const FONT_MIN: f32 = 8.0;
 pub const FONT_MAX: f32 = 32.0;
 pub const FONT_DEFAULT: f32 = 13.0;
-/// How strongly the wallpaper hero shows at the top of the empty view.
-pub const WALLPAPER_HERO_OPACITY_MIN: f32 = 0.1;
-pub const WALLPAPER_HERO_OPACITY_MAX: f32 = 1.0;
-pub const WALLPAPER_HERO_OPACITY_DEFAULT: f32 = 1.0;
 /// The idle lock choices in minutes; 0 is off.
 pub const VAULT_LOCK_CHOICES: [u32; 5] = [0, 5, 15, 30, 60];
 pub const VAULT_LOCK_DEFAULT: u32 = 15;
@@ -64,7 +60,8 @@ pub struct Settings {
     pub terminal_font_family: Option<String>,
     /// Hold looping animations still. macOS's Reduce motion does the same on its own.
     pub reduce_motion: bool,
-    /// Option sends Meta (ESC-prefixed keys) to the remote, as most terminals offer.
+    /// Option sends Meta (ESC-prefixed keys) to the remote, as most terminals offer. A character
+    /// the layout types with Option, such as @ on German, is still typed.
     pub option_as_meta: bool,
     /// Open the tabs of the last run again at launch.
     pub reopen_tabs: bool,
@@ -74,20 +71,6 @@ pub struct Settings {
     pub terminal_theme: Option<String>,
     /// Per-host scheme by host alias, as Termius does per host.
     pub host_themes: BTreeMap<String, String>,
-    /// Image (png, jpeg, webp) shown as the hero of the empty view and tinting the window's
-    /// colours; `None` is the plain frost.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wallpaper: Option<String>,
-    pub wallpaper_hero_opacity: f32,
-    /// Artwork treatment applied to the wallpaper once and cached.
-    pub wallpaper_effect: crate::wallpaper_fx::Effect,
-    /// Recent wallpapers (copies in tern's folder), newest first.
-    pub wallpaper_history: Vec<String>,
-    /// Take the window's surfaces, accent and washes from the wallpaper's dominant colour.
-    pub wallpaper_theme_colors: bool,
-    /// The picture covers the whole window, with translucent panels carrying the text; off
-    /// keeps it to the top of the empty view.
-    pub wallpaper_fills_window: bool,
     /// A git remote to sync through (any host git can reach); `None` uses a GitHub gist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_remote: Option<String>,
@@ -101,6 +84,8 @@ pub struct Settings {
     pub middle_click_paste: bool,
     /// Flash the terminal on BEL.
     pub visual_bell: bool,
+    /// Programs on the remote may set the clipboard (OSC 52).
+    pub clipboard_write: bool,
     /// Bounce the Dock icon on BEL while tern is in the background.
     pub bell_bounces_dock: bool,
     /// Ask GitHub once a day whether a newer release exists; tern only says so, never installs.
@@ -111,6 +96,8 @@ pub struct Settings {
     pub vault_lock_minutes: u32,
     /// The vault passphrase is kept in the macOS login Keychain and the vault opens the first time tern needs it.
     pub vault_keychain: bool,
+    /// The open vault is locked when the Mac goes to sleep, the screen locks or another user takes over the session.
+    pub vault_lock_on_sleep: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,12 +131,6 @@ impl Default for Settings {
             log_sessions: false,
             terminal_theme: None,
             host_themes: BTreeMap::new(),
-            wallpaper: None,
-            wallpaper_hero_opacity: WALLPAPER_HERO_OPACITY_DEFAULT,
-            wallpaper_effect: crate::wallpaper_fx::Effect::None,
-            wallpaper_history: Vec::new(),
-            wallpaper_theme_colors: true,
-            wallpaper_fills_window: true,
             sync_remote: None,
             cursor_style: CursorStyle::Block,
             cursor_blink: false,
@@ -157,16 +138,80 @@ impl Default for Settings {
             copy_on_select: false,
             middle_click_paste: false,
             visual_bell: false,
+            clipboard_write: true,
             bell_bounces_dock: true,
             check_for_updates: true,
             sync_auto: true,
             vault_lock_minutes: VAULT_LOCK_DEFAULT,
             vault_keychain: false,
+            vault_lock_on_sleep: true,
+        }
+    }
+}
+
+/// What a change of settings needs re-applied to the running app. Anything not named here is
+/// read where it is used (at render, or when the next tab opens) and needs nothing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Reapply {
+    /// The app's reduced-motion flag.
+    pub motion: bool,
+    /// The palette: appearance.
+    pub palette: bool,
+    /// Open terminals' font and colour scheme.
+    pub terminal_style: bool,
+    /// Open terminals' cursor, scrollback, selection, bell and clipboard behaviour.
+    pub terminal_options: bool,
+    pub option_as_meta: bool,
+    /// Whether the tab list is saved.
+    pub reopen_tabs: bool,
+}
+
+impl Reapply {
+    /// Everything, as at launch.
+    pub fn all() -> Self {
+        Self {
+            motion: true,
+            palette: true,
+            terminal_style: true,
+            terminal_options: true,
+            option_as_meta: true,
+            reopen_tabs: true,
         }
     }
 }
 
 impl Settings {
+    /// What going from these settings to `new` needs re-applied.
+    pub fn reapply(&self, new: &Settings) -> Reapply {
+        Reapply {
+            motion: self.reduce_motion != new.reduce_motion,
+            palette: self.appearance != new.appearance,
+            terminal_style: self.terminal_font_size != new.terminal_font_size
+                || self.terminal_font_family != new.terminal_font_family
+                || self.terminal_theme != new.terminal_theme
+                || self.host_themes != new.host_themes,
+            terminal_options: (
+                self.cursor_style,
+                self.cursor_blink,
+                self.scrollback_lines,
+                self.copy_on_select,
+                self.middle_click_paste,
+                self.visual_bell,
+                self.clipboard_write,
+            ) != (
+                new.cursor_style,
+                new.cursor_blink,
+                new.scrollback_lines,
+                new.copy_on_select,
+                new.middle_click_paste,
+                new.visual_bell,
+                new.clipboard_write,
+            ),
+            option_as_meta: self.option_as_meta != new.option_as_meta,
+            reopen_tabs: self.reopen_tabs != new.reopen_tabs,
+        }
+    }
+
     /// Missing file → defaults. A file that does not parse is logged and replaced by defaults
     /// rather than stopping the app; fields it lacks take their defaults.
     pub fn load(dir: &Path) -> Self {
@@ -205,14 +250,6 @@ impl Settings {
         self.terminal_font_size =
             clamp_or(self.terminal_font_size, FONT_MIN, FONT_MAX, FONT_DEFAULT);
         self.scrollback_lines = self.scrollback_lines.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX);
-        self.wallpaper_history
-            .truncate(crate::wallpaper::HISTORY_LIMIT);
-        self.wallpaper_hero_opacity = clamp_or(
-            self.wallpaper_hero_opacity,
-            WALLPAPER_HERO_OPACITY_MIN,
-            WALLPAPER_HERO_OPACITY_MAX,
-            WALLPAPER_HERO_OPACITY_DEFAULT,
-        );
         if !VAULT_LOCK_CHOICES.contains(&self.vault_lock_minutes) {
             self.vault_lock_minutes = VAULT_LOCK_DEFAULT;
         }
@@ -344,6 +381,17 @@ mod tests {
         assert_eq!(got.cursor_style, CursorStyle::Block);
         assert_eq!(got.scrollback_lines, SCROLLBACK_DEFAULT);
         assert!(got.bell_bounces_dock);
+        // A file from before the option keeps the safe choice.
+        assert!(got.vault_lock_on_sleep);
+    }
+
+    #[test]
+    fn lock_on_sleep_is_on_by_default_and_can_be_turned_off() {
+        assert!(Settings::default().vault_lock_on_sleep);
+        let dir = temp_dir("lock-on-sleep");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"vaultLockOnSleep": false}"#).unwrap();
+        assert!(!Settings::load(&dir).vault_lock_on_sleep);
     }
 
     #[test]
@@ -365,40 +413,35 @@ mod tests {
         assert_eq!(s.clamped().scrollback_lines, SCROLLBACK_MIN);
     }
 
+    /// The wallpaper was removed: a file that still carries its keys loads, keeps its other
+    /// values, and the next save drops them.
+    #[test]
+    fn old_wallpaper_keys_are_ignored() {
+        let dir = temp_dir("old-wallpaper");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{
+                "sidebarWidth": 300.0,
+                "wallpaper": "/tmp/w.png",
+                "wallpaperHeroOpacity": 0.5,
+                "wallpaperEffect": "halftone",
+                "wallpaperHistory": ["/tmp/w.png"],
+                "wallpaperThemeColors": false,
+                "wallpaperFillsWindow": false
+            }"#,
+        )
+        .unwrap();
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.sidebar_width, 300.0, "the file still parses");
+        loaded.save(&dir).unwrap();
+        let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(!saved.to_lowercase().contains("wallpaper"), "{saved}");
+    }
+
     #[test]
     fn missing_file_gives_defaults() {
         assert_eq!(Settings::load(&temp_dir("missing")), Settings::default());
-    }
-
-    #[test]
-    fn wallpaper_history_is_capped_when_loaded() {
-        let many = Settings {
-            wallpaper_history: (0..20).map(|i| format!("/w/{i}.png")).collect(),
-            ..Settings::default()
-        };
-        let kept = many.clamped().wallpaper_history;
-        assert_eq!(kept.len(), crate::wallpaper::HISTORY_LIMIT);
-        assert_eq!(kept[0], "/w/0.png");
-    }
-
-    #[test]
-    fn wallpaper_hero_opacity_is_clamped() {
-        let low = Settings {
-            wallpaper_hero_opacity: 0.0,
-            ..Settings::default()
-        };
-        assert_eq!(
-            low.clamped().wallpaper_hero_opacity,
-            WALLPAPER_HERO_OPACITY_MIN
-        );
-        let nan = Settings {
-            wallpaper_hero_opacity: f32::NAN,
-            ..Settings::default()
-        };
-        assert_eq!(
-            nan.clamped().wallpaper_hero_opacity,
-            WALLPAPER_HERO_OPACITY_DEFAULT
-        );
     }
 
     #[test]
@@ -418,12 +461,6 @@ mod tests {
             log_sessions: true,
             terminal_theme: Some("Dracula".into()),
             host_themes: BTreeMap::from([("grape".into(), "Nord".into())]),
-            wallpaper: Some("/tmp/w.png".into()),
-            wallpaper_hero_opacity: 0.5,
-            wallpaper_effect: crate::wallpaper_fx::Effect::Halftone,
-            wallpaper_history: vec!["/tmp/w.png".into(), "/tmp/v.png".into()],
-            wallpaper_theme_colors: false,
-            wallpaper_fills_window: false,
             sync_remote: Some("git@github.com:me/tern-sync.git".into()),
             cursor_style: CursorStyle::Bar,
             cursor_blink: true,
@@ -431,11 +468,13 @@ mod tests {
             copy_on_select: true,
             middle_click_paste: true,
             visual_bell: true,
+            clipboard_write: false,
             bell_bounces_dock: false,
             check_for_updates: false,
             sync_auto: false,
             vault_lock_minutes: 30,
             vault_keychain: true,
+            vault_lock_on_sleep: false,
         };
         saved.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), saved);
@@ -616,5 +655,74 @@ mod tests {
         assert_eq!(s.terminal_font_size, FONT_MIN);
         s.terminal_font_size = 99.0;
         assert_eq!(s.clamped().terminal_font_size, FONT_MAX);
+    }
+
+    #[test]
+    fn a_change_names_only_what_it_needs_re_applied() {
+        let old = Settings::default();
+        let with = |f: fn(&mut Settings)| {
+            let mut new = old.clone();
+            f(&mut new);
+            old.reapply(&new)
+        };
+        assert_eq!(old.reapply(&old), Reapply::default());
+        assert_eq!(
+            with(|s| s.reduce_motion = !s.reduce_motion),
+            Reapply {
+                motion: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.appearance = AppearanceMode::Light),
+            Reapply {
+                palette: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.terminal_font_size += 1.0),
+            Reapply {
+                terminal_style: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| {
+                s.host_themes.insert("web".into(), "Dracula".into());
+            }),
+            Reapply {
+                terminal_style: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.scrollback_lines += 1000),
+            Reapply {
+                terminal_options: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.option_as_meta = !s.option_as_meta),
+            Reapply {
+                option_as_meta: true,
+                ..Reapply::default()
+            }
+        );
+        assert_eq!(
+            with(|s| s.reopen_tabs = !s.reopen_tabs),
+            Reapply {
+                reopen_tabs: true,
+                ..Reapply::default()
+            }
+        );
+        // Read where they are used: nothing to re-apply.
+        assert_eq!(with(|s| s.sidebar_width += 10.0), Reapply::default());
+        assert_eq!(
+            with(|s| s.log_sessions = !s.log_sessions),
+            Reapply::default()
+        );
+        assert_eq!(with(|s| s.vault_lock_minutes = 5), Reapply::default());
     }
 }

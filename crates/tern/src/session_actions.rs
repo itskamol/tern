@@ -7,15 +7,15 @@
 //! more can be added or stopped while it is open. What was added stays in the spec, so an
 //! automatic reconnect brings it back; what was stopped is dropped from it.
 
-use gpui::{AppContext, Context, EventEmitter};
+use gpui::{App, AppContext, Context, EventEmitter};
 use tern_ssh::{ExposeSecret, Forward, ForwardInfo, SecretString};
 use tern_vault::Key;
 
 use super::Session;
 use super::Status;
-use super::vault::{After, Flow};
+use super::vault::{After, Then};
 use crate::keeper::Keeper;
-use crate::password_command::{self as pc, Approved};
+use crate::password_command::{self as pc, Purpose};
 
 /// Whether the text left of the cursor is a password prompt: `[sudo] password for me:`,
 /// `Password:`, `me@host's password:`, `Enter passphrase for key '/x':`. The line must END at
@@ -82,7 +82,7 @@ pub fn source(sudo: Option<&str>, password: Option<&str>, vault: bool) -> Source
 
 impl Session {
     /// Whether a password could be filled here, as far as can be told without unlocking.
-    fn fill_source(&self, cx: &Context<Self>) -> Source {
+    fn fill_source(&self, cx: &App) -> Source {
         let key = self.password_key();
         // An open vault is looked in; a locked one may hold it, so say yes and ask later.
         let vault = Keeper::lookup(&key, cx).is_some() || Keeper::locked(cx);
@@ -102,12 +102,20 @@ impl Session {
     }
 
     /// The text left of the cursor, when it is a password prompt.
-    fn at_password_prompt(&self, cx: &Context<Self>) -> bool {
+    fn at_password_prompt(&self, cx: &App) -> bool {
         self.prompt_guard(cx).is_ok()
     }
 
-    fn prompt_guard(&self, cx: &Context<Self>) -> Result<(), &'static str> {
+    fn prompt_guard(&self, cx: &App) -> Result<(), &'static str> {
         guard(self.terminal.read(cx).cursor_line_text().as_deref())
+    }
+
+    /// Whether this session is at a password prompt that Fill could answer: connected with no
+    /// login question open, a prompt on the cursor line, and a password to type. The pane's
+    /// "password asked" badge and Fill's choice of pane both follow it; it is read, not stored,
+    /// so it stops being true the moment the prompt is answered.
+    pub fn waiting_for_fill(&self, cx: &App) -> bool {
+        self.accepts_input() && self.at_password_prompt(cx) && self.fill_source(cx) != Source::None
     }
 
     /// After the remote wrote: if it now asks for a password and one could be filled, tells
@@ -125,7 +133,7 @@ impl Session {
 
     /// The shortcut: fills the password if, and only if, the cursor line is a password prompt.
     pub fn fill_password(&mut self, cx: &mut Context<Self>) {
-        if self.status != Status::Connected || self.login.is_some() {
+        if self.life.status() != Status::Connected || self.attempt.login.is_some() {
             return cx.emit(SessionNote::Message("The session is not connected".into()));
         }
         if let Err(why) = self.prompt_guard(cx) {
@@ -162,39 +170,15 @@ impl Session {
                 ))),
             },
             Source::Sudo(command) | Source::Password(command) => {
-                let approved = crate::settings::dir()
-                    .is_some_and(|d| Approved::load(&d).contains(&command));
-                if approved {
-                    self.run_fill_command(command, seq, cx);
-                } else {
-                    let text = format!(
-                        "\r\nThis connection runs `{}` to get a password. Run it? (yes/no) ",
-                        command.replace(char::is_control, " ")
-                    );
-                    self.ask_local(&text, true, Flow::ApproveFill(command, seq), cx);
+                match self.link.approvals.ask(Purpose::Fill, &command) {
+                    None => self.run_fill_command(command, seq, cx),
+                    Some(question) => self.ask_approval(question, Then::Fill(seq), cx),
                 }
             }
         }
     }
 
-    /// The answer to the approval question for a fill command.
-    pub(super) fn fill_approved(
-        &mut self,
-        command: String,
-        seq: u64,
-        yes: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if !yes {
-            return self.note("Not run.", cx);
-        }
-        if let Some(dir) = crate::settings::dir() {
-            let _ = Approved::approve(&dir, &command);
-        }
-        self.run_fill_command(command, seq, cx);
-    }
-
-    fn run_fill_command(&mut self, command: String, seq: u64, cx: &mut Context<Self>) {
+    pub(super) fn run_fill_command(&mut self, command: String, seq: u64, cx: &mut Context<Self>) {
         self.filling = true;
         let work = cx.background_spawn(async move { pc::run(&command, pc::TIMEOUT) });
         cx.spawn(async move |this, cx| {
@@ -213,7 +197,7 @@ impl Session {
     /// Types the password and Enter into the remote, exactly as the keyboard would, unless the
     /// remote has written since the prompt was checked. Not mirrored to broadcast tabs.
     fn type_password(&mut self, secret: &SecretString, seq: u64, cx: &mut Context<Self>) {
-        if self.status != Status::Connected || self.login.is_some() {
+        if self.life.status() != Status::Connected || self.attempt.login.is_some() {
             return;
         }
         if seq != self.output_seq {

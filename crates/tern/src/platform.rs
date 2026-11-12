@@ -1,5 +1,5 @@
 //! What the host system provides, in one place: its file manager's name, the bundled fonts, the
-//! one tokio runtime for SSH, and the Reduce motion preference.
+//! one tokio runtime for SSH, and the macOS display accessibility preferences.
 
 use std::borrow::Cow;
 
@@ -72,6 +72,28 @@ pub fn system_reduce_motion() -> bool {
     false
 }
 
+/// macOS's Increase contrast preference (Accessibility → Display).
+#[cfg(target_os = "macos")]
+pub fn system_increase_contrast() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldIncreaseContrast()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn system_increase_contrast() -> bool {
+    false
+}
+
+/// macOS's Reduce transparency preference (Accessibility → Display).
+#[cfg(target_os = "macos")]
+pub fn system_reduce_transparency() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn system_reduce_transparency() -> bool {
+    false
+}
+
 /// Applies the effective value: either switch on holds motion still.
 pub fn apply_reduce_motion(setting: bool, cx: &mut App) {
     let reduce = setting || system_reduce_motion();
@@ -92,5 +114,27 @@ mod tests {
             .expect("defaults");
         let stored = String::from_utf8_lossy(&out.stdout).trim() == "1";
         assert_eq!(super::system_reduce_motion(), stored);
+    }
+
+    /// The display preferences are read the same way, and a missing key means off.
+    #[test]
+    fn display_preferences_match_the_preference_store() {
+        for (key, read) in [
+            (
+                "increaseContrast",
+                super::system_increase_contrast as fn() -> bool,
+            ),
+            ("reduceTransparency", super::system_reduce_transparency),
+        ] {
+            let out = std::process::Command::new("defaults")
+                .args(["read", "com.apple.universalaccess", key])
+                .output()
+                .expect("defaults");
+            assert_eq!(
+                read(),
+                String::from_utf8_lossy(&out.stdout).trim() == "1",
+                "{key}"
+            );
+        }
     }
 }

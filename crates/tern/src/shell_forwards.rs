@@ -16,15 +16,15 @@ use crate::forward_spec;
 use crate::keymap::{self, Keymap, ShortcutId};
 use crate::session::Status;
 use crate::session::{Session, SessionNote};
-use crate::text_input::{InputColors, TextInput};
+use crate::tab_set::FillTarget;
+use crate::text_input::TextInput;
 
-actions!(tern, [FillPassword]);
+actions!(tern, [FillPassword, ClearTerminal]);
 
 /// The popovers and side panels a tab can have open.
 #[derive(Default)]
 pub(super) struct Panels {
     pub forwards: Option<ForwardsPanel>,
-    pub sftp: Option<super::sftp_ui::SftpPanel>,
 }
 
 pub(super) struct ForwardsPanel {
@@ -61,12 +61,7 @@ impl Shell {
             return;
         };
         let t = self.theme;
-        let colors = InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        };
+        let colors = t.input_colors();
         let input = cx.new(|cx| {
             TextInput::new(
                 "-L 8080:db:5432  (-R, -D too)".to_owned(),
@@ -112,11 +107,11 @@ impl Shell {
             .tabs
             .iter()
             .find(|t| t.id == panel.tab)
-            .map(|t| t.session().clone())
+            .and_then(|t| t.session().cloned())
         else {
             return;
         };
-        if session.read(cx).status != Status::Connected {
+        if session.read(cx).status() != Status::Connected {
             panel.error = Some("Not connected.".into());
             return cx.notify();
         }
@@ -136,26 +131,16 @@ impl Shell {
         cx.stop_propagation();
     }
 
-    pub(super) fn render_panels(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        [
-            self.render_forwards_panel(cx),
-            self.render_sftp_panel(window, cx),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+    pub(super) fn render_panels(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.render_forwards_panel(cx).into_iter().collect()
     }
 
     fn render_forwards_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let panel = self.panels.forwards.as_ref()?;
         let t = self.theme;
         let tab = self.tabs.iter().find(|tab| tab.id == panel.tab)?;
-        let label = tab.title.clone().unwrap_or_else(|| tab.alias.clone());
-        let session = tab.session().clone();
+        let label = tab.title().map_or_else(|| tab.alias.clone(), str::to_owned);
+        let session = tab.session()?.clone();
         let running = session.read(cx).active_forwards();
         let mut card = div()
             .id("forwards-panel")
@@ -279,17 +264,79 @@ impl Shell {
 // `session_fill.rs`.
 
 impl Shell {
-    /// ⌘\ (by default): fill the password into the focused pane, if it is at a prompt.
-    pub(super) fn fill_password(&mut self, cx: &mut Context<Self>) {
+    /// ⌘\ (by default): fills the password where one is asked. The focused pane comes first; if
+    /// it is not at a prompt, the one pane that is gets the focus and the password. Two such
+    /// panes are not guessed between. One press types once, and nothing types without it.
+    pub(super) fn fill_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A form or the Settings page has the keyboard; the pane behind it is not the target.
         if self.settings_page.is_some() || self.form.is_some() {
             return;
         }
-        let Some(tab) = self.tabs.get(self.active) else {
+        let target = self.tabs.fill_target(|pane| pane.waiting_for_fill(cx));
+        if target == FillTarget::Several {
+            return self.notify_toast(
+                ToastKind::Default,
+                "Two panes are asking for a password: click the one to fill",
+                cx,
+            );
+        }
+        if let FillTarget::Pane(id) = target {
+            self.focus_pane(id, window, cx);
+        }
+        // With no pane waiting, the focused pane's own answer says why nothing is typed.
+        let Some(tab) = self.tabs.active_tab() else {
             return;
         };
-        let session = tab.session().clone();
+        let Some(session) = tab.session().cloned() else {
+            return;
+        };
         session.update(cx, |s, cx| s.fill_password(cx));
+    }
+
+    /// A pane asked for a password that could be filled: the toast naming the shortcut, and the
+    /// pane's host when it is not the focused one. Only the front tab gets it, and only when
+    /// that pane is where the shortcut would fill.
+    fn hint_fill(&mut self, session: &Entity<Session>, cx: &mut Context<Self>) {
+        let combo = cx.global::<Keymap>().combo(ShortcutId::FillPassword);
+        // Unbound, there is no shortcut to name.
+        if self.settings_page.is_some() || combo.is_empty() {
+            return;
+        }
+        let Some(tab) = self.tabs.active_tab() else {
+            return;
+        };
+        let Some(pane) = tab.panes().iter().find(|p| p.session() == Some(session)) else {
+            return;
+        };
+        let target = self.tabs.fill_target(|p| p.waiting_for_fill(cx));
+        if target != FillTarget::Pane(pane.id) {
+            return;
+        }
+        let key = keymap::badge(combo);
+        let text = if tab.focused() == pane.id {
+            format!("{key} fills the password")
+        } else {
+            format!("{key} fills the password for {}", pane.host)
+        };
+        self.notify_toast(ToastKind::Default, text, cx);
+    }
+
+    /// ⌘K: clears the focused pane's scrollback and screen, keeping the prompt line.
+    pub(super) fn clear_terminal(&mut self, cx: &mut Context<Self>) {
+        if self.settings_page.is_some() || self.form.is_some() {
+            return;
+        }
+        let Some(tab) = self.tabs.active_tab() else {
+            return;
+        };
+        let Some(session) = tab.session() else {
+            return;
+        };
+        let terminal = session.read(cx).view.read(cx).terminal().clone();
+        terminal.update(cx, |t, cx| {
+            t.clear();
+            cx.notify();
+        });
     }
 
     /// What a session reports on its own: a forward that could not start, a password prompt
@@ -306,19 +353,7 @@ impl Shell {
                 format!("Port forward {forward} failed: {error}"),
                 cx,
             ),
-            SessionNote::PasswordPrompt => {
-                let in_front = self.settings_page.is_none()
-                    && self
-                        .tabs
-                        .get(self.active)
-                        .is_some_and(|t| t.session() == session);
-                let combo = cx.global::<Keymap>().combo(ShortcutId::FillPassword);
-                // Unbound, there is no shortcut to name.
-                if in_front && !combo.is_empty() {
-                    let text = format!("{} fills the password", keymap::badge(combo));
-                    self.notify_toast(ToastKind::Default, text, cx);
-                }
-            }
+            SessionNote::PasswordPrompt => self.hint_fill(session, cx),
             SessionNote::Message(text) => self.notify_toast(ToastKind::Default, text.clone(), cx),
             SessionNote::Problem(text) => self.notify_toast(ToastKind::Critical, text.clone(), cx),
         }

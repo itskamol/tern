@@ -1,52 +1,79 @@
 //! How the window looks: colour schemes per host, light and dark appearance, restyling open
 //! terminals, and the status line under the terminal.
 //!
-//! The window's frame: one composition, the same with and without a wallpaper.
+//! The window's frame. Layers, back to front, each drawn once:
+//! 1. the base at the window root: the macOS frost (the window's own blurred appearance behind
+//!    the shell colour at `GLASS_ALPHA`), or the opaque shell colour under Reduce transparency;
+//! 2. tiles side by side, edge to edge, with no margins, cards or gaps: the titlebar band across
+//!    the top, then sidebar | main (or Settings nav | page);
+//! 3. one neutral 1 px hairline on the sidebar's right edge, which moves with it as it tweens.
 //!
-//! Layers, back to front, each drawn once:
-//! 1. the base at the window root: the opaque shell colour, or, with no wallpaper, the macOS
-//!    frost (the window's own blurred appearance behind the shell colour at `GLASS_ALPHA`);
-//! 2. when a wallpaper fills the window, its blurred copy, cover-fit to the window, one element;
-//! 3. tiles side by side, edge to edge, with no margins, cards or gaps: the titlebar band across
-//!    the top, then sidebar | main (or Settings nav | page). A tile is only a tint at the panel
-//!    alpha over the layers behind it, so panels never carry a picture of their own;
-//! 4. one neutral 1 px hairline on the sidebar's right edge, which moves with it as it tweens.
-//!
-//! The sharp picture is only the empty view's hero, laid out inside the main tile. Sidebar width
-//! is held in whole device pixels so no edge lands between two.
+//! Sidebar width is held in whole device pixels so no edge lands between two.
 
-use crate::indicator::Dot;
-use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Context, Hsla, IntoElement, ParentElement, Styled, Window,
-    WindowBackgroundAppearance, div, px,
+    App, Context, Hsla, IntoElement, ParentElement, Styled, Window, WindowBackgroundAppearance,
+    div, px,
 };
 
 use super::*;
+use crate::theme::Look;
 
 impl Shell {
     /// The scheme a host's tabs use: its own, else the default, else zeron's (`None`).
     pub(super) fn scheme_for(&self, alias: &str) -> Option<&'static crate::theme::themes::Scheme> {
+        self.scheme_name_for(alias)
+            .and_then(crate::theme::themes::find)
+    }
+
+    /// The name of that scheme, without looking it up.
+    pub(super) fn scheme_name_for(&self, alias: &str) -> Option<&str> {
         self.settings
             .host_themes
             .get(alias)
             .or(self.settings.terminal_theme.as_ref())
-            .and_then(|name| crate::theme::themes::find(name))
+            .map(String::as_str)
     }
 
-    /// Switches the palette when the chosen appearance (or the system's, for System) differs
-    /// from the one showing, and restyles everything that holds a colour: open terminals, text
-    /// fields, the wallpaper tint.
-    pub(crate) fn apply_appearance(&mut self, cx: &mut Context<Self>) {
-        let light = self.settings.appearance.is_light(self.system_light);
-        if light == self.theme.light {
-            return;
+    /// Rebuilds the palette after one of its inputs changed (appearance, a display
+    /// preference). When it is different, everything that holds
+    /// a colour is restyled once: open terminals, text fields, the window.
+    /// Returns whether it changed (and so restyled).
+    pub(crate) fn retheme(&mut self, cx: &mut Context<Self>) -> bool {
+        self.retheme_with(self.look(), cx)
+    }
+
+    /// What the palette is built from now: the appearance setting (or the system's, for
+    /// System) and the display preferences last read.
+    pub(super) fn look(&self) -> Look {
+        Look {
+            light: self.settings.appearance.is_light(self.system_light),
+            increase_contrast: self.theme.increase_contrast,
+            reduce_transparency: self.theme.reduce_transparency,
         }
-        self.theme = Theme::zeron(light);
-        self.refresh_theme(cx);
+    }
+
+    fn retheme_with(&mut self, look: Look, cx: &mut Context<Self>) -> bool {
+        let next = Theme::resolve(look);
+        if next == self.theme {
+            return false;
+        }
+        self.theme = next;
         self.install_input_colors(cx);
         self.restyle_tabs(cx);
+        self.retheme_files(cx);
         cx.notify();
+        true
+    }
+
+    /// Reads macOS's Increase contrast and Reduce transparency; a change rebuilds the palette
+    /// (stronger edges and secondary text; opaque panels).
+    pub(crate) fn sync_display_preferences(&mut self, cx: &mut Context<Self>) {
+        let look = Look {
+            increase_contrast: crate::platform::system_increase_contrast(),
+            reduce_transparency: crate::platform::system_reduce_transparency(),
+            ..self.look()
+        };
+        self.retheme_with(look, cx);
     }
 
     /// Standard-density mode for this frame, from the monitor the window is on right now.
@@ -58,13 +85,7 @@ impl Shell {
 
     /// Text fields read their colours from this global, so open ones follow the theme.
     pub(crate) fn install_input_colors(&self, cx: &mut Context<Self>) {
-        let t = self.theme;
-        cx.set_global(crate::text_input::InputColors {
-            text: t.text,
-            placeholder: t.faint,
-            cursor: t.accent,
-            selection: t.accent.opacity(0.35),
-        });
+        cx.set_global(self.theme.input_colors());
     }
 
     pub(super) fn terminal_theme(&self, alias: &str) -> tern_term::TerminalTheme {
@@ -74,10 +95,6 @@ impl Shell {
         if let Some(family) = &self.settings.terminal_font_family {
             theme.font_family = family.clone().into();
         }
-        // Over a full-window wallpaper the terminal is a panel too: the picture shows through.
-        if let Some(alpha) = self.window_fill() {
-            theme.background_alpha = alpha;
-        }
         theme
     }
 
@@ -85,26 +102,17 @@ impl Shell {
     /// remote side is told the new grid size.
     pub(super) fn restyle_tabs(&self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
-            for pane in &tab.panes {
+            for session in tab.panes().iter().filter_map(Pane::session) {
                 let theme = self.terminal_theme(&tab.alias);
-                let view = pane.session.read(cx).view.clone();
+                let view = session.read(cx).view.clone();
                 view.update(cx, |v, cx| v.set_theme(theme, cx));
             }
         }
     }
 
-    pub(super) fn change_font(
-        &mut self,
-        change: impl FnOnce(&mut Settings),
-        cx: &mut Context<Self>,
-    ) {
-        self.update_settings(change, cx);
-        self.restyle_tabs(cx);
-    }
-
     /// Background of the main panel: the active tab's scheme, so no seam shows around it.
     pub(super) fn panel_background(&self) -> gpui::Hsla {
-        match self.tabs.get(self.active) {
+        match self.tabs.active_tab() {
             Some(tab) => self.terminal_theme(&tab.alias).background,
             None => self.theme.terminal_background,
         }
@@ -119,11 +127,11 @@ impl Shell {
         if !self.settings.show_status_line {
             return None;
         }
-        let session = self.tabs.get(self.active)?.session().read(cx);
+        let session = self.tabs.active_tab()?.session()?.read(cx);
         Some(statusline::render(
             &self.theme,
             &session.label(),
-            Dot::of(&session.status, session.is_asking()),
+            session.dot(),
             session.latency(),
             session.elapsed(),
             bg,
@@ -140,8 +148,9 @@ impl Shell {
                 let alive = this.update(cx, |s, cx| {
                     let ticking = s.settings.show_status_line
                         && s.tabs
-                            .get(s.active)
-                            .is_some_and(|t| t.session().read(cx).status == Status::Connected);
+                            .get(s.tabs.active())
+                            .and_then(|t| t.session())
+                            .is_some_and(|s| s.read(cx).status() == Status::Connected);
                     if ticking {
                         cx.notify();
                     }
@@ -152,16 +161,6 @@ impl Shell {
             }
         }));
     }
-}
-
-/// Text over the wallpaper hero sits on a plate of the panel colour, so it never depends on
-/// what the picture holds.
-pub(super) fn plate(el: gpui::Div, panel: gpui::Hsla) -> gpui::Div {
-    use gpui::Styled;
-    el.px(gpui::px(20.))
-        .py(gpui::px(12.))
-        .rounded(gpui::px(12.))
-        .bg(panel.opacity(0.85))
 }
 
 /// `value` (logical px) rounded to a whole number of device pixels at `scale`.
@@ -192,12 +191,11 @@ impl Default for FrameState {
 }
 
 impl Shell {
-    /// Records the scale factor and switches the window between its blurred appearance (no
-    /// wallpaper: the desktop shows through the frost) and an opaque one (a wallpaper is set:
-    /// nothing behind the window may show).
+    /// Records the scale factor and switches the window between its blurred appearance (the
+    /// desktop shows through the frost) and an opaque one, which Reduce transparency forces.
     pub(super) fn sync_frame(&mut self, window: &mut Window) {
         self.frame.scale = window.scale_factor();
-        let blurred = crate::theme::BLURS_BEHIND && !self.has_wallpaper();
+        let blurred = crate::theme::BLURS_BEHIND && !self.theme.reduce_transparency;
         if self.frame.blurred != Some(blurred) {
             self.frame.blurred = Some(blurred);
             window.set_background_appearance(if blurred {
@@ -208,36 +206,9 @@ impl Shell {
         }
     }
 
-    /// The window root's colour: always opaque under a wallpaper, frost otherwise.
+    /// The window root's colour: the frost, or the shell colour where the window is opaque.
     pub(super) fn window_base(&self) -> Hsla {
-        if self.has_wallpaper() {
-            self.theme.shell
-        } else {
-            self.theme.surface()
-        }
-    }
-
-    /// The blurred picture across the window, drawn once; empty unless the picture fills it.
-    pub(super) fn backdrop(&self) -> Vec<AnyElement> {
-        use gpui::StyledImage as _;
-        let Some(blurred) = self.blurred_backdrop() else {
-            return Vec::new();
-        };
-        vec![
-            gpui::img(blurred)
-                .absolute()
-                .inset_0()
-                .size_full()
-                .object_fit(gpui::ObjectFit::Cover)
-                .opacity(self.settings.wallpaper_hero_opacity)
-                .into_any_element(),
-        ]
-    }
-
-    /// The tint a tile of colour `colour` lays over what is behind it: the panel alpha over a
-    /// full-window picture, nothing otherwise (the window base already is that colour).
-    pub(super) fn tile_tint(&self, colour: Hsla) -> Option<Hsla> {
-        self.window_fill().map(|alpha| colour.opacity(alpha))
+        self.theme.surface()
     }
 
     /// A fixed-width tile at the left of the body (the sidebar, or Settings' nav) with the
@@ -249,7 +220,6 @@ impl Shell {
             .h_full()
             .w(px(width))
             .overflow_hidden()
-            .when_some(self.tile_tint(self.theme.shell), |el, tint| el.bg(tint))
             .child(content)
             .child(
                 div()
@@ -262,12 +232,8 @@ impl Shell {
             )
     }
 
-    /// The main tile: fills what the side tile leaves. When it shows a terminal over a
-    /// full-window wallpaper it paints nothing, as the terminal draws its own glass at the same
-    /// alpha; anything else it shows (Settings, the empty view) sits on the tile's tint.
+    /// The main tile: fills what the side tile leaves, on the panel's colour.
     pub(super) fn main_tile(&self, panel: Hsla) -> gpui::Div {
-        let shows_terminal = !self.tabs.is_empty() && self.settings_page.is_none();
-        let terminal_glass = shows_terminal && self.window_fill().is_some();
         div()
             .flex_1()
             .min_w_0()
@@ -275,9 +241,7 @@ impl Shell {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .when(!terminal_glass, |el| {
-                el.bg(self.tile_tint(panel).unwrap_or(panel))
-            })
+            .bg(panel)
     }
 }
 

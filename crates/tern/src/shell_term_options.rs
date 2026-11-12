@@ -28,27 +28,18 @@ impl Shell {
             copy_on_select: s.copy_on_select,
             middle_click_paste: s.middle_click_paste,
             visual_bell: s.visual_bell,
+            clipboard_write: s.clipboard_write,
         }
     }
 
     pub(super) fn set_terminal_font(&mut self, family: Option<String>, cx: &mut Context<Self>) {
         self.update_settings(|st| st.terminal_font_family = family, cx);
-        self.restyle_tabs(cx);
-    }
-
-    fn change_terminal(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        self.update_settings(change, cx);
-        let options = self.terminal_options();
-        for tab in &self.tabs {
-            for pane in &tab.panes {
-                let view = pane.session.read(cx).view.clone();
-                view.update(cx, |v, cx| v.set_options(options.clone(), cx));
-            }
-        }
     }
 
     /// BEL from a session bounces the Dock icon while tern is behind other apps (macOS only
-    /// bounces for an inactive app, so a bell in the window being used stays quiet).
+    /// bounces for an inactive app, so a bell in the window being used stays quiet). A program
+    /// setting the clipboard is said in a toast, at most once a minute per session, so a copy
+    /// the person did not make never goes unseen.
     pub(super) fn on_bell(
         &self,
         session: &Entity<Session>,
@@ -56,11 +47,30 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Subscription {
         let terminal = session.read(cx).terminal();
-        cx.subscribe_in(&terminal, window, |shell, _, event, window, _| {
-            if matches!(event, TerminalEvent::Bell) && shell.settings.bell_bounces_dock {
-                window.request_attention();
-            }
-        })
+        let session = session.downgrade();
+        let mut said: Option<std::time::Instant> = None;
+        cx.subscribe_in(
+            &terminal,
+            window,
+            move |shell, _, event, window, cx| match event {
+                TerminalEvent::Bell if shell.settings.bell_bounces_dock => {
+                    window.request_attention();
+                }
+                TerminalEvent::ClipboardStore(text) => {
+                    if said.is_some_and(|at| at.elapsed() < CLIPBOARD_NOTE_EVERY) {
+                        return;
+                    }
+                    said = Some(std::time::Instant::now());
+                    let who = session
+                        .upgrade()
+                        .map_or_else(String::new, |s| s.read(cx).label());
+                    let text =
+                        clipboard_note(&who, text.chars().count(), shell.settings.clipboard_write);
+                    shell.notify_toast(super::ToastKind::Default, text, cx);
+                }
+                _ => {}
+            },
+        )
     }
 
     pub(super) fn terminal_page(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -71,7 +81,7 @@ impl Shell {
                 .id(id)
                 .switch(label, on)
                 .cursor_pointer()
-                .on_click(cx.listener(move |shell, _, _, cx| shell.change_terminal(flip, cx)))
+                .on_click(cx.listener(move |shell, _, _, cx| shell.update_settings(flip, cx)))
                 .child(w::toggle(&t, on, id))
         };
         let meta = div()
@@ -80,7 +90,6 @@ impl Shell {
             .cursor_pointer()
             .on_click(cx.listener(|s, _, _, cx| {
                 s.update_settings(|st| st.option_as_meta = !st.option_as_meta, cx);
-                s.apply_option_as_meta(cx);
             }))
             .child(w::toggle(&t, s.option_as_meta, "option-meta"));
 
@@ -99,7 +108,7 @@ impl Shell {
                     .when(selected, |el| el.bg(t.ink(0.16)).text_color(t.text))
                     .when(!selected, |el| el.text_color(t.muted))
                     .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.change_terminal(|st| st.cursor_style = style, cx)
+                        shell.update_settings(|st| st.cursor_style = style, cx)
                     })),
             );
         }
@@ -112,11 +121,11 @@ impl Shell {
             .items_center()
             .gap(px(6.))
             .child(minus.on_click(cx.listener(|shell, _, _, cx| {
-                shell.change_terminal(|st| st.step_scrollback(false), cx)
+                shell.update_settings(|st| st.step_scrollback(false), cx)
             })))
             .child(value)
             .child(plus.on_click(cx.listener(|shell, _, _, cx| {
-                shell.change_terminal(|st| st.step_scrollback(true), cx)
+                shell.update_settings(|st| st.step_scrollback(true), cx)
             })));
 
         let reopen = div()
@@ -124,7 +133,6 @@ impl Shell {
             .cursor_pointer()
             .on_click(cx.listener(|s, _, _, cx| {
                 s.update_settings(|st| st.reopen_tabs = !st.reopen_tabs, cx);
-                s.persist_tabs();
             }))
             .child(w::toggle(&t, s.reopen_tabs, "reopen-tabs"));
 
@@ -233,7 +241,7 @@ impl Shell {
                         true,
                         "Use Option as Meta",
                         Some(
-                            "⌥B, ⌥F and friends reach the shell; off types the macOS character"
+                            "⌥B, ⌥F and friends reach the shell; a character your layout types with ⌥, such as @ on German, is still typed. Off types the macOS character"
                                 .into(),
                         ),
                         meta,
@@ -257,6 +265,18 @@ impl Shell {
                             "Middle-click pastes",
                             s.middle_click_paste,
                             |st| st.middle_click_paste = !st.middle_click_paste,
+                        ),
+                    ))
+                    .child(w::row(
+                        &t,
+                        false,
+                        "Programs can copy to the clipboard",
+                        Some("OSC 52, as tmux and vim copy over SSH; a toast says when".into()),
+                        toggle(
+                            "clipboard-write",
+                            "Programs can copy to the clipboard",
+                            s.clipboard_write,
+                            |st| st.clipboard_write = !st.clipboard_write,
                         ),
                     )),
             ))
@@ -292,6 +312,18 @@ impl Shell {
     }
 }
 
+/// How often a session's clipboard writes are mentioned.
+const CLIPBOARD_NOTE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What the toast says when a program on `who` set the clipboard, or tried to.
+fn clipboard_note(who: &str, chars: usize, allowed: bool) -> String {
+    if allowed {
+        format!("{who} copied {chars} characters to the clipboard")
+    } else {
+        format!("{who} tried to set the clipboard; allow it in Settings → Terminal")
+    }
+}
+
 /// 10000 → "10,000", as the stepper reads at a glance.
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -312,5 +344,12 @@ mod tests {
         assert_eq!(super::thousands(1_000), "1,000");
         assert_eq!(super::thousands(100_000), "100,000");
         assert_eq!(super::thousands(999), "999");
+    }
+
+    #[test]
+    fn the_clipboard_note_says_who_and_what_to_do() {
+        let note = super::clipboard_note("me@web:22", 5, true);
+        assert_eq!(note, "me@web:22 copied 5 characters to the clipboard");
+        assert!(super::clipboard_note("me@web:22", 5, false).contains("Settings → Terminal"));
     }
 }

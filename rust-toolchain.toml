@@ -1,0 +1,6 @@
+# The compiler Cargo.toml's rust-version asks for, so `cargo`, the pre-push hook and CI agree
+# without `+toolchain` on every command. Keep in step with `rust-version`.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

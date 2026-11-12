@@ -3,18 +3,22 @@
 
 use crate::hover::Accessible as _;
 use crate::hover::HoverFade as _;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, AppContext, Context, ElementId, Entity,
     FontWeight, Hsla, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window, actions, div,
-    pulsating_between, px,
+    Pixels, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window,
+    actions, div, pulsating_between, px,
 };
 
+use crate::icons::{self, icon};
 use crate::indicator::Dot;
 use crate::shell::Shell;
+use crate::tab_set::Heading;
 use crate::text_input::TextInput;
 use crate::theme::{CONTROL_RADIUS, Theme};
 
@@ -54,8 +58,8 @@ pub fn bindings() -> Vec<KeyBinding> {
 /// What the strip needs to know about one tab.
 pub struct TabInfo {
     pub alias: String,
-    /// The name the user gave the tab; it shows instead of the alias.
-    pub title: Option<String>,
+    /// What the tab is called and how many other panes it holds.
+    pub heading: Heading,
     /// The session's output is being written to a file.
     pub logging: bool,
     /// Typing here, or receiving what is typed in another tab.
@@ -67,7 +71,7 @@ pub struct TabInfo {
 
 impl TabInfo {
     pub fn label(&self) -> &str {
-        self.title.as_deref().unwrap_or(&self.alias)
+        &self.heading.text
     }
 }
 
@@ -96,28 +100,152 @@ impl Render for DraggedTab {
     }
 }
 
+/// The strip's scroll position, and the tab it still owes the user a view of.
+#[derive(Clone, Default)]
+pub struct StripScroll {
+    handle: ScrollHandle,
+    /// The tab to bring into view and how many more tries it gets.
+    pending: Rc<Cell<Option<(usize, u8)>>>,
+    /// The tab in front, and the strip's width when it was last drawn: a strip that changed
+    /// size, with the window or the tab count, owes that tab a view again.
+    front: Rc<Cell<usize>>,
+    width: Rc<Cell<Pixels>>,
+}
+
+impl StripScroll {
+    /// Scrolls the least that shows tab `ix` whole, on the next frame.
+    pub fn reveal(&self, ix: usize) {
+        self.handle.scroll_to_item(ix);
+        self.pending.set(Some((ix, 3)));
+    }
+
+    /// Whether the tabs are wider than the strip, as of the last frame drawn.
+    fn overflows(&self) -> bool {
+        self.handle.max_offset().x > px(0.)
+    }
+
+    /// Checks a requested reveal against the frame just painted; true when it needs another.
+    /// gpui places the tab by the strip's size in the frame before, which is wrong on the
+    /// first frame and whenever the strip changed size at the same time.
+    fn check_reveal(&self) -> bool {
+        let width = self.handle.bounds().size.width;
+        if self.width.replace(width) != width && self.pending.get().is_none() {
+            self.pending.set(Some((self.front.get(), 3)));
+        }
+        let Some((ix, tries)) = self.pending.take() else {
+            return false;
+        };
+        let Some(mut tab) = self.handle.bounds_for_item(ix) else {
+            return false;
+        };
+        tab.origin += self.handle.offset();
+        let strip = self.handle.bounds();
+        if tries == 0 || (tab.left() >= strip.left() && tab.right() <= strip.right()) {
+            return false;
+        }
+        self.handle.scroll_to_item(ix);
+        self.pending.set(Some((ix, tries - 1)));
+        true
+    }
+}
+
 /// Tabs shrink like a browser's (200 wide down to 72) and the strip scrolls sideways once
-/// they no longer fit; `scroll` keeps the active one in view.
+/// they no longer fit; `scroll` keeps the active one in view. Then a button at the end lists
+/// every tab, since a tab scrolled out of sight is otherwise only a guess away.
 pub fn strip(
     tabs: &[TabInfo],
     active: usize,
-    scroll: &ScrollHandle,
+    scroll: &StripScroll,
     t: &Theme,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement + use<> {
-    let mut row = div()
-        .id("tab-strip")
+    let pills = tabs
+        .iter()
+        .enumerate()
+        .map(|(ix, tab)| tab_pill(ix, tab, ix == active, t, cx).into_any_element())
+        .collect();
+    let menu = scroll.overflows().then(|| {
+        crate::chrome::control("tab-overflow", t)
+            .icon_button("Show all tabs", t)
+            .on_click(cx.listener(|shell, e: &gpui::ClickEvent, _, cx| {
+                shell.open_tabs_menu(e.position(), cx)
+            }))
+            .child(
+                icon(icons::CHEVRON_RIGHT)
+                    .size(px(16.))
+                    .text_color(t.muted)
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                        std::f32::consts::FRAC_PI_2,
+                    ))),
+            )
+            .into_any_element()
+    });
+    frame(pills, menu, scroll, active)
+}
+
+/// The scrolling row, then a slot for the overflow button. The slot is always there, so the
+/// button appearing moves nothing: the row keeps its width, and the active tab stays where
+/// `reveal` put it. gpui measures overflow while drawing, after the button was chosen, so a
+/// probe asks for one more frame when the button should have appeared or gone.
+fn frame(
+    pills: Vec<AnyElement>,
+    menu: Option<AnyElement>,
+    scroll: &StripScroll,
+    active: usize,
+) -> impl IntoElement + use<> {
+    scroll.front.set(active);
+    let shown = menu.is_some();
+    let probed = scroll.clone();
+    div()
         .flex()
         .items_center()
         .gap(px(2.))
         .min_w_0()
         .flex_shrink(1.)
-        .overflow_x_scroll()
-        .track_scroll(scroll);
-    for (ix, tab) in tabs.iter().enumerate() {
-        row = row.child(tab_pill(ix, tab, ix == active, t, cx));
-    }
-    row
+        .child(
+            div()
+                .id("tab-strip")
+                .role(Role::TabList)
+                .aria_label("Sessions")
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .min_w_0()
+                .flex_shrink(1.)
+                .overflow_x_scroll()
+                .track_scroll(&scroll.handle)
+                .children(pills),
+        )
+        .child(div().flex_none().size(px(24.)).children(menu))
+        .child(
+            gpui::canvas(
+                |_, _, _| (),
+                move |_, (), window, _| {
+                    // A notify now would be dropped: the window is mid-draw.
+                    if probed.overflows() != shown || probed.check_reveal() {
+                        window.request_animation_frame();
+                    }
+                },
+            )
+            .absolute()
+            .size_0(),
+        )
+}
+
+/// A tab's size and inner layout, apart from what it shows and does.
+fn pill_box(ix: usize) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("tab", ix))
+        .group("tab")
+        .h(px(26.))
+        .flex_shrink(1.)
+        .min_w(px(72.))
+        .max_w(px(200.))
+        .pl(px(10.))
+        .pr(px(4.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
 }
 
 fn tab_pill(
@@ -135,18 +263,10 @@ fn tab_pill(
     };
     let accent = t.accent;
     let renaming = tab.rename.clone();
-    div()
-        .id(("tab", ix))
-        .group("tab")
-        .h(px(26.))
-        .flex_shrink(1.)
-        .min_w(px(72.))
-        .max_w(px(200.))
-        .pl(px(10.))
-        .pr(px(4.))
-        .flex()
-        .items_center()
-        .gap(px(6.))
+    pill_box(ix)
+        .role(Role::Tab)
+        .aria_label(tab_label(tab))
+        .aria_selected(active)
         .rounded(px(CONTROL_RADIUS))
         .cursor_pointer()
         .text_sm()
@@ -205,15 +325,29 @@ fn tab_pill(
                 .child(SharedString::from(middle_ellipsis(tab.label(), 18)))
                 .into_any_element(),
         })
+        .when(tab.heading.others > 0, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(3.))
+                    .bg(t.row_active)
+                    .text_color(t.muted)
+                    .text_size(px(10.))
+                    .child(format!("+{}", tab.heading.others)),
+            )
+        })
         .when(tab.broadcast, |el| {
             el.child(
                 div()
                     .flex_none()
-                    .px(px(4.))
+                    .px(px(5.))
+                    .py(px(1.))
                     .rounded(px(3.))
                     .bg(t.accent.opacity(0.22))
                     .text_color(t.accent)
-                    .text_size(px(9.))
+                    .text_size(px(10.))
                     .child("BCAST"),
             )
         })
@@ -221,11 +355,12 @@ fn tab_pill(
             el.child(
                 div()
                     .flex_none()
-                    .px(px(4.))
+                    .px(px(5.))
+                    .py(px(1.))
                     .rounded(px(3.))
                     .bg(t.danger.opacity(0.18))
                     .text_color(t.danger)
-                    .text_size(px(9.))
+                    .text_size(px(10.))
                     .child("LOG"),
             )
         })
@@ -233,12 +368,12 @@ fn tab_pill(
             div()
                 .id(("close", ix))
                 .icon_button("Close tab", t)
-                .size(px(18.))
+                .size(px(20.))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(4.))
+                .rounded(px(5.))
                 .text_color(t.faint)
                 .invisible()
                 .group_hover("tab", |s| s.visible())
@@ -256,6 +391,29 @@ fn tab_pill(
                 }))
                 .child("×"),
         )
+}
+
+/// How a dot is said aloud; a host that is not connected has nothing to add.
+pub fn status_words(dot: Dot) -> Option<&'static str> {
+    (dot != Dot::Idle).then(|| dot.label())
+}
+
+/// A tab as VoiceOver reads it: the title, then what the badges and the dot show.
+fn tab_label(tab: &TabInfo) -> String {
+    let mut label = tab.label().to_owned();
+    let more = format!("{} more panes", tab.heading.others);
+    for (on, words) in [
+        (tab.heading.others > 0, more.as_str()),
+        (tab.broadcast, "broadcasting"),
+        (tab.logging, "logging"),
+        (true, status_words(tab.dot).unwrap_or_default()),
+    ] {
+        if on && !words.is_empty() {
+            label.push_str(", ");
+            label.push_str(words);
+        }
+    }
+    label
 }
 
 /// zeron's `zeron-pulse` loader: 2.4 s, opacity 0.08 → 1.
@@ -330,7 +488,36 @@ pub fn step(active: usize, len: usize, delta: isize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{reorder, step};
+    use super::{Heading, TabInfo, reorder, step, tab_label};
+    use crate::indicator::Dot;
+
+    fn info(dot: Dot) -> TabInfo {
+        TabInfo {
+            alias: "web".into(),
+            heading: Heading {
+                text: "web".into(),
+                others: 0,
+            },
+            logging: false,
+            broadcast: false,
+            dot,
+            rename: None,
+        }
+    }
+
+    #[test]
+    fn a_tab_is_read_as_title_then_badges_then_status() {
+        assert_eq!(tab_label(&info(Dot::Idle)), "web");
+        let mut tab = info(Dot::Connected);
+        tab.heading.text = "deploy".into();
+        assert_eq!(tab_label(&tab), "deploy, Connected");
+        tab.heading.others = 2;
+        assert_eq!(tab_label(&tab), "deploy, 2 more panes, Connected");
+        tab.heading.others = 0;
+        tab.broadcast = true;
+        tab.logging = true;
+        assert_eq!(tab_label(&tab), "deploy, broadcasting, logging, Connected");
+    }
 
     /// Tabs named a..e, so a wrong move shows in the order and not only in an index.
     fn tabs() -> Vec<&'static str> {
@@ -426,3 +613,7 @@ mod tests {
         assert_eq!(step(0, 0, 1), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "tabs_tests.rs"]
+mod layout_tests;

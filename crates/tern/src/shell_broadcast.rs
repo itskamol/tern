@@ -130,11 +130,13 @@ impl Shell {
                     .tabs
                     .iter()
                     .filter(|t| b.targets.contains(&t.id))
-                    .map(|t| t.session().downgrade())
+                    .filter_map(|t| t.session().map(|s| s.downgrade()))
                     .collect(),
                 _ => Vec::new(),
             };
-            tab.session().update(cx, |s, _| s.set_mirrors(mirrors));
+            if let Some(session) = tab.session() {
+                session.update(cx, |s, _| s.set_mirrors(mirrors));
+            }
         }
         cx.notify();
     }
@@ -166,7 +168,7 @@ impl Shell {
             .tabs
             .iter()
             .find(|tab| tab.id == picker.source)
-            .map(|tab| tab.title.clone().unwrap_or_else(|| tab.alias.clone()))
+            .map(|tab| tab.heading().text)
             .unwrap_or_default();
         let mut card = div()
             .id("broadcast-picker")
@@ -203,12 +205,14 @@ impl Shell {
                 continue;
             }
             any = true;
-            let live = tab.session().read(cx).status == Status::Connected;
+            let live = tab
+                .session()
+                .is_some_and(|s| s.read(cx).status() == Status::Connected);
             let on = self
                 .broadcast
                 .as_ref()
                 .is_some_and(|b| b.targets.contains(&id));
-            let label = tab.title.clone().unwrap_or_else(|| tab.alias.clone());
+            let label = tab.heading().text;
             card = card.child(
                 div()
                     .id(("broadcast-target", ix))

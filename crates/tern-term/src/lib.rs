@@ -5,6 +5,7 @@
 mod box_drawing;
 mod config;
 mod element;
+pub mod frame_stats;
 mod links;
 mod mappings;
 mod search;
@@ -16,6 +17,7 @@ pub use config::{CursorStyleSetting, TerminalOptions};
 pub use links::Link;
 pub use search::SearchMark;
 pub use terminal::{
-    CellColor, CellSnapshot, CursorSnapshot, SCROLLBACK_LINES, Terminal, TerminalEvent,
+    CellColor, CellSnapshot, CursorSnapshot, GridPos, PromptMark, SCROLLBACK_LINES, Terminal,
+    TerminalEvent,
 };
 pub use view::{TerminalView, paste_bytes};

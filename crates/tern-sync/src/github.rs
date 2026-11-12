@@ -375,6 +375,10 @@ struct Meta {
     /// Seconds since the epoch, for display.
     updated_at: u64,
     device: String,
+    /// The pusher's bundle number, a hint for the next one; 0 from a tern before numbering.
+    /// The checked number travels sealed (the app's `tern-bundle` manifest).
+    #[serde(default)]
+    seq: u64,
 }
 
 /// What the gist holds, decoded.
@@ -383,6 +387,8 @@ pub struct RemoteBundle {
     pub hash: String,
     pub updated_at: u64,
     pub device: String,
+    /// Unchecked: what `tern-meta.json` claims, for numbering the next push only.
+    pub seq: u64,
     pub vault: Vec<u8>,
     pub sealed: Vec<u8>,
 }
@@ -460,6 +466,7 @@ impl Gist {
             hash: meta.hash,
             updated_at: meta.updated_at,
             device: meta.device,
+            seq: meta.seq,
             vault: decode(VAULT)?,
             sealed: decode(DATA)?,
         }))
@@ -472,6 +479,7 @@ impl Gist {
     pub fn push(
         &self,
         hash: &str,
+        seq: u64,
         device: &str,
         vault: &[u8],
         sealed: &[u8],
@@ -484,6 +492,7 @@ impl Gist {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             device: device.to_owned(),
+            seq,
         };
         let files = json!({
             META: { "content": serde_json::to_string_pretty(&meta).map_err(|e| GithubError::Format(e.to_string()))? },

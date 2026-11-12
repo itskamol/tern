@@ -33,3 +33,28 @@ jobs:
         with:
           name: mutants-report
           path: mutants.out/
+  # A gate on pull requests: every changed line in the critical crates has a test that fails
+  # when that line breaks. The full run above stays advisory.
+  mutants-diff:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-mutants --locked
+      - run: git diff "origin/${{ github.base_ref }}...HEAD" -- crates/tern-vault crates/tern-sync > pr.diff
+      - run: test ! -s pr.diff || cargo mutants -p tern-vault -p tern-sync --in-diff pr.diff
+  # The release path, unsigned: bundle, zip, dmg and a cask that passes brew style. It broke
+  # silently once (dmgbuild needing a newer Python) because only a release ran it.
+  package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.12" }
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/release.sh
+      - run: ls target/release/bundle/tern-*-macos-arm64.zip target/release/bundle/tern-*-macos-arm64.dmg target/release/bundle/tern.rb

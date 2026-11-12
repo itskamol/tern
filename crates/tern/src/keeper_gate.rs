@@ -1,14 +1,109 @@
-//! The run's one Keychain attempt for the vault passphrase: who may start it, who waits for it,
-//! and what happens to the vault it opens. No gpui logic here (only the `Waiter` type), so the rules are tested with a fake
-//! store that counts reads; the real Keychain is never reached from a test.
+//! How the vault opens: the run's one Keychain attempt (who may start it, who waits for it, what
+//! happens to the vault it opens), then the PIN or the passphrase the person types. No gpui
+//! logic here (only the `Waiter` type), so the rules are tested with fake stores; the real
+//! Keychain is never reached from a test.
 
 use std::path::Path;
 
-use tern_vault::{SecretString, Vault};
+use tern_vault::{SecretString, Vault, VaultError};
 
 use gpui::App;
 
 use crate::keeper::keychain;
+use crate::vault_pin::{self, Outcome};
+
+/// Which secret the person is asked for to open the vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    Pin,
+    Passphrase,
+}
+
+/// What opening the vault needs now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opening {
+    /// It is open already.
+    Open,
+    /// Ask the person.
+    Ask(Ask),
+}
+
+/// A need for the vault, and the work that waits on it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pending<T> {
+    /// The Keychain is being read; the work is held and handed to `then` when it answers.
+    Waiting,
+    /// Go on now: the work comes back with what to do.
+    Now(Opening, T),
+}
+
+/// A secret the person typed to open the vault.
+pub enum Typed {
+    Pin(String),
+    Passphrase(SecretString),
+}
+
+/// What a typed secret came to, once the keeper took it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tried {
+    Opened,
+    /// Not opened; ask for `ask` next, after saying `message` (a wrong PIN, or the PIN is off).
+    Again {
+        ask: Ask,
+        message: String,
+    },
+    /// Not opened, and nothing else to ask for: a wrong passphrase, an unreadable vault.
+    Failed(String),
+}
+
+/// Opens the vault at `path` with what was typed; scrypt runs, so call it off the UI thread.
+/// `dir` holds the PIN's attempt count, `pins` its sealed passphrase.
+pub(crate) fn open_typed(
+    typed: Typed,
+    path: &Path,
+    dir: Option<&Path>,
+    pins: &impl vault_pin::Store,
+) -> Outcome {
+    match typed {
+        Typed::Passphrase(passphrase) => match Vault::unlock(path, passphrase) {
+            Ok(vault) => Outcome::Opened(vault),
+            Err(VaultError::WrongPassphrase) => Outcome::Failed("Wrong vault passphrase.".into()),
+            Err(e) => Outcome::Failed(format!("Vault unavailable: {e}")),
+        },
+        Typed::Pin(pin) => match dir {
+            Some(dir) => vault_pin::unlock(dir, path, &pin, pins),
+            None => Outcome::Gone,
+        },
+    }
+}
+
+/// What the person sees after `outcome`, and the vault to keep, if any. `stale` is true when the
+/// vault was locked after the attempt began: the vault opened is dropped, which wipes it.
+pub(crate) fn tried(outcome: Outcome, stale: bool) -> (Tried, Option<Vault>) {
+    let message = vault_pin::message(&outcome).unwrap_or_default();
+    match outcome {
+        Outcome::Opened(_) if stale => (
+            Tried::Failed("The vault was locked meanwhile; try again.".into()),
+            None,
+        ),
+        Outcome::Opened(vault) => (Tried::Opened, Some(vault)),
+        Outcome::Wrong { .. } => (
+            Tried::Again {
+                ask: Ask::Pin,
+                message,
+            },
+            None,
+        ),
+        Outcome::Wiped | Outcome::Gone => (
+            Tried::Again {
+                ask: Ask::Passphrase,
+                message,
+            },
+            None,
+        ),
+        Outcome::Failed(_) => (Tried::Failed(message), None),
+    }
+}
 
 /// What the Keychain answered when asked for the passphrase.
 pub(crate) enum Load {
@@ -312,5 +407,87 @@ mod tests {
     fn nothing_is_stored_while_a_read_is_in_flight() {
         assert!(!store_due(true, false, false, true));
         assert!(store_due(true, false, false, false));
+    }
+
+    /// A PIN store with nothing in it, as after a wipe.
+    struct NoPin;
+
+    impl vault_pin::Store for NoPin {
+        fn load(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn save(&self, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+        fn delete(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn typed(pass: &str) -> Typed {
+        Typed::Passphrase(SecretString::from(pass.to_owned()))
+    }
+
+    #[test]
+    fn a_typed_passphrase_opens_the_vault_or_says_why_not() {
+        let (dir, path) = vault_file("right");
+        let opened = open_typed(typed("right"), &path, Some(dir.path()), &NoPin);
+        assert!(matches!(tried(opened, false), (Tried::Opened, Some(_))));
+        let wrong = open_typed(typed("wrong"), &path, Some(dir.path()), &NoPin);
+        assert_eq!(
+            tried(wrong, false).0,
+            Tried::Failed("Wrong vault passphrase.".into())
+        );
+        let gone = dir.path().join("none.age");
+        let (missing, vault) = tried(open_typed(typed("right"), &gone, None, &NoPin), false);
+        assert!(vault.is_none());
+        assert!(matches!(missing, Tried::Failed(m) if m.starts_with("Vault unavailable: ")));
+    }
+
+    #[test]
+    fn a_pin_with_nothing_sealed_moves_on_to_the_passphrase() {
+        let (dir, path) = vault_file("right");
+        for d in [Some(dir.path()), None] {
+            let outcome = open_typed(Typed::Pin("1234".into()), &path, d, &NoPin);
+            assert_eq!(
+                tried(outcome, false).0,
+                Tried::Again {
+                    ask: Ask::Passphrase,
+                    message: "PIN unlock is off; use your passphrase.".into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_pin_asks_for_the_pin_again_and_a_wiped_one_for_the_passphrase() {
+        let (wrong, vault) = tried(Outcome::Wrong { left: 1 }, false);
+        assert!(vault.is_none());
+        assert_eq!(
+            wrong,
+            Tried::Again {
+                ask: Ask::Pin,
+                message: "Wrong PIN, 1 try left.".into()
+            }
+        );
+        assert_eq!(
+            tried(Outcome::Wiped, false).0,
+            Tried::Again {
+                ask: Ask::Passphrase,
+                message: vault_pin::WIPED.into()
+            }
+        );
+        assert_eq!(
+            tried(Outcome::Failed("keychain broke".into()), false).0,
+            Tried::Failed("keychain broke".into())
+        );
+    }
+
+    #[test]
+    fn a_vault_opened_after_a_lock_is_not_kept() {
+        let open = Outcome::Opened(Vault::new(SecretString::from("p".to_owned())));
+        let (said, kept) = tried(open, true);
+        assert!(kept.is_none());
+        assert!(matches!(said, Tried::Failed(_)));
     }
 }

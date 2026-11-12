@@ -9,11 +9,15 @@ rust-version.workspace = true
 [dependencies]
 alacritty_terminal = "0.26"
 gpui = { package = "gpui-pre", version = "=0.3.8" }
+tracing = "0.1"
 unicode-width = "0.2"
 
 [dev-dependencies]
+# TestApp: draws a window with no screen, so the view cache can be tested.
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "runtime_shaders"] }
 async-channel = "2"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 proptest = "1"
 
 [lints]

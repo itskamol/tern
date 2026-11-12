@@ -8,9 +8,9 @@
 # TERN_NOTARY_PROFILE too (a `xcrun notarytool store-credentials` profile) it is notarised and
 # stapled. Without them those steps are skipped, with a message.
 #
-# Plain shell rather than cargo-bundle: the bundle is one binary, one plist and one icon (fonts,
-# icons and themes are compiled in with include_bytes!), and a script adds signing and
-# notarisation, which cargo-bundle does not do.
+# Plain shell rather than cargo-bundle: the bundle is one binary, one plist, one icon and the
+# licence files (fonts, icons and themes are compiled in with include_bytes!), and a script
+# adds signing and notarisation, which cargo-bundle does not do.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,6 +25,11 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/tern "$app/Contents/MacOS/tern"
 cp packaging/macos/tern.icns "$app/Contents/Resources/tern.icns"
+# The licences travel with the binary: tern's own (GPL-3.0, whose terms ask for it), what it
+# copied (NOTICE.md), and every linked crate's notice (scripts/third-party.py).
+cp LICENSE "$app/Contents/Resources/LICENSE"
+cp NOTICE.md "$app/Contents/Resources/NOTICE.md"
+python3 -I scripts/third-party.py "$app/Contents/Resources/THIRD-PARTY.txt"
 
 # The oldest macOS the binary loads on is whatever rustc linked it for; read it back instead of
 # guessing (gpui itself supports 10.15, rustc's arm64 floor is 11.0).

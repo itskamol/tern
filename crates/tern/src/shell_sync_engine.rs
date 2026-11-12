@@ -1,65 +1,16 @@
-//! The sync itself, off the UI thread: reading the synced files, deciding per item, pushing and
-//! pulling through the backend. No UI in here.
+//! The app's side of a sync, off the UI thread: opening the vault it syncs and handing it to
+//! `tern_sync::bundle`, which does the sync itself. No UI in here.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
-use serde::{Deserialize, Serialize};
 use tern_ssh::SecretString;
-use tern_sync::{Files, Gist, ItemPlan, Plan};
-use tern_vault::{Vault, VaultError};
+use tern_sync::Plan;
+use tern_sync::bundle::{self, OpenError, SyncVault};
+pub(super) use tern_sync::bundle::{Outcome, Resolutions, Side, Snapshot, snapshot};
+use tern_vault::{Vault, VaultError, Zeroizing};
 
-/// The files that travel besides the vault, by their name in the settings directory.
-/// `snippets.json` belongs to the snippets store; an older build's `decode` drops the name.
-const SYNCED: [&str; 4] = [
-    "hosts.json",
-    "settings.json",
-    "keymap.json",
-    "snippets.json",
-];
 const VAULT_FILE: &str = "vault.age";
-const HOSTS_FILE: &str = "hosts.json";
-const STATE_FILE: &str = "sync.json";
-/// Every file that travels, each merged on its own.
-const ITEMS: [&str; 5] = [
-    "hosts.json",
-    "settings.json",
-    "keymap.json",
-    "snippets.json",
-    VAULT_FILE,
-];
-
-#[derive(Default, Serialize, Deserialize)]
-struct SyncState {
-    /// The bundle hash both sides had after the last sync.
-    last_hash: Option<String>,
-    /// Each item's hash at the last sync. Empty on a record from before per-item merging:
-    /// "unknown", so the first conflict falls back to the whole-bundle question.
-    #[serde(default)]
-    items: BTreeMap<String, String>,
-    /// `hosts.json` as both sides had it, the base for merging connections by name.
-    #[serde(default)]
-    hosts_base: Option<String>,
-}
-
-fn load_state(dir: &Path) -> SyncState {
-    std::fs::read_to_string(dir.join(STATE_FILE))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-/// Which copy of an item wins.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Side {
-    Mac,
-    Remote,
-}
-
-pub(super) type Resolutions = BTreeMap<String, Side>;
 
 /// Lets an event through at most once per `every`; only an allowed event restarts the clock.
 /// Used for "check the remote when the window comes to the front" and the 5-minute poll.
@@ -85,18 +36,45 @@ impl Throttle {
     }
 }
 
-/// A cheap look at the synced files, taken off the UI thread.
-pub(super) struct Snapshot {
-    pub(super) local: String,
-    pub(super) last: Option<String>,
+/// tern's vault as the sync sees it. A newtype, as the trait is `tern-sync`'s and the vault
+/// `tern-vault`'s.
+pub(super) struct Synced(pub(super) Vault);
+
+fn open_error(e: VaultError) -> OpenError {
+    match e {
+        VaultError::WrongPassphrase => OpenError::WrongPassphrase,
+        other => OpenError::Other(other.to_string()),
+    }
 }
 
-pub(super) enum Outcome {
-    UpToDate,
-    Pushed,
-    Pulled,
-    Merged,
-    Conflict { whole: bool, items: Vec<String> },
+impl SyncVault for Synced {
+    type Plain = Zeroizing<Vec<u8>>;
+
+    fn reopen(&self, bytes: &[u8]) -> Result<Self, OpenError> {
+        self.0.reopen(bytes).map(Synced).map_err(open_error)
+    }
+
+    fn unlock_bytes(bytes: &[u8], passphrase: &str) -> Result<Self, OpenError> {
+        Vault::unlock_bytes(bytes, SecretString::from(passphrase.to_owned()))
+            .map(Synced)
+            .map_err(open_error)
+    }
+
+    fn save(&self, path: &Path) -> Result<(), String> {
+        self.0.save(path).map_err(|e| e.to_string())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn seal(&self, plain: &[u8]) -> Result<Vec<u8>, String> {
+        self.0.seal(plain).map_err(|e| e.to_string())
+    }
+
+    fn open(&self, sealed: &[u8]) -> Result<Self::Plain, String> {
+        self.0.open(sealed).map_err(|e| e.to_string())
+    }
 }
 
 /// The whole sync, off the UI thread. Returns the vault to hand back to the keeper (the
@@ -110,7 +88,7 @@ pub(super) fn run(
     resolve: &Resolutions,
 ) -> (Option<Vault>, Result<Outcome, String>) {
     let vault_path = dir.join(VAULT_FILE);
-    let vault = match (open, passphrase) {
+    let vault = Synced(match (open, passphrase) {
         (Some(v), _) => v,
         (None, Some(p)) if vault_path.exists() => {
             match Vault::unlock(&vault_path, SecretString::from(p.to_owned())) {
@@ -123,332 +101,14 @@ pub(super) fn run(
         }
         (None, Some(p)) => Vault::new(SecretString::from(p.to_owned())),
         (None, None) => return (None, Err("The vault is locked.".into())),
-    };
-    let result = sync(dir, remote_url, &vault, passphrase, force, resolve);
-    match result {
-        Ok((outcome, Some(pulled))) => (Some(pulled), Ok(outcome)),
-        Ok((outcome, None)) => (Some(vault), Ok(outcome)),
-        Err(e) => (Some(vault), Err(e)),
-    }
-}
-
-/// Where the bundle lives: the user's own git repository when one is set, else a gist.
-enum Backend {
-    Git(tern_sync::GitRepo),
-    Gist(Gist),
-}
-
-impl Backend {
-    fn open(dir: &Path, remote_url: Option<&str>) -> Result<Self, String> {
-        Ok(match remote_url {
-            Some(url) => Backend::Git(tern_sync::GitRepo::new(
-                url.to_owned(),
-                dir.join("sync-repo"),
-            )),
-            None => {
-                let (token, _) = tern_sync::token().map_err(|e| e.to_string())?;
-                Backend::Gist(Gist::new(token))
-            }
-        })
-    }
-
-    fn fetch(&self) -> Result<Option<tern_sync::RemoteBundle>, String> {
-        match self {
-            Backend::Git(g) => g.fetch(),
-            Backend::Gist(g) => g.fetch(),
-        }
-        .map_err(|e| e.to_string())
-    }
-
-    fn push(&self, hash: &str, device: &str, vault: &[u8], sealed: &[u8]) -> Result<(), String> {
-        match self {
-            Backend::Git(g) => g.push(hash, device, vault, sealed),
-            Backend::Gist(g) => g.push(hash, device, vault, sealed),
-        }
-        .map_err(|e| e.to_string())
-    }
-}
-
-/// Returns the outcome, and the downloaded vault after a pull.
-fn sync(
-    dir: &Path,
-    remote_url: Option<&str>,
-    vault: &Vault,
-    passphrase: Option<&str>,
-    force: Option<Plan>,
-    resolve: &Resolutions,
-) -> Result<(Outcome, Option<Vault>), String> {
-    let vault_path = dir.join(VAULT_FILE);
-    if !vault_path.exists() {
-        vault.save(&vault_path).map_err(|e| e.to_string())?;
-    }
-    let local = read_local(dir)?;
-    let local_hash = tern_sync::hash(&local);
-    let state = load_state(dir);
-    let backend = Backend::open(dir, remote_url)?;
-    let remote = backend.fetch()?;
-    // A Mac that never synced and holds nothing of its own (no connections, an empty vault)
-    // just takes GitHub's copy instead of asking which side wins.
-    let fresh = state.last_hash.is_none() && !local.contains_key("hosts.json") && vault.is_empty();
-    let plan = force.unwrap_or_else(|| match (&remote, fresh) {
-        (Some(_), true) => Plan::Pull,
-        _ => tern_sync::decide(
-            &local_hash,
-            remote.as_ref().map(|r| r.hash.as_str()),
-            state.last_hash.as_deref(),
-        ),
     });
-    // The remote's vault may use another passphrase than this Mac's: a typed one wins.
-    let open_remote = |remote: &tern_sync::RemoteBundle| {
-        match passphrase {
-            Some(p) => Vault::unlock_bytes(&remote.vault, SecretString::from(p.to_owned())),
-            None => vault.reopen(&remote.vault),
-        }
-        .map_err(|e| match e {
-            VaultError::WrongPassphrase => {
-                "The remote's vault uses another passphrase: enter it above and sync again."
-                    .to_owned()
-            }
-            other => other.to_string(),
-        })
-    };
-    let push = |files: &Files, hash: &str, with: &Vault| -> Result<(), String> {
-        let mut rest = files.clone();
-        let vault_bytes = rest.remove(VAULT_FILE).unwrap_or_default();
-        let sealed = with.seal(&encode(&rest)?).map_err(|e| e.to_string())?;
-        let device = std::env::var("USER").unwrap_or_else(|_| "mac".into());
-        backend.push(hash, &device, &vault_bytes, &sealed)
-    };
-    match plan {
-        Plan::UpToDate => {
-            write_state(dir, &local_hash, &local)?;
-            Ok((Outcome::UpToDate, None))
-        }
-        Plan::Conflict => {
-            let Some(remote) = remote else {
-                return Err("The remote has no bundle yet.".into());
-            };
-            // No per-item record (an older sync.json, or never synced): the whole-bundle
-            // question, once. The answer writes the record, so the next conflict is per item.
-            if state.items.is_empty() {
-                return Ok((
-                    Outcome::Conflict {
-                        whole: true,
-                        items: Vec::new(),
-                    },
-                    None,
-                ));
-            }
-            let theirs = open_remote(&remote)?;
-            let mut remote_files =
-                decode(&theirs.open(&remote.sealed).map_err(|e| e.to_string())?)?;
-            remote_files.insert(VAULT_FILE.to_owned(), remote.vault.clone());
-            let picks = match decide_items(&state, &local, &remote_files, resolve)? {
-                Ok(picks) => picks,
-                Err(asks) => {
-                    return Ok((
-                        Outcome::Conflict {
-                            whole: false,
-                            items: asks,
-                        },
-                        None,
-                    ));
-                }
-            };
-            let mut merged = local.clone();
-            for (name, pick) in &picks {
-                match pick {
-                    Pick::Mac => {}
-                    Pick::Remote => match remote_files.get(*name) {
-                        Some(b) => {
-                            merged.insert((*name).to_owned(), b.clone());
-                        }
-                        None => {
-                            merged.remove(*name);
-                        }
-                    },
-                    Pick::Merged(b) => {
-                        merged.insert((*name).to_owned(), b.clone());
-                    }
-                }
-            }
-            let merged_hash = tern_sync::hash(&merged);
-            let vault_from_remote = matches!(picks.get(VAULT_FILE), Some(Pick::Remote));
-            if merged_hash != remote.hash {
-                push(
-                    &merged,
-                    &merged_hash,
-                    if vault_from_remote { &theirs } else { vault },
-                )?;
-            }
-            for (name, pick) in &picks {
-                if matches!(pick, Pick::Mac) {
-                    continue;
-                }
-                match merged.get(*name) {
-                    Some(b) => write_atomic(&dir.join(name), b)?,
-                    None => {
-                        let _ = std::fs::remove_file(dir.join(name));
-                    }
-                }
-            }
-            write_state(dir, &merged_hash, &merged)?;
-            Ok((Outcome::Merged, vault_from_remote.then_some(theirs)))
-        }
-        Plan::Push => {
-            push(&local, &local_hash, vault)?;
-            write_state(dir, &local_hash, &local)?;
-            Ok((Outcome::Pushed, None))
-        }
-        Plan::Pull => {
-            let Some(remote) = remote else {
-                return Err("The remote has no bundle yet.".into());
-            };
-            let theirs = open_remote(&remote)?;
-            let mut rest = decode(&theirs.open(&remote.sealed).map_err(|e| e.to_string())?)?;
-            for (name, bytes) in &rest {
-                write_atomic(&dir.join(name), bytes)?;
-            }
-            for name in SYNCED {
-                if !rest.contains_key(name) {
-                    let _ = std::fs::remove_file(dir.join(name));
-                }
-            }
-            write_atomic(&vault_path, &remote.vault)?;
-            rest.insert(VAULT_FILE.to_owned(), remote.vault.clone());
-            write_state(dir, &remote.hash, &rest)?;
-            Ok((Outcome::Pulled, Some(theirs)))
-        }
+    let result = bundle::remote_for(dir, remote_url)
+        .and_then(|remote| bundle::sync(dir, remote.as_ref(), &vault, passphrase, force, resolve));
+    match result {
+        Ok((outcome, Some(pulled))) => (Some(pulled.0), Ok(outcome)),
+        Ok((outcome, None)) => (Some(vault.0), Ok(outcome)),
+        Err(e) => (Some(vault.0), Err(e)),
     }
-}
-
-/// What a diverged item becomes.
-#[derive(Debug, PartialEq, Eq)]
-enum Pick {
-    Mac,
-    Remote,
-    Merged(Vec<u8>),
-}
-
-/// The item-level decision for a conflict. `Ok(Ok(picks))` settles every item; `Ok(Err(items))`
-/// lists those only the user can decide (changed on both sides, no merge, no answer yet).
-fn decide_items(
-    state: &SyncState,
-    local: &Files,
-    remote: &Files,
-    resolve: &Resolutions,
-) -> Result<Result<BTreeMap<&'static str, Pick>, Vec<String>>, String> {
-    let (lh, rh) = (
-        tern_sync::item_hashes(local, &ITEMS),
-        tern_sync::item_hashes(remote, &ITEMS),
-    );
-    let (mut picks, mut asks) = (BTreeMap::new(), Vec::new());
-    for name in ITEMS {
-        let last = state.items.get(name).map(String::as_str);
-        let pick = match tern_sync::decide_item(&lh[name], &rh[name], last) {
-            ItemPlan::Same | ItemPlan::KeepLocal => Pick::Mac,
-            ItemPlan::TakeRemote => Pick::Remote,
-            ItemPlan::Both => {
-                // Connections merge by name when the base is known; only an edit both sides
-                // made differently to one connection is left to the user.
-                let text = |f: &Files| {
-                    f.get(name)
-                        .map(|b| String::from_utf8_lossy(b).into_owned())
-                        .unwrap_or_default()
-                };
-                let merged = match (name, &state.hosts_base) {
-                    (HOSTS_FILE, Some(base)) => {
-                        match tern_sync::merge_hosts(base, &text(local), &text(remote))? {
-                            tern_sync::HostsMerge::Merged(t) => Some(Pick::Merged(t.into_bytes())),
-                            tern_sync::HostsMerge::Conflict(_) => None,
-                        }
-                    }
-                    _ => None,
-                };
-                match (merged, resolve.get(name)) {
-                    (Some(p), _) => p,
-                    (None, Some(Side::Mac)) => Pick::Mac,
-                    (None, Some(Side::Remote)) => Pick::Remote,
-                    (None, None) => {
-                        asks.push(name.to_owned());
-                        continue;
-                    }
-                }
-            }
-        };
-        picks.insert(name, pick);
-    }
-    Ok(if asks.is_empty() {
-        Ok(picks)
-    } else {
-        Err(asks)
-    })
-}
-
-fn read_local(dir: &Path) -> Result<Files, String> {
-    let mut files = Files::new();
-    for name in SYNCED.into_iter().chain([VAULT_FILE]) {
-        match std::fs::read(dir.join(name)) {
-            Ok(bytes) => {
-                files.insert(name.to_owned(), bytes);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("{name}: {e}")),
-        }
-    }
-    Ok(files)
-}
-
-fn encode(files: &Files) -> Result<Vec<u8>, String> {
-    let map: BTreeMap<&str, String> = files
-        .iter()
-        .map(|(n, b)| (n.as_str(), B64.encode(b)))
-        .collect();
-    serde_json::to_vec(&map).map_err(|e| e.to_string())
-}
-
-/// The inverse of [`encode`]; names outside [`SYNCED`] are dropped, so a tampered bundle
-/// cannot write elsewhere.
-fn decode(bytes: &[u8]) -> Result<Files, String> {
-    let map: BTreeMap<String, String> =
-        serde_json::from_slice(bytes).map_err(|e| format!("sync data: {e}"))?;
-    map.into_iter()
-        .filter(|(n, _)| SYNCED.contains(&n.as_str()))
-        .map(|(n, b)| {
-            B64.decode(b)
-                .map(|bytes| (n.clone(), bytes))
-                .map_err(|e| format!("{n}: {e}"))
-        })
-        .collect()
-}
-
-/// Records what both sides now hold: the bundle hash, each item's hash, and `hosts.json`
-/// itself as the base for the next by-name merge. `files` is the agreed bundle, vault included.
-fn write_state(dir: &Path, hash: &str, files: &Files) -> Result<(), String> {
-    let json = serde_json::to_vec_pretty(&SyncState {
-        last_hash: Some(hash.to_owned()),
-        items: tern_sync::item_hashes(files, &ITEMS),
-        hosts_base: files
-            .get(HOSTS_FILE)
-            .map(|b| String::from_utf8_lossy(b).into_owned()),
-    })
-    .map_err(|e| e.to_string())?;
-    write_atomic(&dir.join(STATE_FILE), &json)
-}
-
-/// A look at the synced files for the change watcher; `None` when they cannot be read.
-pub(super) fn snapshot(dir: &Path) -> Option<Snapshot> {
-    let local = tern_sync::hash(&read_local(dir).ok()?);
-    Some(Snapshot {
-        local,
-        last: load_state(dir).last_hash,
-    })
-}
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("sync.tmp");
-    std::fs::write(&tmp, bytes)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]

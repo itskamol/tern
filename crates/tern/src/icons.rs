@@ -84,14 +84,12 @@ icon_assets!(
     (INFO, "info-circle"),
     (CHEVRON_RIGHT, "alt-arrow-right"),
     (CHEVRON_LEFT, "alt-arrow-left"),
-    (MORE, "more-horizontal"),
     (SEARCH, "magnifer"),
     (GLOBE, "global"),
     (FOLDER, "folder"),
     (DOCUMENT, "document"),
     (ARROW_UP, "arrow-up"),
     (HOME, "home"),
-    (UPLOAD, "archive-up-minimalistic"),
     (FILE_CODE, "file-code"),
 );
 

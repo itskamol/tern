@@ -5,19 +5,16 @@
 //! The password-command side of logging in: when a server asks for a password, run the
 //! connection's command before the vault, and ask first if this Mac never approved it.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AppContext, Context};
+use gpui::{AppContext, Context};
 use tern_ssh::{ExposeSecret, Prompt, SecretString};
-use tern_vault::{Key, Vault, VaultError};
+use tern_vault::{Key, Vault};
 
 use super::Session;
-use crate::keeper::{self, Keeper};
+use crate::keeper::{Ask, Keeper, Opening, Pending, Tried, Typed};
 use crate::login::Login;
-use crate::password_command::{self as pc, Approved, Step};
-use crate::vault_pin::{self, Outcome};
+use crate::password_command::{self as pc, Purpose, Question, Step};
 
 const QUIET: Duration = Duration::from_millis(500);
 const QUIET_MAX: Duration = Duration::from_secs(3);
@@ -42,20 +39,22 @@ pub(super) enum Flow {
     /// dialling because the connection names a vault key; skipping dials anyway and falls
     /// back to the usual prompts.
     Unlock(After),
-    /// "This connection runs `…` to get its password. Run it? (yes/no)".
-    ApproveCommand(Prompt),
-    /// The same for a password fill; the number is the screen it was asked on.
-    ApproveFill(String, u64),
+    /// "Run `…` on this Mac? (yes/no)" for a password command, ProxyCommand or fill command.
+    Approve(Question, Then),
     /// "Save … in tern's vault? (yes/no)".
     OfferSave(Key, SecretString),
     NewPassphrase(Key, SecretString),
     RepeatPassphrase(Key, SecretString, SecretString),
 }
 
-/// How the person is opening the vault.
-enum Opener {
-    Passphrase(SecretString),
-    Pin(String),
+/// What an approved command was asked for.
+pub(super) enum Then {
+    /// The server's password prompt, answered by the command's output.
+    Login(Prompt),
+    /// Dialling, through the ProxyCommand.
+    Proxy,
+    /// A password fill; the number is the screen it was asked on.
+    Fill(u64),
 }
 
 impl Session {
@@ -64,21 +63,21 @@ impl Session {
         let Some(prompt) = self.try_command(prompt, cx) else {
             return;
         };
-        let key = keeper::key_for(&prompt, self.host(), self.port());
+        let key = crate::login::key_for(&prompt, self.host(), self.port());
         // Each secret is tried from the vault once per connection, so a stale one falls
         // through to asking instead of failing in a loop.
-        if let Some(key) = key.filter(|k| !self.tried.contains(k)) {
+        if let Some(key) = key.filter(|k| !self.attempt.tried.contains(k)) {
             if let Some(secret) = Keeper::lookup(&key, cx) {
-                self.tried.push(key.clone());
+                self.attempt.tried.push(key.clone());
                 self.show(
                     format!(
                         "\x1b[2m[{} from the vault]\x1b[0m\r\n",
-                        keeper::describe(&key)
+                        crate::login::describe(&key)
                     )
                     .as_bytes(),
                     cx,
                 );
-                if let Some(other) = keeper::answer(prompt, secret) {
+                if let Some(other) = crate::login::answer(prompt, secret) {
                     self.ask_user(other, cx);
                 }
                 return;
@@ -103,27 +102,27 @@ impl Session {
     /// Opens the vault: the Keychain first, once per run, then the PIN when one is set, else the
     /// passphrase. A Keychain that cannot open it falls through without a word.
     pub(super) fn ask_unlock(&mut self, after: After, cx: &mut Context<Self>) {
-        let slot = Rc::new(RefCell::new(Some(after)));
-        let wake = {
-            let (slot, this) = (slot.clone(), cx.weak_entity());
-            move |cx: &mut App| {
-                let Some(after) = slot.borrow_mut().take() else {
-                    return;
-                };
-                let _ = this.update(cx, |s, cx| s.keychain_resolved(after, cx));
+        let this = cx.weak_entity();
+        let need = Keeper::need_vault(cx, after, move |after, cx| {
+            let _ = this.update(cx, |s, cx| s.keychain_resolved(after, cx));
+        });
+        match need {
+            Pending::Waiting => {
+                self.attempt.vault_busy = true;
+                self.note("Asking the Keychain…", cx);
             }
-        };
-        if Keeper::keychain_then(cx, wake) {
-            self.vault_busy = true;
-            self.note("Asking the Keychain…", cx);
-            return;
+            Pending::Now(Opening::Open, after) => self.keychain_resolved(after, cx),
+            Pending::Now(Opening::Ask(ask), after) => self.ask_for(ask, after, cx),
         }
-        let after = slot.borrow_mut().take().unwrap_or_default();
-        if Keeper::pin_set(cx) {
-            let text = format!("{}Vault PIN (Enter to use the passphrase): ", lead(&after));
-            self.ask_local(&text, false, Flow::Pin(after), cx);
-        } else {
-            self.ask_passphrase(after, cx);
+    }
+
+    fn ask_for(&mut self, ask: Ask, after: After, cx: &mut Context<Self>) {
+        match ask {
+            Ask::Pin => {
+                let text = format!("{}Vault PIN (Enter to use the passphrase): ", lead(&after));
+                self.ask_local(&text, false, Flow::Pin(after), cx);
+            }
+            Ask::Passphrase => self.ask_passphrase(after, cx),
         }
     }
 
@@ -138,7 +137,7 @@ impl Session {
         }: After,
         cx: &mut Context<Self>,
     ) {
-        self.vault_busy = false;
+        self.attempt.vault_busy = false;
         if Keeper::locked(cx) {
             return self.ask_unlock(
                 After {
@@ -149,11 +148,8 @@ impl Session {
                 cx,
             );
         }
-        if let Some((key, secret)) = entry
-            && let Some(mut vault) = Keeper::take(cx)
-        {
-            vault.set(key, secret);
-            self.save(vault, cx);
+        if let Some((key, secret)) = entry {
+            self.store(key, secret, cx);
         }
         self.resume(prompt, fill, true, cx);
         self.release_held(cx);
@@ -188,28 +184,28 @@ impl Session {
     /// The server's question, asked in the terminal; a typed password is remembered so it can
     /// be offered for saving once the login succeeds.
     fn ask_user(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
-        self.asking = keeper::key_for(&prompt, self.host(), self.port());
+        self.attempt.asking = crate::login::key_for(&prompt, self.host(), self.port());
         // Asked again for the same secret means the last answer was refused; say so as
         // OpenSSH does, or a retry looks like the same prompt shown twice.
-        if let Some(key) = &self.asking {
-            if self.asked.contains(key) {
+        if let Some(key) = &self.attempt.asking {
+            if self.attempt.asked.contains(key) {
                 self.show(b"Permission denied, please try again.\r\n", cx);
             } else {
-                self.asked.push(key.clone());
+                self.attempt.asked.push(key.clone());
             }
         }
         let (login, question) = Login::start(prompt);
-        self.login = Some(login);
+        self.attempt.login = Some(login);
         self.show(&question, cx);
-        // The tab, sidebar and status dots read `is_asking`; a session nobody is drawing would
+        // The tab, sidebar and status dots read `dot`; a session nobody is drawing would
         // otherwise keep the connecting dot (with Reduce Motion nothing else redraws it).
         cx.notify();
     }
 
     pub(super) fn ask_local(&mut self, text: &str, echo: bool, flow: Flow, cx: &mut Context<Self>) {
         let (login, question) = Login::ask(text, echo);
-        self.login = Some(login);
-        self.flow = Some(flow);
+        self.attempt.login = Some(login);
+        self.attempt.flow = Some(flow);
         self.show(&question, cx);
         cx.notify();
     }
@@ -217,7 +213,7 @@ impl Session {
     /// Asks to save a typed secret once the remote has been quiet for [`QUIET`] (at most
     /// [`QUIET_MAX`] after login), so the question does not land inside the login banner.
     pub(super) fn offer_save(&mut self, cx: &mut Context<Self>) {
-        if self.typed.is_none() {
+        if self.attempt.typed.is_none() {
             return;
         }
         let started = Instant::now();
@@ -232,14 +228,14 @@ impl Session {
                 }
             }
             let _ = this.update(cx, |s, cx| {
-                if s.login.is_some() || s.status != super::Status::Connected {
+                if s.attempt.login.is_some() || s.life.status() != super::Status::Connected {
                     return;
                 }
-                if let Some((key, secret)) = s.typed.take() {
+                if let Some((key, secret)) = s.attempt.typed.take() {
                     let lead = if s.ends_line { "" } else { "\r\n" };
                     let text = format!(
                         "{lead}Save {} in tern's vault? (yes/no) ",
-                        keeper::describe(&key)
+                        crate::login::describe(&key)
                     );
                     s.ask_local(&text, true, Flow::OfferSave(key, secret), cx);
                 }
@@ -250,30 +246,27 @@ impl Session {
 
     /// A question finished; `answer` is what was typed, `None` after Ctrl-C.
     pub(super) fn answered(&mut self, answer: Option<SecretString>, cx: &mut Context<Self>) {
-        let Some(flow) = self.flow.take() else {
-            if let (Some(key), Some(secret)) = (self.asking.take(), answer) {
-                self.typed = Some((key, secret));
+        let Some(flow) = self.attempt.flow.take() else {
+            if let (Some(key), Some(secret)) = (self.attempt.asking.take(), answer) {
+                self.attempt.typed = Some((key, secret));
             }
             return;
         };
         let typed = answer.filter(|a| !a.expose_secret().is_empty());
         match flow {
             Flow::Pin(after) => match typed {
-                Some(pin) => self.unlock(Opener::Pin(pin.expose_secret().to_owned()), after, cx),
+                Some(pin) => self.unlock(Typed::Pin(pin.expose_secret().to_owned()), after, cx),
                 None => self.ask_passphrase(after, cx),
             },
             Flow::Unlock(after) => match typed {
-                Some(passphrase) => self.unlock(Opener::Passphrase(passphrase), after, cx),
+                Some(passphrase) => self.unlock(Typed::Passphrase(passphrase), after, cx),
                 None => self.skipped(after, cx),
             },
-            Flow::ApproveCommand(prompt) => {
-                self.command_approved(prompt, keeper::is_yes(typed.as_ref()), cx)
-            }
-            Flow::ApproveFill(command, seq) => {
-                self.fill_approved(command, seq, keeper::is_yes(typed.as_ref()), cx)
+            Flow::Approve(question, then) => {
+                self.approval_answered(question, then, crate::login::is_yes(typed.as_ref()), cx)
             }
             Flow::OfferSave(key, secret) => {
-                if !keeper::is_yes(typed.as_ref()) {
+                if !crate::login::is_yes(typed.as_ref()) {
                     return;
                 }
                 if !Keeper::exists(cx) {
@@ -289,9 +282,8 @@ impl Session {
                         ..After::default()
                     };
                     self.ask_unlock(after, cx);
-                } else if let Some(mut vault) = Keeper::take(cx) {
-                    vault.set(key, secret);
-                    self.save(vault, cx);
+                } else {
+                    self.store(key, secret, cx);
                 }
             }
             Flow::NewPassphrase(key, secret) => match typed {
@@ -305,9 +297,8 @@ impl Session {
             },
             Flow::RepeatPassphrase(key, secret, first) => {
                 if typed.is_some_and(|again| again.expose_secret() == first.expose_secret()) {
-                    let mut vault = Vault::new(first);
-                    vault.set(key, secret);
-                    self.save(vault, cx);
+                    Keeper::adopt(Vault::new(first), cx);
+                    self.store(key, secret, cx);
                 } else {
                     self.note("Passphrases differ; not saved.", cx);
                 }
@@ -316,53 +307,29 @@ impl Session {
     }
 
     /// Opens the vault off the UI thread, then does what was waiting for it.
-    fn unlock(&mut self, opener: Opener, after: After, cx: &mut Context<Self>) {
-        let Some(path) = Keeper::path(cx) else {
-            return;
-        };
-        self.vault_busy = true;
+    fn unlock(&mut self, typed: Typed, after: After, cx: &mut Context<Self>) {
+        self.attempt.vault_busy = true;
         self.note("Unlocking the vault…", cx);
-        let work = match opener {
-            Opener::Passphrase(passphrase) => cx.background_spawn(async move {
-                match Vault::unlock(&path, passphrase) {
-                    Ok(vault) => Outcome::Opened(vault),
-                    Err(VaultError::WrongPassphrase) => {
-                        Outcome::Failed("Wrong vault passphrase.".into())
-                    }
-                    Err(e) => Outcome::Failed(format!("Vault unavailable: {e}")),
-                }
-            }),
-            Opener::Pin(pin) => Keeper::pin_unlock(pin, cx),
-        };
+        let work = Keeper::try_unlock(typed, cx);
         cx.spawn(async move |this, cx| {
-            let outcome = work.await;
-            let _ = this.update(cx, |s, cx| s.unlocked(outcome, after, cx));
+            let tried = work.await;
+            let _ = this.update(cx, |s, cx| s.unlocked(tried, after, cx));
         })
         .detach();
     }
 
-    /// The vault opened, or it did not and the person is asked again.
-    fn unlocked(&mut self, outcome: Outcome, after: After, cx: &mut Context<Self>) {
-        self.vault_busy = false;
-        let vault = match outcome {
-            Outcome::Opened(vault) => Some(vault),
-            Outcome::Wrong { .. } => {
-                // A wrong PIN is asked again, with the tries left said first.
-                if let Some(text) = vault_pin::message(&outcome) {
-                    self.note(&text, cx);
-                }
-                return self.ask_unlock(after, cx);
+    /// The vault opened, or it did not and the person is asked again or let through.
+    fn unlocked(&mut self, tried: Tried, after: After, cx: &mut Context<Self>) {
+        self.attempt.vault_busy = false;
+        let opened = match tried {
+            Tried::Opened => true,
+            Tried::Again { ask, message } => {
+                self.note(&message, cx);
+                return self.ask_for(ask, after, cx);
             }
-            Outcome::Wiped | Outcome::Gone => {
-                // The PIN is off now: say so, and ask for the passphrase.
-                if let Some(text) = Keeper::pin_done(outcome, cx) {
-                    self.note(&text, cx);
-                }
-                return self.ask_passphrase(after, cx);
-            }
-            Outcome::Failed(text) => {
-                self.note(&text, cx);
-                None
+            Tried::Failed(message) => {
+                self.note(&message, cx);
+                false
             }
         };
         let After {
@@ -370,17 +337,10 @@ impl Session {
             entry,
             fill,
         } = after;
-        let unlocked = vault.is_some();
-        if let Some(mut vault) = vault {
-            match entry {
-                Some((key, secret)) => {
-                    vault.set(key, secret);
-                    self.save(vault, cx);
-                }
-                None => Keeper::put(vault, cx),
-            }
+        if let Some((key, secret)) = entry.filter(|_| opened) {
+            self.store(key, secret, cx);
         }
-        self.resume(prompt, fill, unlocked, cx);
+        self.resume(prompt, fill, opened, cx);
         self.release_held(cx);
     }
 
@@ -408,20 +368,16 @@ impl Session {
         }
     }
 
-    /// Encrypts and writes off the UI thread; the vault returns to the keeper afterwards.
-    fn save(&mut self, vault: Vault, cx: &mut Context<Self>) {
-        let Some(path) = Keeper::path(cx) else {
-            return;
+    /// Stores a secret in the open vault and writes it off the UI thread, in order with every
+    /// other write; the vault stays open for the other tabs meanwhile.
+    fn store(&mut self, key: Key, secret: SecretString, cx: &mut Context<Self>) {
+        let Some(task) = Keeper::store(key, secret, cx) else {
+            return self.note("Not saved: the vault is locked.", cx);
         };
-        self.vault_busy = true;
-        let work = cx.background_spawn(async move {
-            let result = vault.save(&path);
-            (vault, result)
-        });
+        self.attempt.vault_busy = true;
         cx.spawn(async move |this, cx| {
-            let (vault, result) = work.await;
+            let result = task.await;
             let _ = this.update(cx, |s, cx| {
-                Keeper::put(vault, cx);
                 match result {
                     Ok(()) => s.note("Saved in the vault.", cx),
                     Err(e) => {
@@ -429,7 +385,7 @@ impl Session {
                         s.note(&format!("Could not save the vault: {e}"), cx);
                     }
                 }
-                s.vault_busy = false;
+                s.attempt.vault_busy = false;
                 s.release_held(cx);
             });
         })
@@ -455,41 +411,68 @@ impl Session {
             return Some(prompt);
         }
         let command = self.link.password_command.clone();
-        let approved = command.as_deref().is_some_and(|c| {
-            crate::settings::dir().is_some_and(|d| Approved::load(&d).contains(c))
-        });
-        match pc::plan(command.as_deref(), self.command_tried, approved) {
-            Step::Skip => Some(prompt),
-            Step::Approve => {
-                let text = format!(
-                    "This connection runs `{}` to get its password. Run it? (yes/no) ",
-                    command.unwrap_or_default().replace(char::is_control, " ")
-                );
-                self.ask_local(&text, true, Flow::ApproveCommand(prompt), cx);
+        let question = command
+            .as_deref()
+            .and_then(|c| self.link.approvals.ask(Purpose::Login, c));
+        match (
+            pc::plan(
+                command.as_deref(),
+                self.attempt.command_tried,
+                question.is_none(),
+            ),
+            question,
+            command,
+        ) {
+            (Step::Approve, Some(question), _) => {
+                self.ask_approval(question, Then::Login(prompt), cx);
                 None
             }
-            Step::Run => {
-                self.run_command(command.unwrap_or_default(), prompt, cx);
+            (Step::Run, _, Some(command)) => {
+                self.run_command(command, prompt, cx);
                 None
             }
+            _ => Some(prompt),
         }
     }
 
-    /// The answer to the approval question.
-    pub(super) fn command_approved(&mut self, prompt: Prompt, yes: bool, cx: &mut Context<Self>) {
-        let Some(command) = self.link.password_command.clone().filter(|_| yes) else {
-            // Declined: the command is not run, and the prompt goes the usual way.
-            self.command_tried = true;
-            return self.on_prompt(prompt, cx);
-        };
-        if let Some(dir) = crate::settings::dir() {
-            let _ = Approved::approve(&dir, &command);
+    /// Asks before a command first runs on this Mac: it came from `hosts.json`, which sync and
+    /// imports also write.
+    pub(super) fn ask_approval(&mut self, question: Question, then: Then, cx: &mut Context<Self>) {
+        let text = question.text();
+        self.ask_local(&text, true, Flow::Approve(question, then), cx);
+    }
+
+    /// The answer to an approval question. A no goes on as each use needs: the login prompt
+    /// goes to the vault, a proxy leaves the tab closed, a fill is not run.
+    fn approval_answered(
+        &mut self,
+        question: Question,
+        then: Then,
+        yes: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match (then, self.link.approvals.answer(question, yes)) {
+            (Then::Login(prompt), Some(command)) => self.run_command(command, prompt, cx),
+            (Then::Login(prompt), None) => {
+                self.attempt.command_tried = true;
+                self.on_prompt(prompt, cx);
+            }
+            (Then::Proxy, Some(_)) => self.dial(cx),
+            (Then::Proxy, None) => {
+                self.note(
+                    "Not connected: the proxy command was not run. Enter asks again.",
+                    cx,
+                );
+                self.life.stop();
+                cx.notify();
+            }
+            (Then::Fill(seq), Some(command)) => self.run_fill_command(command, seq, cx),
+            (Then::Fill(_), None) => self.note("Not run.", cx),
         }
-        self.run_command(command, prompt, cx);
     }
 
     fn run_command(&mut self, command: String, prompt: Prompt, cx: &mut Context<Self>) {
-        self.command_tried = true;
+        self.attempt.command_tried = true;
         let work = cx.background_spawn(async move { pc::run(&command, pc::TIMEOUT) });
         cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -498,7 +481,7 @@ impl Session {
                     s.show(b"\x1b[2m[password from the command]\x1b[0m\r\n", cx);
                     // Answered straight to the server, never through `typed`, so it is not
                     // offered for saving in the vault.
-                    if let Some(other) = keeper::answer(prompt, secret) {
+                    if let Some(other) = crate::login::answer(prompt, secret) {
                         s.on_prompt(other, cx);
                     }
                 }

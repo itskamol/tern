@@ -13,9 +13,10 @@ use gpui::{
 #[path = "shell_settings_nav.rs"]
 mod nav;
 
+use super::Pane;
 use super::Shell;
 use crate::keymap::{Keymap, Record, ShortcutId, badge, record};
-use crate::settings::{AppearanceMode, FONT_DEFAULT, FONT_MAX, FONT_MIN};
+use crate::settings::{self, AppearanceMode, FONT_DEFAULT, FONT_MAX, FONT_MIN, Settings};
 use crate::settings_widgets as w;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,18 +27,20 @@ pub(crate) enum Section {
     Connections,
     Snippets,
     Vault,
+    History,
     Sync,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 8] = [
+    const ALL: [Section; 9] = [
         Section::Appearance,
         Section::Terminal,
         Section::Shortcuts,
         Section::Connections,
         Section::Snippets,
         Section::Vault,
+        Section::History,
         Section::Sync,
         Section::About,
     ];
@@ -50,6 +53,7 @@ impl Section {
             Section::Connections => "Connections",
             Section::Snippets => "Snippets",
             Section::Vault => "Vault",
+            Section::History => "Command history",
             Section::Sync => "Sync",
             Section::About => "About",
         }
@@ -63,6 +67,7 @@ impl Section {
             Section::Connections => crate::icons::SERVER,
             Section::Snippets => crate::icons::FILE_CODE,
             Section::Vault => crate::icons::KEY,
+            Section::History => crate::icons::RESTART,
             Section::Sync => crate::icons::CLOUD,
             Section::About => crate::icons::INFO,
         }
@@ -76,8 +81,70 @@ impl Section {
             Section::Connections => "nav-connections",
             Section::Snippets => "nav-snippets",
             Section::Vault => "nav-vault",
+            Section::History => "nav-history",
             Section::Sync => "nav-sync",
             Section::About => "nav-about",
+        }
+    }
+}
+
+impl Shell {
+    /// Changes, saves and applies settings: whatever the change needs re-applied to the running
+    /// app (palette, open terminals, motion) is, here, so no caller has to remember it.
+    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        let old = self.settings.clone();
+        change(&mut self.settings);
+        self.settings = self.settings.clone().clamped();
+        self.save_settings();
+        self.reapply(old.reapply(&self.settings), cx);
+        cx.notify();
+    }
+
+    pub(super) fn save_settings(&self) {
+        if let Some(dir) = settings::dir()
+            && let Err(e) = self.settings.save(&dir)
+        {
+            tracing::warn!(error = %e, "settings_save_failed");
+        }
+    }
+
+    /// Applies what a settings change asks for: at launch everything, after a change or a sync
+    /// reload what [`Settings::reapply`] found.
+    pub(crate) fn reapply(&mut self, what: settings::Reapply, cx: &mut Context<Self>) {
+        if what.motion {
+            crate::platform::apply_reduce_motion(self.settings.reduce_motion, cx);
+        }
+        let restyled = what.palette && self.retheme(cx);
+        if what.terminal_style && !restyled {
+            self.restyle_tabs(cx);
+        }
+        if what.terminal_options {
+            let options = self.terminal_options();
+            for session in self
+                .tabs
+                .iter()
+                .flat_map(|t| t.panes())
+                .filter_map(Pane::session)
+            {
+                let view = session.read(cx).view.clone();
+                view.update(cx, |v, cx| v.set_options(options.clone(), cx));
+            }
+        }
+        if what.option_as_meta {
+            self.apply_option_as_meta(cx);
+        }
+        if what.reopen_tabs {
+            self.tabs.set_saving(self.settings.reopen_tabs);
+        }
+    }
+
+    pub(super) fn apply_option_as_meta(&self, cx: &mut Context<Self>) {
+        let on = self.settings.option_as_meta;
+        for tab in &self.tabs {
+            for session in tab.panes().iter().filter_map(Pane::session) {
+                let view = session.read(cx).view.clone();
+                view.update(cx, |v, _| v.set_option_as_meta(on));
+            }
         }
     }
 }
@@ -92,6 +159,14 @@ impl Shell {
             window.focus(&self.focus, cx);
             cx.notify();
         }
+    }
+
+    /// tern → About tern: the Settings page that has the version and links.
+    pub(crate) fn open_settings_at_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.select_section(Section::About, cx);
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     pub(crate) fn open_settings_at_sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -129,6 +204,7 @@ impl Shell {
             Section::Connections => self.connections_page(cx),
             Section::Snippets => self.snippets_page(cx),
             Section::Vault => self.vault_page(cx),
+            Section::History => self.history_page(cx),
             Section::Sync => self.sync_page(cx),
             Section::About => self.about_page(cx),
         };
@@ -140,10 +216,11 @@ impl Shell {
                 super::look::snap(self.settings.sidebar_width, self.frame.scale),
                 nav,
             ))
-            // The page is the body's main tile, so it carries the same tint as every other
-            // view of it over a wallpaper.
+            // The page is the body's main tile. Its fill is the shell colour, not the active
+            // tab's scheme: the page's text is in the app palette, and a dark scheme under the
+            // light appearance would leave it unreadable.
             .child(
-                self.main_tile(self.panel_background()).child(
+                self.main_tile(self.theme.shell).child(
                     div()
                         .id("settings-scroll")
                         .flex_1()
@@ -166,16 +243,14 @@ impl Shell {
                 .items_center()
                 .gap(px(6.))
                 .child(minus.on_click(
-                    cx.listener(|s, _, _, cx| s.change_font(|st| st.step_font(-1.0), cx)),
+                    cx.listener(|s, _, _, cx| s.update_settings(|st| st.step_font(-1.0), cx)),
                 ))
                 .child(value)
-                .child(
-                    plus.on_click(
-                        cx.listener(|s, _, _, cx| s.change_font(|st| st.step_font(1.0), cx)),
-                    ),
-                )
+                .child(plus.on_click(
+                    cx.listener(|s, _, _, cx| s.update_settings(|st| st.step_font(1.0), cx)),
+                ))
                 .child(w::button(&t, "font-reset", "Reset").on_click(cx.listener(
-                    |s, _, _, cx| s.change_font(|st| st.terminal_font_size = FONT_DEFAULT, cx),
+                    |s, _, _, cx| s.update_settings(|st| st.terminal_font_size = FONT_DEFAULT, cx),
                 )));
         let reduce = self.settings.reduce_motion;
         let show_status = self.settings.show_status_line;
@@ -194,7 +269,6 @@ impl Shell {
                     })
                     .on_click(cx.listener(move |s, _, _, cx| {
                         s.update_settings(|st| st.appearance = mode, cx);
-                        s.apply_appearance(cx);
                     })),
             );
         }
@@ -281,7 +355,6 @@ impl Shell {
                     font,
                 )),
             ))
-            .child(w::section(&t, "Wallpaper", self.wallpaper_card(cx)))
             .child(w::section(
                 &t,
                 "Motion",
@@ -296,7 +369,6 @@ impl Shell {
                         .cursor_pointer()
                         .on_click(cx.listener(|s, _, _, cx| {
                             s.update_settings(|st| st.reduce_motion = !st.reduce_motion, cx);
-                            crate::platform::apply_reduce_motion(s.settings.reduce_motion, cx);
                         }))
                         .child(w::toggle(&t, reduce, "reduce-motion")),
                 )),
@@ -527,6 +599,7 @@ impl Shell {
     fn about_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;
         let on = self.settings.check_for_updates;
+        let checking = self.update_check_running();
         w::page_column()
             .child(w::page_header(&t, "About"))
             .child(w::section(
@@ -537,15 +610,35 @@ impl Shell {
                         &t,
                         true,
                         "Version",
-                        Some(env!("CARGO_PKG_VERSION").into()),
-                        div(),
+                        Some(self.update_row_text().into()),
+                        div()
+                            .flex()
+                            .gap_2()
+                            .when(self.update_waiting().is_some(), |el| {
+                                el.child(
+                                    w::button(&t, "update-restart", "Restart now").on_click(
+                                        cx.listener(|s, _, _, cx| s.restart_to_update(cx)),
+                                    ),
+                                )
+                            })
+                            .child(
+                                w::button(
+                                    &t,
+                                    "update-check-now",
+                                    if checking { "Checking…" } else { "Check now" },
+                                )
+                                .when(!checking, |b| {
+                                    b.on_click(cx.listener(|s, _, _, cx| s.check_now(cx)))
+                                }),
+                            ),
                     ))
                     .child(w::row(
                         &t,
                         true,
                         "Check for updates",
                         Some(
-                            "Once a day, ask GitHub for a newer release; tern never installs one"
+                            "Once a day, ask GitHub for a newer release and download it; it is \
+                             installed only when you choose to restart"
                                 .into(),
                         ),
                         div()

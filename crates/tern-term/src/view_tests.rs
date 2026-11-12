@@ -59,3 +59,28 @@ fn overshoot_clamps_and_forces_side() {
     assert_eq!(cell_at(f32::NAN, f32::INFINITY, 10.0, 20.0, 8, 4).col, 0);
     assert_eq!(cell_at(5.0, 5.0, 0.0, 20.0, 8, 4).row, 0);
 }
+
+#[test]
+fn scrollback_keys_need_their_modifier() {
+    let key = |s: &str| scrollback_key(&gpui::Keystroke::parse(s).unwrap());
+    assert_eq!(key("shift-pageup"), Some(ScrollbackKey::PageUp));
+    assert_eq!(key("shift-pagedown"), Some(ScrollbackKey::PageDown));
+    // Plain paging is the remote's (less, vim).
+    assert_eq!(key("pageup"), None);
+    assert_eq!(key("home"), None);
+    let (top, bottom) = if cfg!(target_os = "macos") {
+        ("cmd-home", "cmd-end")
+    } else {
+        ("ctrl-shift-home", "ctrl-shift-end")
+    };
+    assert_eq!(key(top), Some(ScrollbackKey::Top));
+    assert_eq!(key(bottom), Some(ScrollbackKey::Bottom));
+}
+
+#[test]
+fn a_nested_end_marker_cannot_break_out_of_a_bracketed_paste() {
+    let out = paste_bytes("a\x1b[20\x1b[201~1~rm -rf ~\n", true);
+    let inner = &out[6..out.len() - 6];
+    assert!(!inner.windows(6).any(|w| w == b"\x1b[201~"), "{inner:?}");
+    assert!(out.ends_with(b"\x1b[201~"));
+}

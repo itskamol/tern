@@ -18,7 +18,7 @@ zeron, and checking the code. ✓ marks what is done; each open line names how i
 | ✓ L8 | Settings nav | Text only | Icon per section |
 | ✓ L9 | Light appearance | Dark only | Light, dark, follow system |
 | ✓ L10 | Empty states | Text and shortcuts | Illustration-free but iconised, with primary action buttons — icon, one line and a button on: sidebar and ⌘K picker (no hosts, New connection), snippets page (New snippet) and snippet picker (Add in Settings), file browser empty folder (Upload files). Not connected stays a toast; no-match lines stay plain text |
-| ✓ W1 | Wallpaper (asked 2026-10-06) | — | zeron's wallpaper: image as the empty view's hero, effects, visibility, colours from the image (surfaces tinted, text hardened to 4.5:1) |
+| ✗ W1 | Wallpaper (asked 2026-10-06) | — | Built, then removed (#13, #19): the window is macOS's own blur |
 | ✓ L11 | Status | Dot only | Status line under the panel (zeron: checkout, branch, usage) — tern: host, latency, session time |
 
 ## 2. Terminal
@@ -64,6 +64,7 @@ zeron, and checking the code. ✓ marks what is done; each open line names how i
 | ✓ V3 | List and delete saved secrets | Vault page shows a count only |
 | ✓ V4 | Change vault passphrase | Not possible |
 | ✓ V5 | Auto-lock after idle | Stays unlocked until quit |
+| ✓ V6 | Lock when the Mac sleeps or the screen locks | An open vault stayed open behind a locked screen |
 
 ## 5. Sync
 

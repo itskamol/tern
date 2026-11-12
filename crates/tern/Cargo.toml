@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+async-channel = "2"
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 nucleo-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -22,7 +23,6 @@ tern-vault.workspace = true
 base64 = "0.23"
 chrono.workspace = true
 ureq.workspace = true
-image.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
 tracing-appender = "0.2"
@@ -37,9 +37,19 @@ libmimalloc-sys = { version = "0.1", features = ["extended"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility", "NSView", "NSResponder", "objc2-quartz-core"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
 raw-window-handle = { version = "0.6", default-features = false }
+# The sleep and screen-lock notifications (lock_on_sleep.rs). Already in Cargo.lock through gpui.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSString", "NSNotification", "NSOperation", "NSDistributedNotificationCenter"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Layout and scroll tests drive a real gpui window through its test platform.
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
+# Session scenario tests log in to an in-process SSH server; the versions tern-ssh already uses.
+russh = "0.64"
+rand = { version = "0.10", features = ["thread_rng"] }
+tokio = { version = "1", features = ["net", "macros"] }
 
 [lints]
 workspace = true
