@@ -147,3 +147,16 @@ stored in `<hash>.meta.json` next to the picture. A hit checks the PNG signature
 of both PNGs and parses the sidecar; no pixel is decoded. A miss, a truncated file or an old
 sidecar takes the previous path, which also writes the sidecar. The after-figure is measured by the
 lead, not recorded here.
+
+## 2026-11-12 — window drawables capped at 2 (#20, unmeasured)
+
+GPUI makes the window's `CAMetalLayer` with `maximumDrawableCount` 3 (`MetalRenderer::configure_layer`),
+once, and never replaces the layer or resets the count on resize, full screen or display change.
+`drawables::apply` sets it to 2 after the window opens and again on every bounds change (a no-op
+while the count holds), so the window never holds more than 2 window-sized IOSurfaces: one buffer
+less, about 18.6 MB at 1320x880 and about 31 MB full screen. The same-build A/B in #8 held
+IOSurface at 36 MB in 4 of 4 idle runs, against 54 MB in 3 of 8 for stock.
+
+Still to record here, with the window in front (`footprint -p`): IOSurface during the flood demo
+and a window resize never above 2 x the window size, and frame stats during a flood, a resize and
+a divider drag inside the limits above.

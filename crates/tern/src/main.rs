@@ -7,6 +7,7 @@ mod command_history;
 mod connections;
 #[cfg(debug_assertions)]
 mod devkeys;
+mod drawables;
 mod empty_state;
 mod files_model;
 mod files_tab;
