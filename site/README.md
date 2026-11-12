@@ -13,9 +13,9 @@ Plain static HTML, CSS and JavaScript, no build step.
 
 Download links carry `data-asset="macos-arm64.dmg"` and so on: `main.js` rewrites them to the latest release's file names, so a new release needs no edit here. The static `0.1.3` links are the fallback when GitHub's API doesn't answer.
 
-Regenerate the hero picture (Red Fuji, cropped from 15% down):
+Regenerate the hero picture (from the Red Fuji picture, since removed from the app; any picture works):
 
-    python3 site/tools/make_hero.py crates/tern/assets/wallpapers/red-fuji.jpg site/assets/hero.png 1920 560 0.15
+    python3 site/tools/make_hero.py <picture.jpg> site/assets/hero.png 1920 560 0.15
 
 Preview: `python3 -m http.server -d site`, then open http://localhost:8000. Add `?os=windows`, `linux` or `other` to see the other hero variants.
 

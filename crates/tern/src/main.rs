@@ -45,16 +45,11 @@ mod tabs;
 mod tabs_store;
 mod text_input;
 mod theme;
-mod theme_tint;
 mod transfers;
 mod update_outcome;
 #[cfg(target_os = "macos")]
 mod updater;
 mod vault_pin;
-mod wallpaper;
-mod wallpaper_fx;
-mod wallpaper_gallery;
-mod wallpaper_panel;
 
 use gpui::App;
 use tracing_subscriber::EnvFilter;

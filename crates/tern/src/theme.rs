@@ -76,10 +76,6 @@ pub struct Look {
     pub increase_contrast: bool,
     /// macOS's Reduce transparency: nothing may show through a surface.
     pub reduce_transparency: bool,
-    /// A wallpaper fills the window, so the panels are see-through over it.
-    pub wallpaper_fills: bool,
-    /// The wallpaper's dominant colour, when theme colours come from it.
-    pub tint: Option<[u8; 3]>,
 }
 
 /// `retina` normally, `standard` on a 1x display: used for opacities that need a step more
@@ -142,9 +138,6 @@ pub struct Theme {
     pub increase_contrast: bool,
     /// Whether macOS's Reduce transparency is on: surfaces are opaque.
     pub reduce_transparency: bool,
-    /// The panels are see-through over a full-window wallpaper (never under Reduce
-    /// transparency).
-    pub see_through: bool,
     pub shell: Hsla,
     pub text: Hsla,
     pub muted: Hsla,
@@ -167,14 +160,10 @@ pub struct Theme {
     /// the panel's text show through unblurred.
     pub popup: Hsla,
     pub terminal_background: Hsla,
-    /// The wallpaper tint mixed into the surfaces, when theme colours from the wallpaper are
-    /// on (see `theme_tint`); terminal schemes are mixed with it too.
-    pub tint: Option<[u8; 3]>,
 }
 
 impl Theme {
-    /// The palette for `look`: zeron's light or dark, strengthened under Increase contrast,
-    /// leaning toward the wallpaper's colour when asked to.
+    /// The palette for `look`: zeron's light or dark, strengthened under Increase contrast.
     pub fn resolve(look: Look) -> Self {
         let base = if look.light {
             Self::zeron_light()
@@ -186,9 +175,8 @@ impl Theme {
         } else {
             base
         };
-        let mut theme = look.tint.map_or(base, |color| base.tinted(color));
+        let mut theme = base;
         theme.reduce_transparency = look.reduce_transparency;
-        theme.see_through = look.wallpaper_fills && !look.reduce_transparency;
         theme
     }
 
@@ -198,8 +186,6 @@ impl Theme {
             light: self.light,
             increase_contrast: self.increase_contrast,
             reduce_transparency: self.reduce_transparency,
-            wallpaper_fills: self.see_through,
-            tint: self.tint,
         }
     }
 
@@ -225,11 +211,9 @@ impl Theme {
 
     /// Small secondary text (host addresses, section labels): the dimmest `muted` that still
     /// keeps 4.5:1 on the shell and popup. Full strength under Increase contrast and on a
-    /// standard-density display, where thin grayscale text needs the extra step, and over a
-    /// full-window wallpaper: a colour with no margin over the opaque shell loses it on any
-    /// see-through panel, and would hold the panels at their most opaque.
+    /// standard-density display, where thin grayscale text needs the extra step.
     pub fn secondary(&self) -> Hsla {
-        if self.increase_contrast || low_dpi() || self.see_through {
+        if self.increase_contrast || low_dpi() {
             return self.muted;
         }
         let (shell, popup) = (rgb_u32(self.shell), rgb_u32(self.popup));
@@ -239,7 +223,7 @@ impl Theme {
                 let c = rgb_u32(*c);
                 [shell, popup]
                     .iter()
-                    .all(|s| crate::wallpaper_fx::contrast_ratio(c, *s) >= SECONDARY_CONTRAST)
+                    .all(|s| contrast_ratio(c, *s) >= SECONDARY_CONTRAST)
             })
             .unwrap_or(self.muted)
     }
@@ -251,7 +235,6 @@ impl Theme {
             light: true,
             increase_contrast: false,
             reduce_transparency: false,
-            see_through: false,
             shell: hex(0xf3f3f5),
             text: hex(0x303035),
             muted: hex(0x62626a),
@@ -267,7 +250,6 @@ impl Theme {
             hairline: hairline_for(true, 0.06),
             popup: hex(0xffffff),
             terminal_background: hex(0xfafafa),
-            tint: None,
         }
     }
 
@@ -276,7 +258,6 @@ impl Theme {
             light: false,
             increase_contrast: false,
             reduce_transparency: false,
-            see_through: false,
             shell: hex(0x0d0d0d),
             text: hex(0xe8e8ea),
             muted: hex(0xa9a9ae),
@@ -292,7 +273,6 @@ impl Theme {
             hairline: hairline_for(false, 0.06),
             popup: hsla(0.0, 0.0, 0.09, 1.0),
             terminal_background: hex(0x090909),
-            tint: None,
         }
     }
 
@@ -321,14 +301,11 @@ impl Theme {
         for (slot, color) in t.ansi.iter_mut().zip(ansi) {
             *slot = hex(color);
         }
-        if let Some(tint) = self.tint {
-            crate::theme_tint::tint_terminal(&mut t, tint);
-        }
         t
     }
 
-    /// The palette for text drawn on `bg`: this one, or the other appearance's taken toward the
-    /// same wallpaper when `bg` is of the other lightness. A terminal scheme picks its own
+    /// The palette for text drawn on `bg`: this one, or the other appearance's when `bg` is of
+    /// the other lightness. A terminal scheme picks its own
     /// background, so the strip under it may be dark under the light appearance.
     pub fn on(&self, bg: Hsla) -> Theme {
         if is_light(bg) == self.light {
@@ -375,10 +352,29 @@ impl Theme {
 
 /// Whether `c` is a light colour: black text reads better on it than white.
 pub fn is_light(c: Hsla) -> bool {
-    let c = crate::theme_tint::rgb_of(c);
-    let c = u32::from(c[0]) << 16 | u32::from(c[1]) << 8 | u32::from(c[2]);
-    let contrast = crate::wallpaper_fx::contrast_ratio;
-    contrast(c, 0x000000) > contrast(c, 0xffffff)
+    let c = rgb_u32(c);
+    contrast_ratio(c, 0x000000) > contrast_ratio(c, 0xffffff)
+}
+
+fn linear(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn rel_luminance(rgb: u32) -> f32 {
+    let (r, g, b) = ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// WCAG contrast ratio between two `0xRRGGBB` colours.
+pub fn contrast_ratio(a_rgb: u32, b_rgb: u32) -> f32 {
+    let (a, b) = (rel_luminance(a_rgb), rel_luminance(b_rgb));
+    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
 }
 
 /// `fg` composited over `bg`, as an opaque colour (zeron `theme::flatten`).
@@ -408,8 +404,8 @@ fn rgb_u32(c: Hsla) -> u32 {
 /// The text colour that sits on `accent`: white or near-black, chosen to keep contrast (at least 4.5:1).
 pub fn on_accent_for(accent: Hsla) -> Hsla {
     let acc_rgb = rgb_u32(accent);
-    let white_contrast = crate::wallpaper_fx::contrast_ratio(0xff_ffff, acc_rgb);
-    let dark_contrast = crate::wallpaper_fx::contrast_ratio(0x0d_0d_0d, acc_rgb);
+    let white_contrast = contrast_ratio(0xff_ffff, acc_rgb);
+    let dark_contrast = contrast_ratio(0x0d_0d_0d, acc_rgb);
     if white_contrast >= 4.5 {
         hex(0xff_ffff)
     } else if dark_contrast >= 4.5 {
@@ -553,7 +549,6 @@ pub mod themes {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::wallpaper_fx::contrast_ratio;
 
     fn rgb_of(c: Hsla) -> u32 {
         let c = gpui::Rgba::from(c);
@@ -618,14 +613,13 @@ mod tests {
         }
     }
 
-    /// Both palettes, plain, strengthened, and leaning toward a wallpaper colour.
+    /// Both palettes, plain and strengthened.
     fn palettes() -> Vec<(&'static str, Theme)> {
         let mut all = Vec::new();
         for base in [Theme::zeron_dark(), Theme::zeron_light()] {
             let tag = if base.light { "light" } else { "dark" };
             all.push((tag, base));
             all.push((tag, base.with_increased_contrast()));
-            all.push((tag, base.tinted([20, 60, 140])));
         }
         all
     }
@@ -686,37 +680,19 @@ mod tests {
     }
 
     #[test]
-    fn secondary_text_is_plain_muted_while_the_panels_are_see_through() {
-        for light in [false, true] {
-            let look = Look {
-                light,
-                tint: Some([245, 236, 214]),
-                ..Look::default()
-            };
-            let opaque = Theme::resolve(look);
-            assert_ne!(opaque.secondary(), opaque.muted);
-            let seen = Theme::resolve(Look {
-                wallpaper_fills: true,
-                ..look
-            });
-            assert_eq!(seen.secondary(), seen.muted);
-            // Reduce transparency keeps the panels opaque, so secondary text stays dimmed.
-            let solid = Theme::resolve(Look {
-                wallpaper_fills: true,
-                reduce_transparency: true,
-                ..look
-            });
-            assert!(!solid.see_through);
-            assert_eq!(solid.surface(), solid.shell);
-        }
+    fn reduce_transparency_makes_the_window_fill_the_shell_colour() {
+        let solid = Theme::resolve(Look {
+            reduce_transparency: true,
+            ..Look::default()
+        });
+        assert_eq!(solid.surface(), solid.shell);
     }
 
     #[test]
     fn text_on_a_dark_scheme_takes_the_dark_palette_under_the_light_appearance() {
-        let light = Theme::zeron_light().tinted([245, 236, 214]);
+        let light = Theme::zeron_light();
         let on_dark = light.on(hex(0x0e0e0d));
         assert!(!on_dark.light);
-        assert_eq!(on_dark.tint, light.tint);
         assert!(contrast_ratio(rgb_of(on_dark.muted), 0x0e0e0d) >= 4.5);
         assert_eq!(light.on(light.shell), light);
         let dark = Theme::zeron_dark();
@@ -729,19 +705,15 @@ mod tests {
             light: true,
             increase_contrast: true,
             reduce_transparency: false,
-            wallpaper_fills: true,
-            tint: Some([20, 60, 140]),
         };
         let t = Theme::resolve(look);
         assert_eq!(t.look(), look);
-        assert!(t.light && t.increase_contrast && t.see_through);
+        assert!(t.light && t.increase_contrast);
         assert_eq!(t.faint, t.muted, "Increase contrast strengthens faint text");
-        assert_eq!(t.tint, Some([20, 60, 140]));
         // The other appearance keeps every other input, so a dark terminal scheme under the
-        // light appearance keeps contrast and tint.
+        // light appearance keeps contrast.
         let other = t.on(t.terminal_background.opacity(1.0)).on(hex(0x0e0e0d));
-        assert!(!other.light && other.increase_contrast && other.see_through);
-        assert_eq!(other.tint, t.tint);
+        assert!(!other.light && other.increase_contrast);
         assert_eq!(Theme::resolve(Look::default()), Theme::zeron_dark());
     }
 }

@@ -7,7 +7,6 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Context, Empty, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement,
     Render, StatefulInteractiveElement, Styled, Window, WindowControlArea, actions, div, px,
@@ -214,13 +213,11 @@ pub fn render_titlebar(
     fullscreen: bool,
     sidebar_open: bool,
     tabs: impl IntoElement,
-    tint: Option<gpui::Hsla>,
     cx: &mut gpui::Context<crate::shell::Shell>,
 ) -> impl IntoElement {
     div()
         .h(px(TITLEBAR_HEIGHT))
         .flex_none()
-        .when_some(tint, |el, c| el.bg(c))
         .pt(px(TITLEBAR_TOP_PAD))
         .pl(px(titlebar_content_start(fullscreen)))
         .pr(px(SPACE_SM))

@@ -15,10 +15,6 @@ pub const SIDEBAR_DEFAULT: f32 = 256.0;
 pub const FONT_MIN: f32 = 8.0;
 pub const FONT_MAX: f32 = 32.0;
 pub const FONT_DEFAULT: f32 = 13.0;
-/// How strongly the wallpaper hero shows at the top of the empty view.
-pub const WALLPAPER_HERO_OPACITY_MIN: f32 = 0.1;
-pub const WALLPAPER_HERO_OPACITY_MAX: f32 = 1.0;
-pub const WALLPAPER_HERO_OPACITY_DEFAULT: f32 = 1.0;
 /// The idle lock choices in minutes; 0 is off.
 pub const VAULT_LOCK_CHOICES: [u32; 5] = [0, 5, 15, 30, 60];
 pub const VAULT_LOCK_DEFAULT: u32 = 15;
@@ -75,20 +71,6 @@ pub struct Settings {
     pub terminal_theme: Option<String>,
     /// Per-host scheme by host alias, as Termius does per host.
     pub host_themes: BTreeMap<String, String>,
-    /// Image (png, jpeg, webp) shown as the hero of the empty view and tinting the window's
-    /// colours; `None` is the plain frost.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wallpaper: Option<String>,
-    pub wallpaper_hero_opacity: f32,
-    /// Artwork treatment applied to the wallpaper once and cached.
-    pub wallpaper_effect: crate::wallpaper_fx::Effect,
-    /// Recent wallpapers (copies in tern's folder), newest first.
-    pub wallpaper_history: Vec<String>,
-    /// Take the window's surfaces, accent and washes from the wallpaper's dominant colour.
-    pub wallpaper_theme_colors: bool,
-    /// The picture covers the whole window, with translucent panels carrying the text; off
-    /// keeps it to the top of the empty view.
-    pub wallpaper_fills_window: bool,
     /// A git remote to sync through (any host git can reach); `None` uses a GitHub gist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_remote: Option<String>,
@@ -149,12 +131,6 @@ impl Default for Settings {
             log_sessions: false,
             terminal_theme: None,
             host_themes: BTreeMap::new(),
-            wallpaper: None,
-            wallpaper_hero_opacity: WALLPAPER_HERO_OPACITY_DEFAULT,
-            wallpaper_effect: crate::wallpaper_fx::Effect::None,
-            wallpaper_history: Vec::new(),
-            wallpaper_theme_colors: true,
-            wallpaper_fills_window: true,
             sync_remote: None,
             cursor_style: CursorStyle::Block,
             cursor_blink: false,
@@ -179,9 +155,9 @@ impl Default for Settings {
 pub struct Reapply {
     /// The app's reduced-motion flag.
     pub motion: bool,
-    /// The palette: appearance, and the wallpaper's part in it.
+    /// The palette: appearance.
     pub palette: bool,
-    /// Open terminals' font, colour scheme and see-through background.
+    /// Open terminals' font and colour scheme.
     pub terminal_style: bool,
     /// Open terminals' cursor, scrollback, selection, bell and clipboard behaviour.
     pub terminal_options: bool,
@@ -207,13 +183,10 @@ impl Reapply {
 impl Settings {
     /// What going from these settings to `new` needs re-applied.
     pub fn reapply(&self, new: &Settings) -> Reapply {
-        let fill = (self.wallpaper_fills_window, self.wallpaper_theme_colors)
-            != (new.wallpaper_fills_window, new.wallpaper_theme_colors);
         Reapply {
             motion: self.reduce_motion != new.reduce_motion,
-            palette: self.appearance != new.appearance || fill,
-            terminal_style: fill
-                || self.terminal_font_size != new.terminal_font_size
+            palette: self.appearance != new.appearance,
+            terminal_style: self.terminal_font_size != new.terminal_font_size
                 || self.terminal_font_family != new.terminal_font_family
                 || self.terminal_theme != new.terminal_theme
                 || self.host_themes != new.host_themes,
@@ -277,14 +250,6 @@ impl Settings {
         self.terminal_font_size =
             clamp_or(self.terminal_font_size, FONT_MIN, FONT_MAX, FONT_DEFAULT);
         self.scrollback_lines = self.scrollback_lines.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX);
-        self.wallpaper_history
-            .truncate(crate::wallpaper::HISTORY_LIMIT);
-        self.wallpaper_hero_opacity = clamp_or(
-            self.wallpaper_hero_opacity,
-            WALLPAPER_HERO_OPACITY_MIN,
-            WALLPAPER_HERO_OPACITY_MAX,
-            WALLPAPER_HERO_OPACITY_DEFAULT,
-        );
         if !VAULT_LOCK_CHOICES.contains(&self.vault_lock_minutes) {
             self.vault_lock_minutes = VAULT_LOCK_DEFAULT;
         }
@@ -448,40 +413,35 @@ mod tests {
         assert_eq!(s.clamped().scrollback_lines, SCROLLBACK_MIN);
     }
 
+    /// The wallpaper was removed: a file that still carries its keys loads, keeps its other
+    /// values, and the next save drops them.
+    #[test]
+    fn old_wallpaper_keys_are_ignored() {
+        let dir = temp_dir("old-wallpaper");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{
+                "sidebarWidth": 300.0,
+                "wallpaper": "/tmp/w.png",
+                "wallpaperHeroOpacity": 0.5,
+                "wallpaperEffect": "halftone",
+                "wallpaperHistory": ["/tmp/w.png"],
+                "wallpaperThemeColors": false,
+                "wallpaperFillsWindow": false
+            }"#,
+        )
+        .unwrap();
+        let loaded = Settings::load(&dir);
+        assert_eq!(loaded.sidebar_width, 300.0, "the file still parses");
+        loaded.save(&dir).unwrap();
+        let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(!saved.to_lowercase().contains("wallpaper"), "{saved}");
+    }
+
     #[test]
     fn missing_file_gives_defaults() {
         assert_eq!(Settings::load(&temp_dir("missing")), Settings::default());
-    }
-
-    #[test]
-    fn wallpaper_history_is_capped_when_loaded() {
-        let many = Settings {
-            wallpaper_history: (0..20).map(|i| format!("/w/{i}.png")).collect(),
-            ..Settings::default()
-        };
-        let kept = many.clamped().wallpaper_history;
-        assert_eq!(kept.len(), crate::wallpaper::HISTORY_LIMIT);
-        assert_eq!(kept[0], "/w/0.png");
-    }
-
-    #[test]
-    fn wallpaper_hero_opacity_is_clamped() {
-        let low = Settings {
-            wallpaper_hero_opacity: 0.0,
-            ..Settings::default()
-        };
-        assert_eq!(
-            low.clamped().wallpaper_hero_opacity,
-            WALLPAPER_HERO_OPACITY_MIN
-        );
-        let nan = Settings {
-            wallpaper_hero_opacity: f32::NAN,
-            ..Settings::default()
-        };
-        assert_eq!(
-            nan.clamped().wallpaper_hero_opacity,
-            WALLPAPER_HERO_OPACITY_DEFAULT
-        );
     }
 
     #[test]
@@ -501,12 +461,6 @@ mod tests {
             log_sessions: true,
             terminal_theme: Some("Dracula".into()),
             host_themes: BTreeMap::from([("grape".into(), "Nord".into())]),
-            wallpaper: Some("/tmp/w.png".into()),
-            wallpaper_hero_opacity: 0.5,
-            wallpaper_effect: crate::wallpaper_fx::Effect::Halftone,
-            wallpaper_history: vec!["/tmp/w.png".into(), "/tmp/v.png".into()],
-            wallpaper_theme_colors: false,
-            wallpaper_fills_window: false,
             sync_remote: Some("git@github.com:me/tern-sync.git".into()),
             cursor_style: CursorStyle::Bar,
             cursor_blink: true,
@@ -723,15 +677,6 @@ mod tests {
             with(|s| s.appearance = AppearanceMode::Light),
             Reapply {
                 palette: true,
-                ..Reapply::default()
-            }
-        );
-        // The wallpaper filling the window changes the palette and the terminals' background.
-        assert_eq!(
-            with(|s| s.wallpaper_fills_window = !s.wallpaper_fills_window),
-            Reapply {
-                palette: true,
-                terminal_style: true,
                 ..Reapply::default()
             }
         );

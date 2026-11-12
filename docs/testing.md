@@ -104,8 +104,7 @@ covered lines are actually checked. Use it to find *untouched* branches in `tern
 
 ### 5. End-to-end is by eye, never by UI automation
 
-The GUI is verified by running the real app and **looking at screenshots** (terminal over
-wallpaper, Settings, 1×/2× sharper text, light/dark), measuring with `getComputedStyle` where
+The GUI is verified by running the real app and **looking at screenshots** (terminal, Settings, 1×/2× sharper text, light/dark), measuring with `getComputedStyle` where
 a number matters — not with brittle UI specs. A UI test that asserts which element rendered is
 a change-detector test by another name. Unit, property and Go/Rust tests stay; UI automation
 does not. See `docs/ui.md` and the project memory on verifying by eye.
