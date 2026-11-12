@@ -17,11 +17,11 @@
 # Each run waits $TERN_MEASURE_SETTLE seconds (30) after launch, then reads `footprint -p`.
 #
 # Refused, not measured: nothing is drawn while the screen is locked or when tern's window is
-# behind another app, so every 2 s of the wait (and at the reading) the screen must be unlocked
-# and the front app must be this run's own process, compared by pid (the person's own tern has the
-# same name). The script brings each copy forward once at launch, through System Events; after
-# that, anything stealing focus is a refusal. Run it with the Mac awake; it holds the display
-# awake itself.
+# covered or off screen, so every 2 s of the wait (and at the reading) the screen must be unlocked
+# and at least half of the copy's window must be uncovered by other apps' windows
+# (scripts/measure-window.swift --visible). The copy need not be the front app: a script cannot
+# make it so without an Accessibility grant, and a window that shows is drawn either way. Run it
+# with the Mac awake and nothing over the middle of the screen; it holds the display awake itself.
 #
 # Safe beside the person's tern: each copy has its own TERN_CONFIG_DIR (so its own single-instance
 # lock), its own TERN_KNOWN_HOSTS and no Keychain use (the opt-in is off in the seeded settings),
@@ -91,15 +91,13 @@ done
 # --- readings ----------------------------------------------------------------------------------
 
 screen_locked() { [ "$( (ioreg -n Root -d1 | grep -c CGSSessionScreenIsLocked) || true)" != 0 ]; }
-front_pid() { lsappinfo info -only pid "$(lsappinfo front)" 2>/dev/null | sed -n 's/.*"\{0,1\}pid"\{0,1\} *= *\([0-9][0-9]*\).*/\1/p' | head -n 1; }
-
-# Refuses the sample unless the screen is unlocked and `$tern_pid` is the front app.
+# Refuses the sample unless the screen is unlocked and at least half of tern's window shows.
 ready() {
   screen_locked && refuse "the screen is locked ($1)"
   kill -0 "$tern_pid" 2>/dev/null || refuse "tern exited ($1)"
-  local front
-  front=$(front_pid)
-  [ "$front" = "$tern_pid" ] || refuse "tern is not in front, pid ${front:-unknown} is ($1)"
+  local shown
+  shown=$("$work/window" --visible "$tern_pid" 2>/dev/null || echo 0)
+  [ "${shown:-0}" -ge 50 ] || refuse "tern's window is covered or off screen, ${shown:-0}% shows ($1)"
 }
 
 # One `phys_footprint` line of `footprint -p`, in MB.
@@ -152,14 +150,8 @@ run() {
   while [ "$waited" -lt "$settle" ]; do
     sleep 2
     waited=$((waited + 2))
-    # `open` from a script does not bring the copy forward; a person would click it. Until the
-    # first check only: after that, anything taking focus is a refusal.
-    if [ "$waited" -lt 6 ]; then
-      osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $tern_pid) to true" \
-        >/dev/null 2>&1 || true
-    else
-      ready "$at, ${waited}s in"
-    fi
+    # The window needs a moment to appear; from 6 s on it must show.
+    [ "$waited" -lt 6 ] || ready "$at, ${waited}s in"
   done
   ready "$at, at the reading"
   local foot peak size
