@@ -179,6 +179,13 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
     })?;
     window.update(cx, |shell, window, cx| {
         crate::platform::apply_reduce_motion(shell.settings.reduce_motion, cx);
+        crate::drawables::apply(window);
+        // Resize, full screen and display changes all move the bounds; re-apply is a no-op
+        // while the count holds.
+        cx.observe_window_bounds(window, |_, window, _| {
+            crate::drawables::apply(window);
+        })
+        .detach();
         // macOS posts no notification gpui forwards, so re-read the preference whenever tern
         // comes to the front: the user changes it in System Settings, then switches back.
         cx.observe_window_activation(window, |shell, window, cx| {

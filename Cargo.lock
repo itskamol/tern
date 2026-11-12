@@ -4814,6 +4814,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
 ]
 
 [[package]]
@@ -7538,6 +7539,8 @@ dependencies = [
  "mimalloc",
  "nucleo-matcher",
  "objc2-app-kit 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "raw-window-handle",
  "security-framework 3.7.0",
  "serde",
  "serde_json",

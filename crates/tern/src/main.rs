@@ -6,6 +6,7 @@ mod chrome;
 mod connections;
 #[cfg(debug_assertions)]
 mod devkeys;
+mod drawables;
 mod empty_state;
 mod forward_spec;
 mod hover;
