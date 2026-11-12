@@ -18,7 +18,7 @@ pub enum Cause {
 }
 
 impl Cause {
-    /// The toast text: what happened to the Mac.
+    /// The Activity text: what happened to the Mac.
     pub fn message(self) -> &'static str {
         match self {
             Self::Sleep => "Vault locked: the Mac went to sleep",

@@ -13,7 +13,7 @@ use gpui::{
 };
 use tern_sync::{Plan, TokenSource};
 
-use super::{Shell, ToastKind};
+use super::Shell;
 use crate::keeper::Keeper;
 use crate::settings_widgets as w;
 use crate::text_input::TextInput;
@@ -67,7 +67,7 @@ pub(super) struct AutoSync {
     deadline: Option<Instant>,
     /// The last automatic failure: the data it failed on, when, and the text already shown.
     failed: Option<(String, Instant)>,
-    toasted: Option<String>,
+    alerted: Option<String>,
     /// The line shown in Settings → Sync.
     status: Option<String>,
 }
@@ -82,7 +82,7 @@ impl Default for AutoSync {
             seen: None,
             deadline: None,
             failed: None,
-            toasted: None,
+            alerted: None,
             status: None,
         }
     }
@@ -156,8 +156,8 @@ impl Shell {
         let saved = tern_sync::save_token(&token);
         ui.token_input.update(cx, |i, cx| i.set_text("", cx));
         match saved {
-            Ok(()) => self.notify_toast(ToastKind::Positive, "GitHub token saved", cx),
-            Err(e) => self.notify_toast(ToastKind::Critical, e.to_string(), cx),
+            Ok(()) => self.activity("GitHub token saved", cx),
+            Err(e) => self.alert_failed(e.to_string(), cx),
         }
         self.refresh_token_source(cx);
     }
@@ -169,8 +169,7 @@ impl Shell {
         let url = ui.repo_input.read(cx).text().trim().to_owned();
         let value = (!url.is_empty()).then_some(url);
         self.update_settings(|s| s.sync_remote = value.clone(), cx);
-        self.notify_toast(
-            ToastKind::Positive,
+        self.activity(
             match value {
                 Some(_) => "Syncing through your git repository",
                 None => "Syncing through a GitHub gist",
@@ -191,13 +190,9 @@ impl Shell {
                             .update(cx, |i, cx| i.set_text(url.clone(), cx));
                     }
                     s.update_settings(|st| st.sync_remote = Some(url.clone()), cx);
-                    s.notify_toast(
-                        ToastKind::Positive,
-                        format!("Private repo ready: {url}"),
-                        cx,
-                    );
+                    s.activity(format!("Private repo ready: {url}"), cx);
                 }
-                Err(e) => s.notify_toast(ToastKind::Critical, e.to_string(), cx),
+                Err(e) => s.alert_failed(e.to_string(), cx),
             });
         })
         .detach();
@@ -205,15 +200,15 @@ impl Shell {
 
     fn forget_token(&mut self, cx: &mut Context<Self>) {
         match tern_sync::forget_token() {
-            Ok(()) => self.notify_toast(ToastKind::Default, "GitHub token removed", cx),
-            Err(e) => self.notify_toast(ToastKind::Critical, e.to_string(), cx),
+            Ok(()) => self.activity("GitHub token removed", cx),
+            Err(e) => self.alert_failed(e.to_string(), cx),
         }
         self.refresh_token_source(cx);
     }
 
     /// Syncs. `force` settles a whole-bundle conflict (Push keeps this Mac, Pull takes the
     /// remote's copy); `resolve` answers a per-item conflict. `auto` is the background run:
-    /// it never asks for a passphrase and keeps its errors to the status line and one toast.
+    /// it never asks for a passphrase and keeps its errors to the status line and one Alert.
     fn sync_now(
         &mut self,
         force: Option<Plan>,
@@ -245,8 +240,7 @@ impl Shell {
         let (opening, since) = (open.is_none(), Keeper::writes(cx));
         if open.is_none() && passphrase.is_none() {
             if !auto {
-                self.notify_toast(
-                    ToastKind::Critical,
+                self.alert_failed(
                     "Enter the vault passphrase first: it encrypts what goes to GitHub",
                     cx,
                 );
@@ -320,40 +314,36 @@ impl Shell {
                 });
                 match &result {
                     Ok(Outcome::Conflict { .. }) => {
-                        if auto && s.auto_sync.toasted.is_none() {
-                            s.auto_sync.toasted = Some("conflict".into());
-                            s.notify_toast(
-                                ToastKind::Critical,
-                                "Sync needs your decision: open Settings, Sync",
-                                cx,
-                            );
+                        if auto && s.auto_sync.alerted.is_none() {
+                            s.auto_sync.alerted = Some("conflict".into());
+                            s.alert_failed("Sync needs your decision: open Settings, Sync", cx);
                         }
                     }
                     Ok(outcome) => {
-                        s.auto_sync.toasted = None;
+                        s.auto_sync.alerted = None;
                         s.auto_sync.failed = None;
                         // A quiet background run only speaks when something changed here.
-                        let (kind, text) = match outcome {
-                            Outcome::UpToDate => (ToastKind::Default, "Already up to date"),
-                            Outcome::Pushed => (ToastKind::Positive, "Uploaded to the remote"),
-                            Outcome::Pulled => (ToastKind::Positive, "Downloaded from the remote"),
-                            _ => (ToastKind::Positive, "Merged with the remote"),
+                        let text = match outcome {
+                            Outcome::UpToDate => "Already up to date",
+                            Outcome::Pushed => "Uploaded to the remote",
+                            Outcome::Pulled => "Downloaded from the remote",
+                            _ => "Merged with the remote",
                         };
                         if !auto || reload {
-                            s.notify_toast(kind, text, cx);
+                            s.activity(text, cx);
                         }
                     }
                     Err(e) if auto => {
                         if let Some(h) = started_on {
                             s.auto_sync.failed = Some((h, Instant::now()));
                         }
-                        // Offline retries must not repeat the same toast.
-                        if s.auto_sync.toasted.as_deref() != Some(e.as_str()) {
-                            s.auto_sync.toasted = Some(e.clone());
-                            s.notify_toast(ToastKind::Critical, e.clone(), cx);
+                        // Offline retries must not repeat the same Alert.
+                        if s.auto_sync.alerted.as_deref() != Some(e.as_str()) {
+                            s.auto_sync.alerted = Some(e.clone());
+                            s.alert_failed(e.clone(), cx);
                         }
                     }
-                    Err(e) => s.notify_toast(ToastKind::Critical, e.clone(), cx),
+                    Err(e) => s.alert_failed(e.clone(), cx),
                 }
                 if reload {
                     s.reload_from_disk(cx);

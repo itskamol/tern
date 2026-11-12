@@ -79,6 +79,11 @@ impl Shell {
         cx.notify();
     }
 
+    /// An Alert for something that did not work, with no action.
+    pub(crate) fn alert_failed(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.alert(Toast::new(super::ToastKind::Critical, text), cx);
+    }
+
     /// An Alert: a failure, or a message with one action. The snackbar, kept in the list too.
     pub(crate) fn alert(&mut self, toast: Toast, cx: &mut Context<Self>) {
         self.activity.messages.raise(

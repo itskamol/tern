@@ -8,8 +8,8 @@ use gpui::{
 };
 use tern_vault::Key;
 
+use super::Shell;
 use super::vault_ui::describe_entry;
-use super::{Shell, ToastKind};
 use crate::icons::{self, icon};
 use crate::keeper::{self, Keeper};
 use crate::settings_widgets as w;
@@ -265,7 +265,7 @@ impl Shell {
                 w::button(&t, "vault-copy-new", "Copy").on_click(cx.listener(
                     move |s, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(line.clone()));
-                        s.notify_toast(ToastKind::Positive, "Public key copied", cx);
+                        s.activity("Public key copied", cx);
                     },
                 )),
             ));

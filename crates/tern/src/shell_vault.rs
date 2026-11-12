@@ -207,7 +207,7 @@ impl Shell {
                 match tried {
                     Tried::Opened => {
                         s.clear_inputs(&[&input], cx);
-                        s.notify_toast(ToastKind::Positive, "Vault unlocked", cx);
+                        s.activity("Vault unlocked", cx);
                     }
                     Tried::Again { message, .. } | Tried::Failed(message) => {
                         s.vault_message(false, message, cx);
@@ -262,7 +262,7 @@ impl Shell {
                             let (a, b) = (ui.new.clone(), ui.confirm.clone());
                             s.clear_inputs(&[&a, &b], cx);
                         }
-                        s.notify_toast(ToastKind::Positive, "Vault created", cx);
+                        s.activity("Vault created", cx);
                     }
                     Err(e) => s.vault_message(false, format!("Could not create it: {e}"), cx),
                 }
@@ -308,7 +308,7 @@ impl Shell {
                             let (a, b) = (ui.pin_new.clone(), ui.pin_repeat.clone());
                             s.clear_inputs(&[&a, &b], cx);
                         }
-                        s.notify_toast(ToastKind::Positive, "Vault PIN set", cx);
+                        s.activity("Vault PIN set", cx);
                     }
                     Err(e) => s.vault_message(false, e, cx),
                 }
@@ -320,8 +320,8 @@ impl Shell {
 
     pub(super) fn clear_vault_pin(&mut self, cx: &mut Context<Self>) {
         match Keeper::clear_pin(cx) {
-            Ok(()) => self.notify_toast(ToastKind::Default, "Vault PIN removed", cx),
-            Err(e) => self.notify_toast(ToastKind::Critical, e, cx),
+            Ok(()) => self.activity("Vault PIN removed", cx),
+            Err(e) => self.alert_failed(e, cx),
         }
         cx.notify();
     }
@@ -332,7 +332,7 @@ impl Shell {
             if let Some(ui) = self.vault_ui.as_mut() {
                 ui.shown_key = None;
             }
-            self.notify_toast(ToastKind::Default, "Vault locked", cx);
+            self.activity("Vault locked", cx);
         }
     }
 
@@ -343,7 +343,7 @@ impl Shell {
             if let Some(ui) = self.vault_ui.as_mut() {
                 ui.shown_key = None;
             }
-            self.notify_toast(ToastKind::Default, cause.message(), cx);
+            self.activity(cause.message(), cx);
         }
     }
 
@@ -361,11 +361,7 @@ impl Shell {
                         && keeper::idle_expired(s.last_input.elapsed(), minutes)
                     {
                         Keeper::lock(cx);
-                        s.notify_toast(
-                            ToastKind::Default,
-                            format!("Vault locked after {minutes} minutes idle"),
-                            cx,
-                        );
+                        s.activity(format!("Vault locked after {minutes} minutes idle"), cx);
                     }
                 });
                 if alive.is_err() {
@@ -386,11 +382,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             if let Err(e) = task.await {
                 let _ = this.update(cx, |s, cx| {
-                    s.notify_toast(
-                        ToastKind::Critical,
-                        format!("Could not save the vault: {e}"),
-                        cx,
-                    )
+                    s.alert_failed(format!("Could not save the vault: {e}"), cx)
                 });
             }
         })
@@ -405,7 +397,7 @@ impl Shell {
         self.persist_vault(cx);
         let (title, _) = describe_entry(key, &self.hosts);
         let undo_key = key.clone();
-        self.toast(
+        self.alert(
             Toast::new(
                 ToastKind::Default,
                 format!("Removed {title} from the vault"),
@@ -420,8 +412,7 @@ impl Shell {
 
     fn restore_secret(&mut self, key: Key, value: SecretString, cx: &mut Context<Self>) {
         if Keeper::edit(cx, |v| v.set(key, value)).is_none() {
-            return self.notify_toast(
-                ToastKind::Critical,
+            return self.alert_failed(
                 "The vault is locked: unlock it, then save the entry again",
                 cx,
             );
@@ -467,7 +458,7 @@ impl Shell {
             let (n, p) = (ui.key_name.clone(), ui.key_path.clone());
             self.clear_inputs(&[&n, &p], cx);
         }
-        self.notify_toast(ToastKind::Positive, format!("Key {name} saved"), cx);
+        self.activity(format!("Key {name} saved"), cx);
         cx.notify();
     }
 
@@ -529,9 +520,9 @@ impl Shell {
         match keys::inspect(private.expose_secret()) {
             Ok(info) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(info.public));
-                self.notify_toast(ToastKind::Positive, "Public key copied", cx);
+                self.activity("Public key copied", cx);
             }
-            Err(e) => self.notify_toast(ToastKind::Critical, e.to_string(), cx),
+            Err(e) => self.alert_failed(e.to_string(), cx),
         }
     }
 
@@ -611,7 +602,7 @@ impl Shell {
                         } else {
                             "Vault passphrase changed"
                         };
-                        s.notify_toast(ToastKind::Positive, text, cx);
+                        s.activity(text, cx);
                     }
                     Err(VaultError::WrongPassphrase) => {
                         s.vault_message(false, "The current passphrase is wrong.", cx)
@@ -629,8 +620,7 @@ impl Shell {
         match Keeper::set_keychain(on, cx) {
             Ok(()) => {
                 self.update_settings(|s| s.vault_keychain = on, cx);
-                self.notify_toast(
-                    ToastKind::Default,
+                self.activity(
                     if on {
                         "The vault will open the first time tern needs it"
                     } else {
@@ -639,7 +629,7 @@ impl Shell {
                     cx,
                 );
             }
-            Err(e) => self.notify_toast(ToastKind::Critical, e, cx),
+            Err(e) => self.alert_failed(e, cx),
         }
     }
 }
