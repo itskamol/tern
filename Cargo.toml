@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 rust-version = "1.99"
@@ -13,10 +13,10 @@ repository = "https://github.com/itskamol/tern"
 
 [workspace.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls", "json"] }
-tern-ssh = { path = "crates/tern-ssh", version = "0.3.0" }
-tern-sync = { path = "crates/tern-sync", version = "0.3.0" }
-tern-term = { path = "crates/tern-term", version = "0.3.0" }
-tern-vault = { path = "crates/tern-vault", version = "0.3.0" }
+tern-ssh = { path = "crates/tern-ssh", version = "0.3.1" }
+tern-sync = { path = "crates/tern-sync", version = "0.3.1" }
+tern-term = { path = "crates/tern-term", version = "0.3.1" }
+tern-vault = { path = "crates/tern-vault", version = "0.3.1" }
 # Exact pin: russh pins the same pre-release, so tern-vault shares its copy.
 ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["ed25519", "std"] }
 rand = { version = "0.10", features = ["thread_rng"] }

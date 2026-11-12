@@ -4,6 +4,12 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-12
+
+### Fixed
+
+- Updates are found again. The app never knew its GitHub repository, so the daily check and Check for Updates… did nothing, without a word, in 0.2.0 and 0.3.0. From 0.3.1 tern finds, downloads and installs new releases by itself; a tern at 0.2.0 or 0.3.0 needs one `brew upgrade --cask tern` to get here.
+
 ## [0.3.0] - 2026-11-12
 
 ### Added
@@ -200,7 +206,8 @@ The first release: a daily-driver SSH client for macOS.
 - Secrets are held as zeroizing `SecretString`s and never logged; session output is redacted from `Debug`.
 - RUSTSEC-2023-0071 in `rsa` (via russh) is accepted for now; see [SECURITY.md](SECURITY.md) and #16.
 
-[Unreleased]: https://github.com/itskamol/tern/compare/v0.3.0...main
+[Unreleased]: https://github.com/itskamol/tern/compare/v0.3.1...main
+[0.3.1]: https://github.com/itskamol/tern/releases/tag/v0.3.1
 [0.3.0]: https://github.com/itskamol/tern/releases/tag/v0.3.0
 [0.2.0]: https://github.com/itskamol/tern/releases/tag/v0.2.0
 [0.1.3]: https://github.com/your-moon/tern/releases/tag/v0.1.3
