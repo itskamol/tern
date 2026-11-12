@@ -4,15 +4,18 @@
 //! it, ⌫ deletes it from the history, ⌘A switches between this host and all hosts, Esc closes.
 //! Settings → Command history clears one host's history or all of it.
 //!
-//! ⌫ deletes, so the query is edited with ⌥⌫ (one character) and ⌃U (all of it). The matches
-//! are found when the query, the scope or the history changes, never while drawing.
+//! The query is the shared text field, so text arrives through the platform's input handler (IME
+//! and dead keys included). ⌫ deletes the highlighted line, so the query is edited with ⌥⌫ (the
+//! field's own: one word) and ⌃U (all of it). The matches are found when the query, the scope or
+//! the history changes, never while drawing.
 
 use crate::hover::HoverFade as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Window, actions, anchored, deferred, div, point, px,
+    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, Focusable as _,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window, actions, anchored, deferred, div,
+    point, px,
 };
 
 use super::{Shell, ToastKind};
@@ -20,7 +23,7 @@ use crate::command_history::{CommandHistory, Entry, Scope};
 use crate::picker;
 use crate::session::Put;
 use crate::settings_widgets as w;
-use crate::text_input::SelectAll;
+use crate::text_input::{Backspace, SelectAll, TextInput};
 
 actions!(tern, [ToggleCommandHistory]);
 
@@ -44,12 +47,34 @@ struct HistoryWindow {
     /// The focused pane's host.
     alias: String,
     all: bool,
+    /// The search field: text reaches it through the platform's input handler, so IME and dead
+    /// keys work and synthetic input is typed as it is everywhere else.
+    input: Entity<TextInput>,
+    /// What the field held when the matches were last found.
     query: String,
     active: usize,
     /// What the query finds, newest first or best first.
     entries: Vec<Entry>,
-    focus: FocusHandle,
     scroll: ScrollHandle,
+    _watch: Subscription,
+}
+
+/// Calls `changed` with the field's text each time it differs from the last text seen, and
+/// repaints the host either way.
+fn watch_query<T: 'static>(
+    input: &Entity<TextInput>,
+    changed: impl Fn(&mut T, &str, &mut Context<T>) + 'static,
+    cx: &mut Context<T>,
+) -> Subscription {
+    let mut last = String::new();
+    cx.observe(input, move |this, input, cx| {
+        let text = input.read(cx).text().to_owned();
+        if text != last {
+            changed(this, &text, cx);
+            last = text;
+        }
+        cx.notify();
+    })
 }
 
 /// What a keystroke does in the open window.
@@ -57,15 +82,13 @@ struct HistoryWindow {
 enum Key {
     Move(isize),
     Put { run: bool },
-    Delete,
     ToggleAll,
     Close,
-    Erase,
     ClearQuery,
-    Type(String),
     Ignore,
 }
 
+/// The window's own keys; ⌫ is the `Backspace` action, taken before the field sees it.
 fn classify(event: &KeyDownEvent) -> Key {
     let ks = &event.keystroke;
     let mods = &ks.modifiers;
@@ -78,15 +101,8 @@ fn classify(event: &KeyDownEvent) -> Key {
         "a" if mods.platform => Key::ToggleAll,
         "enter" => Key::Put { run: mods.platform },
         "escape" => Key::Close,
-        "backspace" if mods.alt => Key::Erase,
-        // A held key would delete a screenful of lines.
-        "backspace" if event.is_held => Key::Ignore,
-        "backspace" => Key::Delete,
-        _ if mods.platform || mods.control => Key::Ignore,
-        _ => match &ks.key_char {
-            Some(text) if !text.chars().any(char::is_control) => Key::Type(text.clone()),
-            _ => Key::Ignore,
-        },
+        // Anything else is the field's: text comes through its input handler, not from here.
+        _ => Key::Ignore,
     }
 }
 
@@ -121,16 +137,29 @@ impl Shell {
         };
         let alias = session.read(cx).alias().to_owned();
         self.picker = None;
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
+        let colors = self.theme.input_colors();
+        let input = cx.new(|cx| TextInput::new("Search command history…", false, colors, cx));
+        window.focus(&input.focus_handle(cx), cx);
+        let watch = watch_query(
+            &input,
+            |shell: &mut Shell, text, cx| {
+                if let Some(win) = shell.history.window.as_mut() {
+                    win.query = text.to_owned();
+                    win.active = 0;
+                }
+                shell.history_search(cx);
+            },
+            cx,
+        );
         self.history.window = Some(HistoryWindow {
             alias,
             all: false,
+            input,
             query: String::new(),
             active: 0,
             entries: Vec::new(),
-            focus,
             scroll: ScrollHandle::new(),
+            _watch: watch,
         });
         self.history_search(cx);
         cx.notify();
@@ -176,35 +205,19 @@ impl Shell {
         };
         let shown = win.entries.len().min(ROWS);
         let active = win_active(win);
-        let mut research = true;
         match key {
             Key::Move(delta) => {
-                research = false;
                 if shown > 0 {
                     win.active = crate::tabs::step(win.active, shown, delta);
                     win.scroll.scroll_to_item(win.active);
                 }
             }
-            Key::Type(text) => {
-                win.query.push_str(&text);
-                win.active = 0;
-            }
-            Key::Erase => {
-                win.query.pop();
-                win.active = 0;
-            }
-            Key::ClearQuery => {
-                win.query.clear();
-                win.active = 0;
-            }
+            // The field reports the change, and the matches are found then.
+            Key::ClearQuery => win.input.update(cx, |input, cx| input.set_text("", cx)),
             Key::ToggleAll => return self.history_toggle_scope(cx),
             Key::Put { run } => return self.put_history_line(active, run, window, cx),
-            Key::Delete => return self.delete_history_line(cx),
             Key::Close => return self.close_command_history(window, cx),
-            Key::Ignore => research = false,
-        }
-        if research {
-            self.history_search(cx);
+            Key::Ignore => {}
         }
         cx.notify();
     }
@@ -332,11 +345,6 @@ impl Shell {
                         .child(SharedString::from(ago(now, e.at))),
                 )
         });
-        let query: SharedString = if win.query.is_empty() {
-            "Search command history…".into()
-        } else {
-            win.query.clone().into()
-        };
         let scope = if win.all {
             "All hosts".to_owned()
         } else {
@@ -344,7 +352,6 @@ impl Shell {
         };
         let card = div()
             .id("command-history")
-            .track_focus(&win.focus)
             .w(px(640.0_f32.min(f32::from(viewport.width) - 32.0)))
             .flex()
             .flex_col()
@@ -354,7 +361,16 @@ impl Shell {
             .bg(t.popup)
             .text_color(t.text)
             .on_key_down(cx.listener(Self::on_history_key))
-            .on_action(cx.listener(|s, _: &SelectAll, _, cx| s.history_toggle_scope(cx)))
+            // The field would take these first (select all, delete a character); the window is
+            // above it, so it takes them in the capture phase.
+            .capture_action(cx.listener(|s, _: &SelectAll, _, cx| {
+                s.history_toggle_scope(cx);
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|s, _: &Backspace, _, cx| {
+                s.delete_history_line(cx);
+                cx.stop_propagation();
+            }))
             .on_mouse_down_out(
                 cx.listener(|shell, _, window, cx| shell.close_command_history(window, cx)),
             )
@@ -372,10 +388,8 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
                             .text_size(px(14.))
-                            .when(win.query.is_empty(), |el| el.text_color(t.faint))
-                            .child(query),
+                            .child(win.input.clone()),
                     )
                     .child(
                         div()
@@ -567,8 +581,79 @@ fn overlay(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
-    use super::ago;
+    use super::{Key, ago, classify, watch_query};
+    use crate::text_input::{InputColors, TextInput};
+    use gpui::AppContext as _;
+    use gpui::{
+        AnyWindowHandle, Context, Entity, Focusable as _, IntoElement, KeyDownEvent, Keystroke,
+        ParentElement, Render, Subscription, TestAppContext, VisualTestContext, Window, div, hsla,
+    };
+
+    fn typed(key: &str) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Default::default(),
+                key: key.into(),
+                key_char: Some(key.into()),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    #[test]
+    fn a_character_key_is_not_the_windows_to_read() {
+        // Text reaches the query through the field's input handler; `key_char` is not it.
+        assert_eq!(classify(&typed("s")), Key::Ignore);
+        assert_eq!(classify(&typed("u")), Key::Ignore);
+    }
+
+    /// The window's stand-in for `Shell`: a field and the texts the watcher reported.
+    struct Host {
+        input: Entity<TextInput>,
+        seen: Vec<String>,
+        _watch: Subscription,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().child(self.input.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn text_delivered_through_the_input_handler_reaches_the_query(cx: &mut TestAppContext) {
+        let handle = cx.add_window(|window, cx| {
+            let colors = InputColors {
+                text: hsla(0., 0., 1., 1.),
+                placeholder: hsla(0., 0., 0.5, 1.),
+                cursor: hsla(0., 0., 1., 1.),
+                selection: hsla(0., 0., 0.5, 0.3),
+            };
+            let input = cx.new(|cx| TextInput::new("Search", false, colors, cx));
+            window.focus(&input.focus_handle(cx), cx);
+            let _watch = watch_query(
+                &input,
+                |host: &mut Host, text, _| host.seen.push(text.to_owned()),
+                cx,
+            );
+            Host {
+                input,
+                seen: Vec::new(),
+                _watch,
+            }
+        });
+        let window: AnyWindowHandle = handle.into();
+        let mut vcx = VisualTestContext::from_window(window, cx);
+        vcx.simulate_input("sud");
+        let host = handle.root(&mut vcx).expect("root");
+        host.read_with(&vcx, |host, cx| {
+            assert_eq!(host.input.read(cx).text(), "sud");
+            assert_eq!(host.seen, ["s", "su", "sud"]);
+        });
+    }
 
     #[test]
     fn ago_names_the_biggest_whole_unit() {
