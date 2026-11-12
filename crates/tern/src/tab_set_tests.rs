@@ -580,3 +580,51 @@ fn the_focused_pane_s_place_in_reading_order_follows_the_keyboard() {
     tabs.focus_pane(below);
     assert_eq!(tabs.active_tab().unwrap().focus_in_reading_order(), 2);
 }
+
+#[test]
+fn zoom_shows_the_focused_pane_alone_and_unzoom_brings_the_split_back_as_it_was() {
+    let mut tabs = side_by_side();
+    let before = tabs.active_tab().unwrap().layout();
+    assert!(tabs.toggle_zoom());
+    assert_eq!(tabs.active_tab().unwrap().zoomed(), Some(2));
+    assert_eq!(
+        tabs.active_tab().unwrap().panes().len(),
+        2,
+        "every pane stays"
+    );
+    assert!(tabs.toggle_zoom());
+    assert_eq!(tabs.active_tab().unwrap().zoomed(), None);
+    assert_eq!(tabs.active_tab().unwrap().layout(), before);
+}
+
+#[test]
+fn a_tab_of_one_pane_has_nothing_to_zoom() {
+    let (mut tabs, _) = set(&["a"]);
+    assert!(!tabs.toggle_zoom());
+    assert_eq!(tabs.active_tab().unwrap().zoomed(), None);
+}
+
+#[test]
+fn moving_focus_splitting_or_closing_a_pane_ends_the_zoom() {
+    let mut tabs = side_by_side();
+    tabs.toggle_zoom();
+    assert!(tabs.focus_pane(1));
+    assert_eq!(tabs.active_tab().unwrap().zoomed(), None);
+
+    tabs.toggle_zoom();
+    let id = tabs.new_pane_id();
+    tabs.split(1, Direction::Down, pane(id), floor()).unwrap();
+    assert_eq!(tabs.active_tab().unwrap().zoomed(), None);
+
+    tabs.toggle_zoom();
+    assert!(tabs.close_pane().is_some());
+    assert_eq!(tabs.active_tab().unwrap().zoomed(), None);
+}
+
+#[test]
+fn zoom_is_not_saved() {
+    let mut tabs = side_by_side();
+    let before = format!("{:?}", tabs.saved());
+    tabs.toggle_zoom();
+    assert_eq!(format!("{:?}", tabs.saved()), before);
+}

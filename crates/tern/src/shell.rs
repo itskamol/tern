@@ -42,6 +42,7 @@ actions!(
         ResizePaneUp,
         ResizePaneDown,
         EqualizePanes,
+        ZoomPane,
         ClosePane,
         FocusPaneLeft,
         FocusPaneRight,
@@ -475,6 +476,7 @@ impl Shell {
                 broadcast: self.is_broadcasting(tab.id),
                 dots: tabs::tab_dots(panes.iter().map(|p| p.session().map(|s| s.read(cx).dot()))),
                 front: tab.focus_in_reading_order(),
+                zoomed: tab.zoomed().is_some(),
                 rename: self
                     .renaming
                     .as_ref()

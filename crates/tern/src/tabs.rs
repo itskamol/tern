@@ -69,6 +69,8 @@ pub struct TabInfo {
     pub dots: Vec<Dot>,
     /// Which of `dots` is the focused pane's.
     pub front: usize,
+    /// One pane fills the tab for now; the split comes back with ⇧⌘↩.
+    pub zoomed: bool,
     /// The field that is editing this tab's title right now.
     pub rename: Option<Entity<TextInput>>,
 }
@@ -343,18 +345,10 @@ fn tab_pill(
                 .into_any_element(),
         })
         .when(tab.heading.others > 0, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .px(px(5.))
-                    .py(px(1.))
-                    .rounded(px(3.))
-                    .bg(t.row_active)
-                    .text_color(t.muted)
-                    .text_size(px(10.))
-                    .child(format!("+{}", tab.heading.others)),
-            )
+            el.child(badge(format!("+{}", tab.heading.others).into(), t))
         })
+        // The tab's other panes are still there, out of sight.
+        .when(tab.zoomed, |el| el.child(badge("zoomed".into(), t)))
         .when(tab.broadcast, |el| {
             el.child(
                 div()
@@ -437,6 +431,7 @@ fn tab_label(tab: &TabInfo) -> String {
     let more = format!("{} more panes", tab.heading.others);
     for (on, words) in [
         (tab.heading.others > 0, more.as_str()),
+        (tab.zoomed, "zoomed"),
         (tab.broadcast, "broadcasting"),
         (tab.logging, "logging"),
         (true, status_words(tab.dot()).unwrap_or_default()),
@@ -452,6 +447,19 @@ fn tab_label(tab: &TabInfo) -> String {
 
 /// zeron's `zeron-pulse` loader: 2.4 s, opacity 0.08 → 1.
 const PULSE: Duration = Duration::from_millis(2400);
+
+/// A small note on a tab's pill: how many more panes it holds, or that one is zoomed.
+fn badge(text: SharedString, t: &Theme) -> impl IntoElement + use<> {
+    div()
+        .flex_none()
+        .px(px(5.))
+        .py(px(1.))
+        .rounded(px(3.))
+        .bg(t.row_active)
+        .text_color(t.muted)
+        .text_size(px(10.))
+        .child(text)
+}
 
 /// zeron's status dot.
 const DOT: f32 = 6.0;
@@ -543,6 +551,14 @@ mod tests {
     use crate::indicator::Dot;
 
     #[test]
+    fn a_zoomed_tab_says_so_after_its_other_panes() {
+        let mut tab = info(Dot::Connected);
+        tab.heading.others = 2;
+        tab.zoomed = true;
+        assert!(tab_label(&tab).starts_with("web, 2 more panes, zoomed"));
+    }
+
+    #[test]
     fn a_tab_has_one_dot_per_pane_in_order_and_a_files_pane_is_idle() {
         assert_eq!(
             tab_dots([Some(Dot::Connected), Some(Dot::Closed), None]),
@@ -573,6 +589,7 @@ mod tests {
             broadcast: false,
             dots: vec![dot],
             front: 0,
+            zoomed: false,
             rename: None,
         }
     }

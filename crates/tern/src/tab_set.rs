@@ -62,6 +62,9 @@ pub struct Tab<P> {
     /// The pane with the keyboard; always one of `panes`.
     focused: PaneId,
     panes: Vec<P>,
+    /// The pane filling the tab for a moment (⇧⌘↩); the tree keeps the split for when it ends.
+    /// Never saved: a relaunch opens the split.
+    zoomed: Option<PaneId>,
 }
 
 impl<P: Paned> Tab<P> {
@@ -74,6 +77,7 @@ impl<P: Paned> Tab<P> {
             tree: Node::Leaf(first),
             focused: first,
             panes: vec![pane],
+            zoomed: None,
         }
     }
 
@@ -87,6 +91,10 @@ impl<P: Paned> Tab<P> {
 
     pub fn focused(&self) -> PaneId {
         self.focused
+    }
+
+    pub fn zoomed(&self) -> Option<PaneId> {
+        self.zoomed
     }
 
     pub fn panes(&self) -> &[P] {
@@ -312,7 +320,23 @@ impl<P: Paned> TabSet<P> {
         }
         tab.panes.push(pane);
         tab.focused = id;
+        tab.zoomed = None;
         Ok(())
+    }
+
+    /// Zooms the front tab's focused pane, or ends the zoom. False when the tab has one pane.
+    pub fn toggle_zoom(&mut self) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return false;
+        };
+        if tab.panes.len() < 2 {
+            return false;
+        }
+        tab.zoomed = match tab.zoomed {
+            Some(_) => None,
+            None => Some(tab.focused),
+        };
+        true
     }
 
     /// Moves the divider beside `pane` of the front tab, on its `side`, so the split's first
@@ -359,6 +383,7 @@ impl<P: Paned> TabSet<P> {
         tab.tree = tree.remove(tab.focused)?;
         let ix = tab.panes.iter().position(|p| p.pane_id() == tab.focused)?;
         tab.focused = next;
+        tab.zoomed = None;
         Some(tab.panes.remove(ix))
     }
 
@@ -372,6 +397,7 @@ impl<P: Paned> TabSet<P> {
             return false;
         }
         tab.focused = id;
+        tab.zoomed = None;
         true
     }
 

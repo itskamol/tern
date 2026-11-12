@@ -51,10 +51,11 @@ pub enum ShortcutId {
     FillPassword,
     ClearTerminal,
     CommandHistory,
+    ZoomPane,
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 27] = [
+    pub const ALL: [ShortcutId; 28] = [
         ShortcutId::HostPicker,
         ShortcutId::SearchHosts,
         ShortcutId::Snippets,
@@ -82,6 +83,7 @@ impl ShortcutId {
         ShortcutId::FillPassword,
         ShortcutId::ClearTerminal,
         ShortcutId::CommandHistory,
+        ShortcutId::ZoomPane,
     ];
 
     pub fn label(self) -> &'static str {
@@ -113,6 +115,7 @@ impl ShortcutId {
             ShortcutId::FillPassword => "Fill password",
             ShortcutId::ClearTerminal => "Clear scrollback",
             ShortcutId::CommandHistory => "Command history",
+            ShortcutId::ZoomPane => "Zoom pane",
         }
     }
 
@@ -146,6 +149,7 @@ impl ShortcutId {
             ShortcutId::ClearTerminal => "cmd-k",
             // Free in the workspace; cmd-shift-r if it is ever taken.
             ShortcutId::CommandHistory => "cmd-r",
+            ShortcutId::ZoomPane => "shift-cmd-enter",
         }
     }
 
@@ -180,6 +184,7 @@ impl ShortcutId {
             ShortcutId::ClearTerminal => "ctrl-shift-k",
             // Ctrl+R alone is the shell's reverse search.
             ShortcutId::CommandHistory => "ctrl-shift-r",
+            ShortcutId::ZoomPane => "ctrl-shift-enter",
         }
     }
 
@@ -227,6 +232,7 @@ impl ShortcutId {
             ShortcutId::FillPassword => Box::new(crate::shell::FillPassword),
             ShortcutId::ClearTerminal => Box::new(crate::shell::ClearTerminal),
             ShortcutId::CommandHistory => Box::new(crate::shell::ToggleCommandHistory),
+            ShortcutId::ZoomPane => Box::new(crate::shell::ZoomPane),
         }
     }
 }

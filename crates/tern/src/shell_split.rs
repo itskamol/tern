@@ -247,9 +247,20 @@ impl Shell {
         cx.notify();
     }
 
-    /// The tab's terminals, in their split layout.
+    /// The focused pane fills the tab, or the split comes back (⇧⌘↩). Every session keeps
+    /// running behind a zoom; a pane hidden by it keeps its size until it shows again.
+    pub(crate) fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.toggle_zoom() {
+            cx.notify();
+        }
+    }
+
+    /// The tab's terminals, in their split layout, or the zoomed one alone.
     pub(super) fn render_panes(&self, tab: &Tab, cx: &mut Context<Self>) -> AnyElement {
-        self.render_node(tab, tab.tree(), tab.panes().len() > 1, cx)
+        match tab.zoomed() {
+            Some(id) => self.render_pane(tab, id, false, cx),
+            None => self.render_node(tab, tab.tree(), tab.panes().len() > 1, cx),
+        }
     }
 
     fn render_node(
@@ -489,6 +500,7 @@ pub(super) fn pane_actions(root: gpui::Div, cx: &mut Context<Shell>) -> gpui::Di
     .on_action(cx.listener(|s, _: &ResizePaneUp, _, cx| s.step_pane(Up, cx)))
     .on_action(cx.listener(|s, _: &ResizePaneDown, _, cx| s.step_pane(Down, cx)))
     .on_action(cx.listener(|s, _: &EqualizePanes, _, cx| s.equalize_panes(cx)))
+    .on_action(cx.listener(|s, _: &ZoomPane, _, cx| s.toggle_zoom(cx)))
     .on_action(cx.listener(|s, _: &ClosePane, w, cx| s.close_pane_or_tab(w, cx)))
     .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| s.move_pane_focus(Left, w, cx)))
     .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| s.move_pane_focus(Right, w, cx)))
