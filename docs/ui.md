@@ -6,14 +6,18 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 
 ## No-slop rules
 
-- **Every number comes from zeron's source, never from eyeballing.** Each value below names where it came from.
-  When the inventory (written for the old Electron app) and the native code disagree, the native code wins.
+- **Every number names its source, never eyeballing.** In order: zeron's source; then another named
+  design system, adapted with an attribution header (the snackbar is from seed-design); then a value
+  worked out from tern's own tokens, written as the sum (the Files panel width is the sidebar's,
+  208–400, default 256). A number picked in a prototype is not a source. Each value below names
+  where it came from. When the inventory (written for the old Electron app) and the native code
+  disagree, the native code wins.
 - **Nothing generic.** No stock gradients, no emoji in chrome, no default gpui-component look left
   untouched, no placeholder buttons that do nothing. A control ships working or doesn't ship.
 - **Copy the implementation, not just the look.** Motion, sizing and the theme layer stack are taken
   from zeron's `motion.rs` / `theme.rs` / `shell.rs` and adapted, with the attribution header.
 - **Checked by eye.** Each feature is accepted only after a screenshot of the running app is put next to
-  zeron's and looked at. Numbers that matter are measured from the running app.
+  zeron's (or the named source's) and looked at. Numbers that matter are measured from the running app.
 
 ## Window shell
 

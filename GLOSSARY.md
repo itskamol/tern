@@ -51,6 +51,28 @@ _Avoid_: right pane
 A tab showing two file panels side by side, each the Mac's own files or one host's, for copying between them.
 _Avoid_: SFTP browser, file manager
 
+**Files panel**:
+A side panel showing one host's files: the host of the focused pane, starting at its shell folder.
+_Avoid_: drawer, SFTP sidebar
+
+**Shell folder**:
+The folder a session's shell says it is in, when the shell says so; the Files panel follows it.
+_Avoid_: cwd, working directory (in the UI)
+
+## Messages
+
+**Activity**:
+A message that needs nothing from the person ("Copied 3 files"): shown quietly and kept in a list.
+_Avoid_: toast, snackbar, notification
+
+**Alert**:
+A message the person should see now: a failure, or one with a single action such as Undo.
+_Avoid_: toast, snackbar, error popup
+
+**Decision**:
+A question tern cannot go on without, such as letting a host set the clipboard; it stays until answered.
+_Avoid_: modal, prompt, confirm dialog
+
 ## At the prompt
 
 **Command history**:
