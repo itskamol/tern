@@ -158,6 +158,17 @@ impl Scene {
         });
     }
 
+    /// The session's Shell folder as `host:path`.
+    fn shell_folder(&mut self) -> Option<String> {
+        let session = self.session.clone();
+        self.app.read(|cx| {
+            session
+                .read(cx)
+                .shell_folder()
+                .map(|f| format!("{}:{}", f.host, f.path))
+        })
+    }
+
     /// The command history of the host this session is on, newest first.
     fn history(&mut self) -> Vec<String> {
         self.app.read(|cx| {
@@ -475,4 +486,19 @@ fn without_marks_a_line_redrawn_further_down_is_not_guessed_at() {
     s.keys("\r");
     s.settle();
     assert!(s.history().is_empty());
+}
+
+#[test]
+fn the_folder_the_server_s_shell_reports_becomes_the_session_s_shell_folder() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    assert_eq!(s.shell_folder(), None);
+    s.remote_prints("\x1b]7;file://demo/var/log\x07test@demo:/var/log$ ");
+    s.settle();
+    assert_eq!(s.shell_folder().as_deref(), Some("demo:/var/log"));
+    // A nested ssh reports another host's folder: kept, with that host, for the app to judge.
+    s.remote_prints("\x1b]7;file://db-02/srv%20data\x1b\\");
+    s.settle();
+    assert_eq!(s.shell_folder().as_deref(), Some("db-02:/srv data"));
+    assert!(s.screen().contains("test@demo:/var/log$"));
 }

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tern_ssh::{
     ConnectSpec, InputError, MemoryKey, SecretString, SessionEvent, SessionHandle, TermSize,
 };
-use tern_term::{Terminal, TerminalEvent, TerminalView};
+use tern_term::{ShellFolder, Terminal, TerminalEvent, TerminalView};
 
 use crate::indicator::Dot;
 use crate::keeper::Keeper;
@@ -114,6 +114,8 @@ pub struct Session {
     /// Every connection of this session is logged, as the settings ask.
     auto_log: bool,
     size: TermSize,
+    /// The last folder the remote shell reported (OSC 7), with the host it named.
+    shell_folder: Option<ShellFolder>,
     /// Redraws the countdown and dials when it is due; dropping it cancels the dial.
     retry_tick: Option<Task<()>>,
     /// Forwards running on the current connection.
@@ -178,6 +180,7 @@ impl Session {
                 mirrors: Vec::new(),
                 auto_log,
                 size,
+                shell_folder: None,
                 retry_tick: None,
                 forward_handles: Vec::new(),
                 _session_events: Task::ready(()),
@@ -322,6 +325,8 @@ impl Session {
             self.start_auto_log();
         }
         self.connected_at = None;
+        // A new shell may never report a folder; the last one's must not stand in for it.
+        self.shell_folder = None;
         self.ended_at = None;
         self.latency = None;
         self.begin(cx);
@@ -361,6 +366,16 @@ impl Session {
     /// The connection names vault keys, and the vault is locked.
     fn keys_need_unlock(link: &Link, cx: &App) -> bool {
         !link.vault_keys.is_empty() && Keeper::locked(cx)
+    }
+
+    /// The folder the remote shell last said it is in, when it reports one (OSC 7). Its host
+    /// may not be this session's: a nested `ssh` reports its own.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Files panel (#37) is its first reader")
+    )]
+    pub fn shell_folder(&self) -> Option<&ShellFolder> {
+        self.shell_folder.as_ref()
     }
 
     /// `user@host:port` for the status line.
@@ -562,6 +577,12 @@ impl Session {
                 self.record_typed(bytes, cx);
             }
             TerminalEvent::PromptMark { mark, at } => self.on_prompt_mark(*mark, *at, cx),
+            TerminalEvent::ShellFolder(folder) => {
+                if self.shell_folder.as_ref() != Some(folder) {
+                    self.shell_folder = Some(folder.clone());
+                    cx.notify();
+                }
+            }
             TerminalEvent::TitleChanged(_)
             | TerminalEvent::Bell
             | TerminalEvent::ClipboardStore(_) => {}

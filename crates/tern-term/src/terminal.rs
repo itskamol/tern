@@ -28,10 +28,11 @@ use crate::config::CursorStyleSetting;
 use crate::config::TerminalTheme;
 use crate::links::Link;
 use crate::search::{Search, SearchMark, mark_at};
-use osc133::Scanner;
+use osc133::{Found, Scanner};
 
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
+pub use osc7::ShellFolder;
 pub use osc133::{GridPos, PromptMark};
 
 /// The most text one OSC 52 request may put on the clipboard. The program on the other end of
@@ -69,6 +70,8 @@ pub enum TerminalEvent {
         mark: PromptMark,
         at: GridPos,
     },
+    /// OSC 7: the shell reported the folder it is in, on the host it named.
+    ShellFolder(ShellFolder),
 }
 
 /// Viewport dimensions in cells.
@@ -268,11 +271,16 @@ impl Terminal {
     pub(crate) fn process(&mut self, bytes: &[u8]) -> Vec<Notice> {
         let mut notices = Vec::new();
         let mut from = 0;
-        for (end, mark) in self.marks.scan(bytes) {
+        for (end, found) in self.marks.scan(bytes) {
             self.parser.advance(&mut self.term, &bytes[from..end]);
             from = end;
-            let at = self.cursor_pos();
-            notices.push(Notice::Event(TerminalEvent::PromptMark { mark, at }));
+            notices.push(Notice::Event(match found {
+                Found::Mark(mark) => TerminalEvent::PromptMark {
+                    mark,
+                    at: self.cursor_pos(),
+                },
+                Found::Folder(folder) => TerminalEvent::ShellFolder(folder),
+            }));
         }
         self.parser.advance(&mut self.term, &bytes[from..]);
         if let Some(search) = self.search.as_mut() {
@@ -758,6 +766,8 @@ impl Terminal {
 
 #[path = "osc133.rs"]
 mod osc133;
+#[path = "osc7.rs"]
+mod osc7;
 
 #[cfg(test)]
 #[path = "terminal_tests.rs"]

@@ -1,13 +1,15 @@
-//! OSC 133 (the shell-integration prompt marks of FinalTerm, iTerm2 and others). The emulator
-//! drops OSC sequences it does not know, so the marks are found here, in the bytes, before the
-//! parser sees them; the bytes themselves go on to the parser unchanged. The scanner keeps a
-//! few bytes between reads, so a mark split across two reads still counts, and it never
-//! buffers a long sequence (an OSC 52 payload is skipped as it goes by).
+//! OSC 133 (the shell-integration prompt marks of FinalTerm, iTerm2 and others) and OSC 7 (the
+//! shell's folder, see `osc7.rs`). The emulator drops OSC sequences it does not know, so they
+//! are found here, in the bytes, before the parser sees them; the bytes themselves go on to the
+//! parser unchanged. The scanner keeps the body between reads, so a sequence split across two
+//! reads still counts. It keeps at most 64 bytes of any other OSC and `PATH_MAX` of an OSC 7
+//! path, so memory stays bounded: an OSC 52 payload is skipped as it goes by.
 
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::TermMode;
 
 use super::Terminal;
+use super::osc7::{self, ShellFolder};
 
 /// What a prompt mark says: `A` the prompt starts, `B` the person's command starts (the
 /// prompt has ended), `C` the command's output starts, `D` the command finished.
@@ -44,6 +46,13 @@ enum State {
     SkipEsc,
 }
 
+/// What the scanner found in the bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Found {
+    Mark(PromptMark),
+    Folder(ShellFolder),
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Scanner {
     state: State,
@@ -51,8 +60,8 @@ pub(crate) struct Scanner {
 }
 
 impl Scanner {
-    /// The marks in `bytes`, each with the offset just past its terminator.
-    pub(crate) fn scan(&mut self, bytes: &[u8]) -> Vec<(usize, PromptMark)> {
+    /// The marks and folders in `bytes`, each with the offset just past its terminator.
+    pub(crate) fn scan(&mut self, bytes: &[u8]) -> Vec<(usize, Found)> {
         let mut found = Vec::new();
         if self.state == State::Ground && !bytes.contains(&0x1b) {
             return found;
@@ -65,7 +74,7 @@ impl Scanner {
         found
     }
 
-    fn step(&mut self, b: u8) -> Option<PromptMark> {
+    fn step(&mut self, b: u8) -> Option<Found> {
         match self.state {
             State::Ground => self.ground(b),
             State::Esc => {
@@ -82,7 +91,7 @@ impl Scanner {
                 0x07 => return self.finish(),
                 0x1b => self.state = State::OscEsc,
                 0x18 | 0x1a => self.state = State::Ground,
-                _ if self.body.len() >= BODY_MAX => self.state = State::Skip,
+                _ if self.body.len() >= self.body_max() => self.state = State::Skip,
                 _ => self.body.push(b),
             },
             State::OscEsc => {
@@ -118,8 +127,20 @@ impl Scanner {
         }
     }
 
-    fn finish(&mut self) -> Option<PromptMark> {
+    /// A folder may be a long path; anything else this scanner keeps is short.
+    fn body_max(&self) -> usize {
+        if self.body.starts_with(b"7;") {
+            osc7::BODY_MAX
+        } else {
+            BODY_MAX
+        }
+    }
+
+    fn finish(&mut self) -> Option<Found> {
         self.state = State::Ground;
+        if let Some(folder) = osc7::parse(&self.body) {
+            return Some(Found::Folder(folder));
+        }
         let rest = self.body.strip_prefix(b"133;")?;
         let mark = match rest.first()? {
             b'A' => PromptMark::PromptStart,
@@ -128,7 +149,7 @@ impl Scanner {
             b'D' => PromptMark::CommandEnd,
             _ => return None,
         };
-        matches!(rest.get(1), None | Some(b';')).then_some(mark)
+        matches!(rest.get(1), None | Some(b';')).then_some(Found::Mark(mark))
     }
 }
 

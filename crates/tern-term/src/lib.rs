@@ -17,7 +17,7 @@ pub use config::{CursorStyleSetting, TerminalOptions};
 pub use links::Link;
 pub use search::SearchMark;
 pub use terminal::{
-    CellColor, CellSnapshot, CursorSnapshot, GridPos, PromptMark, SCROLLBACK_LINES, Terminal,
-    TerminalEvent,
+    CellColor, CellSnapshot, CursorSnapshot, GridPos, PromptMark, SCROLLBACK_LINES, ShellFolder,
+    Terminal, TerminalEvent,
 };
 pub use view::{TerminalView, paste_bytes};
