@@ -11,7 +11,7 @@ use gpui::{
 use tern_ssh::SecretString;
 use tern_vault::{Key, Vault};
 
-use super::{Shell, Toast, ToastKind};
+use super::{Alert, Shell};
 use crate::connections::{self, Connection, DEFAULT_KEEP_ALIVE, Draft};
 use crate::keeper::{Keeper, Tried, Typed};
 use crate::session::Session;
@@ -485,7 +485,7 @@ impl Shell {
                 if let Some(name) = name {
                     // The same step as ⌘Z, so the Alert and Edit → Undo never disagree.
                     self.alert(
-                        Toast::new(ToastKind::Default, format!("Removed {name}"))
+                        Alert::new(format!("Removed {name}"))
                             .action("Undo", |s, w, cx| s.undo_hosts(w, cx)),
                         cx,
                     );

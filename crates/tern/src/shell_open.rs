@@ -109,36 +109,37 @@ impl Shell {
         // A tab that is not in front can drop without anyone seeing its terminal; say so, with
         // a way to get to it.
         let mut last = Status::Connecting;
-        let repaint =
-            cx.observe(&session, move |shell, session, cx| {
-                let status = session.read(cx).status();
-                if status == Status::Closed && last != Status::Closed {
-                    let ix = shell
-                        .tabs
-                        .iter()
-                        .position(|t| t.panes().iter().any(|p| p.session() == Some(&session)));
-                    if let Some(ix) =
-                        ix.filter(|ix| *ix != shell.tabs.active() || shell.settings_page.is_some())
-                    {
-                        let alias = shell.tabs[ix].alias.clone();
-                        shell.alert(
-                            Toast::new(ToastKind::Critical, format!("{alias} disconnected"))
-                                .action("Show", move |s, window, cx| {
-                                    if let Some(ix) = s
-                                        .tabs
-                                        .iter()
-                                        .position(|t| t.is_session() && t.alias == alias)
-                                    {
-                                        s.show_tab(ix, window, cx);
-                                    }
-                                }),
-                            cx,
-                        );
-                    }
+        let repaint = cx.observe(&session, move |shell, session, cx| {
+            let status = session.read(cx).status();
+            if status == Status::Closed && last != Status::Closed {
+                let ix = shell
+                    .tabs
+                    .iter()
+                    .position(|t| t.panes().iter().any(|p| p.session() == Some(&session)));
+                if let Some(ix) =
+                    ix.filter(|ix| *ix != shell.tabs.active() || shell.settings_page.is_some())
+                {
+                    let alias = shell.tabs[ix].alias.clone();
+                    shell.alert(
+                        Alert::failure(format!("{alias} disconnected")).action(
+                            "Show",
+                            move |s, window, cx| {
+                                if let Some(ix) = s
+                                    .tabs
+                                    .iter()
+                                    .position(|t| t.is_session() && t.alias == alias)
+                                {
+                                    s.show_tab(ix, window, cx);
+                                }
+                            },
+                        ),
+                        cx,
+                    );
                 }
-                last = status;
-                cx.notify();
-            });
+            }
+            last = status;
+            cx.notify();
+        });
         let notes = cx.subscribe(
             &session,
             |shell, session, note: &crate::session::SessionNote, cx| {

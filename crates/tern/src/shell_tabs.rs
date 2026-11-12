@@ -105,7 +105,7 @@ impl Shell {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 self.alert(
-                    super::Toast::new(super::ToastKind::Default, format!("Logging to {name}"))
+                    super::Alert::new(format!("Logging to {name}"))
                         .action(crate::platform::REVEAL_LABEL, move |_, _, cx| {
                             cx.reveal_path(&path)
                         }),

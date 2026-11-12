@@ -231,10 +231,7 @@ impl Shell {
         {
             self.hostlist.history.clear();
             return self.alert(
-                super::Toast::new(
-                    super::ToastKind::Critical,
-                    format!("Could not {}: {e}", verb.to_lowercase()),
-                ),
+                super::Alert::failure(format!("Could not {}: {e}", verb.to_lowercase())),
                 cx,
             );
         }

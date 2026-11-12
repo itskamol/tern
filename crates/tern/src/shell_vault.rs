@@ -11,7 +11,7 @@ use tern_ssh::{HostEntry, SecretString};
 use tern_vault::keys::{self, KeyInfo};
 use tern_vault::{ExposeSecret, Key, Vault, VaultError};
 
-use super::{Shell, Toast, ToastKind};
+use super::{Alert, Shell};
 use crate::keeper::{self, Ask, Keeper, Tried, Typed};
 use crate::lock_on_sleep::{self, Cause};
 use crate::text_input::TextInput;
@@ -398,13 +398,10 @@ impl Shell {
         let (title, _) = describe_entry(key, &self.hosts);
         let undo_key = key.clone();
         self.alert(
-            Toast::new(
-                ToastKind::Default,
-                format!("Removed {title} from the vault"),
-            )
-            .action("Undo", move |s, _, cx| {
-                s.restore_secret(undo_key.clone(), value.clone(), cx)
-            }),
+            Alert::new(format!("Removed {title} from the vault"))
+                .action("Undo", move |s, _, cx| {
+                    s.restore_secret(undo_key.clone(), value.clone(), cx)
+                }),
             cx,
         );
         cx.notify();

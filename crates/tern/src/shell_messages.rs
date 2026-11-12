@@ -15,8 +15,12 @@ use std::collections::VecDeque;
 
 use gpui::{Entity, WeakEntity};
 
+#[path = "shell_toast.rs"]
+mod toast;
+
+pub(crate) use toast::{Alert, CubicBezier};
+
 use super::Shell;
-use super::toast::Toast;
 use crate::clipboard::Answer;
 use crate::messages::{Kind, Messages, Place, SHOWN_FOR, Work};
 use crate::session::Session;
@@ -66,6 +70,8 @@ struct Decision {
 
 #[derive(Debug, Default)]
 pub(super) struct ActivityUi {
+    /// The snackbar an Alert shows as; nothing outside this module can show one.
+    snackbars: toast::Snackbars,
     /// Questions tern cannot go on without, oldest first; the first one's card shows.
     decisions: VecDeque<Decision>,
     messages: Messages,
@@ -115,20 +121,20 @@ impl Shell {
 
     /// An Alert for something that did not work, with no action.
     pub(crate) fn alert_failed(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.alert(Toast::new(super::ToastKind::Critical, text), cx);
+        self.alert(Alert::failure(text), cx);
     }
 
     /// An Alert: a failure, or a message with one action. The snackbar, kept in the list too.
-    pub(crate) fn alert(&mut self, toast: Toast, cx: &mut Context<Self>) {
+    pub(crate) fn alert(&mut self, alert: Alert, cx: &mut Context<Self>) {
         self.activity.messages.raise(
             Kind::Alert,
-            toast.text(),
-            toast.has_action(),
-            toast.failed(),
+            alert.text(),
+            alert.has_action(),
+            alert.failed(),
             SystemTime::now(),
             Instant::now(),
         );
-        self.toast(toast, cx);
+        self.show_snackbar(alert, cx);
     }
 
     /// The status line is drawn: the setting is on, Settings is closed and a session tab is in
@@ -264,7 +270,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let decision = self.decision_card(cx);
-        let snackbar = self.render_toast(window, cx);
+        let snackbar = self.render_snackbar(window, cx);
         if decision.is_none() && snackbar.is_none() {
             return None;
         }

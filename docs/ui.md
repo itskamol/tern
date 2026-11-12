@@ -68,6 +68,21 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 | Reduced motion | honours the OS setting; all motion off | §1.12 |
 | Connecting indicator | zeron-pulse cell wave, 2.4s, staggered opacity 0.08→1 | §1.12 |
 
+## Messages (ADR 0002)
+
+Every message is one of three kinds, and the code shows none without its kind: `Shell::activity`,
+`Shell::alert` (the only way to a snackbar) and a Decision card.
+
+| Feature | Value | Source |
+| --- | --- | --- |
+| Activity in the status line | the line's own 11 pt, beside the host, for 4 s | zeron `SESSION_FOOTER` text (`statusline.rs`); seed-design's snackbar time |
+| Activity by the titlebar (Settings, Files tab, status line off, no tab) | 11 pt muted, at most the sidebar's default width (256), left of the Activity button | the status line's 11 pt; the sidebar's default width |
+| Activity button | 24 pt control, 16 pt icon, at the titlebar's right end; held at the hover tint while its list is open | zeron's titlebar control (`chrome.rs`) |
+| Activity list | 340 wide, 6 inset, 12 radius, 13 pt rows, 11 pt time; at most 320 high, newest first, 200 kept | tern's port forwards popover; the Files tab's source menu |
+| Work in progress (update download, copies) | an Activity replaced in place until the work ends; never added to the list | — |
+| Alert | seed-design snackbar: 464 wide (16 less than the window when narrower), at least 44 high, 10 inset, 8 radius, 4 s (paused while held), enter 150 ms / exit 100 ms, at most one action; top right under the titlebar, 8 from the edge | seed-design `snackbar.css` (`shell_toast.rs` header) |
+| Decision | a card that stays until answered: 340 wide, 12 radius, 13 pt, inset and gap 8, the connection form's 28 pt buttons; above any snackbar | the Activity list's card; `SPACE_SM` |
+
 ## Keyboard
 
 | Feature | Value | Source |

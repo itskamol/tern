@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui::{AppContext as _, Context};
 use serde::Deserialize;
 
-use super::{Shell, Toast, ToastKind};
+use super::{Alert, Shell};
 use crate::messages::{Kind, Work};
 use crate::settings;
 use crate::update_outcome::{Found, Outcome, Trouble, reason, version_row};
@@ -236,13 +236,12 @@ fn stage(feed: &Feed, found: &Found) -> Option<Staged> {
 
 /// The Alert for how a check ended; "Restart now" and "Download" go with the outcomes that have
 /// something to do next.
-fn outcome_alert(outcome: &Outcome) -> Toast {
+fn outcome_alert(outcome: &Outcome) -> Alert {
     let text = outcome.message(env!("CARGO_PKG_VERSION"));
-    let kind = match outcome {
-        Outcome::Failed(_) => ToastKind::Critical,
-        _ => ToastKind::Default,
+    let toast = match outcome {
+        Outcome::Failed(_) => Alert::failure(text),
+        _ => Alert::new(text),
     };
-    let toast = Toast::new(kind, text);
     if outcome.restarts() {
         return toast
             .staying(20)

@@ -2,9 +2,10 @@
 // snackbar-region.css for sizes, colours and motion; docs/content/components/snackbar.mdx for
 // behaviour (4 s, pause while held, one at a time, queued, at most one action). CubicBezier is
 // from zeron crates/ui/src/motion.rs (MIT).
-//! The snackbar: what an Alert shows as (ADR 0002), and still what the old `toast` calls show.
-//! One at a time, at the top right under the titlebar. seed-design places it at the bottom;
-//! tern keeps the terminal's last lines clear, and the right edge covers less than the centre.
+//! The snackbar: what an Alert shows as (ADR 0002), and nothing else. One at a time, at the
+//! top right under the titlebar, below a Decision card when one waits. seed-design places it at
+//! the bottom; tern keeps the terminal's last lines clear, and the right edge covers less than
+//! the centre. Only the message module can show one, through `Shell::alert`.
 
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -16,7 +17,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::Shell;
+use crate::shell::Shell;
 use crate::theme::hex;
 
 /// seed-design: "기본적으로 4초 동안 표시됩니다."
@@ -28,26 +29,39 @@ const EXIT: Duration = Duration::from_millis(100);
 const ENTER_CURVE: CubicBezier = CubicBezier::new(0.0, 0.0, 0.15, 1.0);
 const EXIT_CURVE: CubicBezier = CubicBezier::new(0.35, 0.0, 1.0, 1.0);
 
+/// Whether the Alert says something did not work: its card shows seed-design's critical mark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
+enum Severity {
     Default,
-    Critical,
+    Failure,
 }
 
 type Action = Rc<dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>)>;
 
+/// An Alert (ADR 0002): a failure, or a message with one action. Shown only through
+/// [`Shell::alert`], which also keeps it in the Activity list.
 #[derive(Clone)]
-pub(crate) struct Toast {
-    kind: Kind,
+pub(crate) struct Alert {
+    severity: Severity,
     message: SharedString,
     action: Option<(SharedString, Action)>,
     duration: Duration,
 }
 
-impl Toast {
-    pub(crate) fn new(kind: Kind, message: impl Into<SharedString>) -> Self {
+impl Alert {
+    /// An Alert that is not a failure: it carries an action (Undo, Show, Restart now).
+    pub(crate) fn new(message: impl Into<SharedString>) -> Self {
+        Self::with(Severity::Default, message)
+    }
+
+    /// Something did not work.
+    pub(crate) fn failure(message: impl Into<SharedString>) -> Self {
+        Self::with(Severity::Failure, message)
+    }
+
+    fn with(severity: Severity, message: impl Into<SharedString>) -> Self {
         Self {
-            kind,
+            severity,
             message: message.into(),
             action: None,
             duration: DEFAULT_DURATION,
@@ -66,7 +80,7 @@ impl Toast {
     }
 
     pub(crate) fn failed(&self) -> bool {
-        self.kind == Kind::Critical
+        self.severity == Severity::Failure
     }
 
     pub(crate) fn has_action(&self) -> bool {
@@ -160,36 +174,39 @@ impl Clock {
     }
 }
 
-pub(super) struct Toasts {
-    queue: VecDeque<Toast>,
-    showing: Option<(Toast, Clock)>,
+/// One at a time, in order: the rest wait here.
+#[derive(Default)]
+pub(super) struct Snackbars {
+    queue: VecDeque<Alert>,
+    showing: Option<(Alert, Clock)>,
 }
 
-impl Toasts {
-    pub(super) fn new() -> Self {
-        Self {
-            queue: VecDeque::new(),
-            showing: None,
-        }
+impl std::fmt::Debug for Snackbars {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snackbars")
+            .field("waiting", &self.queue.len())
+            .field("showing", &self.showing.as_ref().map(|(a, _)| a.text()))
+            .finish()
     }
 }
 
 impl Shell {
-    /// Shows a snackbar now, or after the current one: one at a time, in order.
-    pub(crate) fn toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
-        self.toasts.queue.push_back(toast);
-        if self.toasts.showing.is_none() {
-            self.next_toast(cx);
+    /// Shows a snackbar now, or after the current one: one at a time, in order. Only the
+    /// message module reaches it, through [`Shell::alert`].
+    pub(super) fn show_snackbar(&mut self, alert: Alert, cx: &mut Context<Self>) {
+        self.activity.snackbars.queue.push_back(alert);
+        if self.activity.snackbars.showing.is_none() {
+            self.next_snackbar(cx);
         }
     }
 
-    fn next_toast(&mut self, cx: &mut Context<Self>) {
-        let Some(toast) = self.toasts.queue.pop_front() else {
-            self.toasts.showing = None;
+    fn next_snackbar(&mut self, cx: &mut Context<Self>) {
+        let Some(toast) = self.activity.snackbars.queue.pop_front() else {
+            self.activity.snackbars.showing = None;
             return cx.notify();
         };
         let clock = Clock::new(Instant::now(), toast.duration);
-        self.toasts.showing = Some((toast, clock));
+        self.activity.snackbars.showing = Some((toast, clock));
         // The clock decides; this task only wakes the view so the phase is read again.
         cx.spawn(async move |this, cx| {
             loop {
@@ -198,12 +215,12 @@ impl Shell {
                     .await;
                 let gone = this
                     .update(cx, |s, cx| {
-                        let gone = match s.toasts.showing.as_mut() {
+                        let gone = match s.activity.snackbars.showing.as_mut() {
                             Some((_, clock)) => clock.phase(Instant::now()) == Phase::Gone,
                             None => true,
                         };
                         if gone {
-                            s.next_toast(cx);
+                            s.next_snackbar(cx);
                         } else {
                             cx.notify();
                         }
@@ -219,13 +236,13 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn render_toast(
+    pub(super) fn render_snackbar(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let now = Instant::now();
-        let (toast, clock) = self.toasts.showing.as_mut()?;
+        let (toast, clock) = self.activity.snackbars.showing.as_mut()?;
         let phase = clock.phase(now);
         let (opacity, lift) = match phase {
             Phase::Gone => return None,
@@ -243,9 +260,9 @@ impl Shell {
         };
         let toast = toast.clone();
         let colors = Colors::for_theme(self.theme.light);
-        let icon = match toast.kind {
-            Kind::Default => None,
-            Kind::Critical => Some(("!", colors.critical)),
+        let icon = match toast.severity {
+            Severity::Default => None,
+            Severity::Failure => Some(("!", colors.critical)),
         };
         let viewport = window.viewport_size();
         let card = div()
@@ -260,7 +277,7 @@ impl Shell {
             .flex()
             .items_center()
             .on_hover(cx.listener(|s, hovered: &bool, _, cx| {
-                if let Some((_, clock)) = s.toasts.showing.as_mut() {
+                if let Some((_, clock)) = s.activity.snackbars.showing.as_mut() {
                     clock.hover(*hovered, Instant::now());
                 }
                 cx.notify();
@@ -321,7 +338,8 @@ impl Shell {
                                 .text_color(colors.action)
                                 .on_click(cx.listener(move |s, _, window, cx| {
                                     run(s, window, cx);
-                                    if let Some((_, clock)) = s.toasts.showing.as_mut() {
+                                    if let Some((_, clock)) = s.activity.snackbars.showing.as_mut()
+                                    {
                                         clock.dismiss(Instant::now());
                                     }
                                     cx.notify();

@@ -9,7 +9,7 @@ use gpui::{
 };
 use tern_ssh::{Conflict, ConnectSpec};
 
-use super::{Content, Pane, Shell, Toast, ToastKind};
+use super::{Alert, Content, Pane, Shell};
 use crate::files_tab::{FilesView, HostAccess};
 use crate::messages::Work;
 use crate::shell::connections_ui::button;
@@ -113,7 +113,7 @@ impl Shell {
         if ok {
             self.activity(text, cx);
         } else {
-            self.alert(Toast::new(ToastKind::Critical, text), cx);
+            self.alert(Alert::failure(text), cx);
         }
     }
 

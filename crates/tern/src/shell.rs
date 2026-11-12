@@ -85,8 +85,6 @@ mod sync_ui;
 mod tabs_ui;
 #[path = "shell_term_options.rs"]
 mod term_options;
-#[path = "shell_toast.rs"]
-mod toast;
 #[path = "shell_update.rs"]
 mod update_ui;
 #[path = "shell_vault_page.rs"]
@@ -94,9 +92,7 @@ mod vault_page_ui;
 #[path = "shell_vault.rs"]
 mod vault_ui;
 
-pub(crate) use toast::CubicBezier;
-
-pub(crate) use toast::{Kind as ToastKind, Toast};
+pub(crate) use messages_ui::{Alert, CubicBezier};
 #[path = "shell_themes.rs"]
 mod themes_ui;
 
@@ -184,7 +180,6 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 auto_sync: sync_ui::AutoSync::default(),
                 vault_ui: None,
                 last_input: std::time::Instant::now(),
-                toasts: toast::Toasts::new(),
                 activity: messages_ui::ActivityUi::default(),
                 tab_scroll: tabs::StripScroll::default(),
                 context_menu: None,
@@ -313,7 +308,6 @@ pub struct Shell {
     vault_ui: Option<vault_ui::VaultUi>,
     /// The last key or mouse input to the window, for the vault's idle lock.
     last_input: std::time::Instant,
-    toasts: toast::Toasts,
     /// Activity and Alerts raised so far, and the Activity list.
     activity: messages_ui::ActivityUi,
     tab_scroll: tabs::StripScroll,
