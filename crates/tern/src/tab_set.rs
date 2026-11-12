@@ -93,6 +93,25 @@ impl<P: Paned> Tab<P> {
         &self.panes
     }
 
+    /// The panes as a person reads them: left to right, then top to bottom. `panes` is in
+    /// the order they were made.
+    pub fn in_reading_order(&self) -> Vec<&P> {
+        self.tree
+            .leaves()
+            .into_iter()
+            .filter_map(|id| self.panes.iter().find(|p| p.pane_id() == id))
+            .collect()
+    }
+
+    /// Where the focused pane falls in [`Self::in_reading_order`].
+    pub fn focus_in_reading_order(&self) -> usize {
+        self.tree
+            .leaves()
+            .iter()
+            .position(|id| *id == self.focused)
+            .unwrap_or(0)
+    }
+
     /// Where each pane sits in the tab, as fractions of its area.
     pub fn layout(&self) -> Vec<(PaneId, Rect)> {
         self.tree.layout(Rect {

@@ -14,7 +14,6 @@ use tern_ssh::HostEntry;
 
 use crate::chrome::{self, DragGhost, SidebarResize, WidthTween};
 use crate::connections::{self, Connection};
-use crate::indicator::Dot;
 use crate::picker::{self, Picker, ToggleHostPicker};
 use crate::session::{Launch, Session, Status};
 use crate::settings::{self, SIDEBAR_DEFAULT, Settings};
@@ -465,12 +464,17 @@ impl Shell {
         self.tabs
             .iter()
             .enumerate()
-            .map(|(ix, tab)| TabInfo {
+            .map(|(ix, tab)| {
+                let panes = tab.in_reading_order();
+                (ix, tab, panes)
+            })
+            .map(|(ix, tab, panes)| TabInfo {
                 alias: tab.alias.clone(),
                 heading: tab.heading(),
                 logging: tab.session().is_some_and(|s| s.read(cx).is_logging()),
                 broadcast: self.is_broadcasting(tab.id),
-                dot: tab.session().map_or(Dot::Idle, |s| s.read(cx).dot()),
+                dots: tabs::tab_dots(panes.iter().map(|p| p.session().map(|s| s.read(cx).dot()))),
+                front: tab.focus_in_reading_order(),
                 rename: self
                     .renaming
                     .as_ref()

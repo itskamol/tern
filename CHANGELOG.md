@@ -6,6 +6,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- Each tab shows one status dot per pane, in reading order, instead of one for the tab. A pane whose session dropped is red, so a dead pane in a background tab is seen; VoiceOver says how many panes are disconnected.
 - Ask before a program on the server sets the clipboard. Settings → Terminal → "Programs can copy to the clipboard" is now Allow (the default, as before), Ask or Deny. In Ask, the copy waits on a card at the top right until you choose Allow once, Always for this host or Deny. Always is kept with a saved connection; for a `~/.ssh/config` host it lasts while its tabs are open. A settings file from before keeps its choice.
 
 ### Changed

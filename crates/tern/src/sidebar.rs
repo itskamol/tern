@@ -112,7 +112,7 @@ pub fn render(
             .iter()
             .rev()
             .find(|tab| tab.alias == host.alias)
-            .map(|tab| tab.dot);
+            .map(TabInfo::dot);
         let active = s.active_alias == Some(host.alias.as_str());
         let selected = s.selected == Some(ix);
         row(scope, ix, host, status, active, selected, inner, t, cx)

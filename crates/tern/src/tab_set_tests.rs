@@ -549,3 +549,34 @@ fn a_files_tab_is_not_saved_and_the_saved_slot_skips_it() {
     );
     assert!(!tabs[2].is_session() && tabs[1].is_session());
 }
+
+#[test]
+fn panes_read_left_to_right_and_top_to_bottom_whatever_order_they_were_made_in() {
+    let (mut tabs, _) = set(&["a"]);
+    let below = tabs.new_pane_id();
+    tabs.split(1, Direction::Down, pane(below), floor())
+        .unwrap();
+    let right = tabs.new_pane_id();
+    tabs.split(1, Direction::Right, pane(right), floor())
+        .unwrap();
+    let tab = tabs.active_tab().unwrap();
+    let made: Vec<PaneId> = tab.panes().iter().map(|p| p.0).collect();
+    let read: Vec<PaneId> = tab.in_reading_order().iter().map(|p| p.0).collect();
+    assert_eq!(made, [1, below, right]);
+    assert_eq!(read, [1, right, below]);
+}
+
+#[test]
+fn the_focused_pane_s_place_in_reading_order_follows_the_keyboard() {
+    let (mut tabs, _) = set(&["a"]);
+    let below = tabs.new_pane_id();
+    tabs.split(1, Direction::Down, pane(below), floor())
+        .unwrap();
+    let right = tabs.new_pane_id();
+    tabs.split(1, Direction::Right, pane(right), floor())
+        .unwrap();
+    // Reading order is 1, right, below; the last split put the keyboard on `right`.
+    assert_eq!(tabs.active_tab().unwrap().focus_in_reading_order(), 1);
+    tabs.focus_pane(below);
+    assert_eq!(tabs.active_tab().unwrap().focus_in_reading_order(), 2);
+}

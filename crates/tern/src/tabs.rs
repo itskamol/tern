@@ -64,7 +64,11 @@ pub struct TabInfo {
     pub logging: bool,
     /// Typing here, or receiving what is typed in another tab.
     pub broadcast: bool,
-    pub dot: Dot,
+    /// One per pane, in the tab's pane order: a dropped pane's is red even in a background
+    /// tab.
+    pub dots: Vec<Dot>,
+    /// Which of `dots` is the focused pane's.
+    pub front: usize,
     /// The field that is editing this tab's title right now.
     pub rename: Option<Entity<TextInput>>,
 }
@@ -73,6 +77,19 @@ impl TabInfo {
     pub fn label(&self) -> &str {
         &self.heading.text
     }
+
+    /// The focused pane's dot: what the sidebar shows for the host.
+    pub fn dot(&self) -> Dot {
+        self.dots.get(self.front).copied().unwrap_or(Dot::Idle)
+    }
+}
+
+/// A tab's dots from its panes, in order; a pane with no session (a Files tab) is idle.
+pub fn tab_dots(panes: impl IntoIterator<Item = Option<Dot>>) -> Vec<Dot> {
+    panes
+        .into_iter()
+        .map(|dot| dot.unwrap_or(Dot::Idle))
+        .collect()
 }
 
 /// What a tab drag carries: the slot it started from and what to draw under the pointer.
@@ -307,7 +324,7 @@ fn tab_pill(
             MouseButton::Middle,
             cx.listener(move |shell, _, window, cx| shell.close_tab_at(ix, window, cx)),
         )
-        .child(status_dot(("tab-dot", ix), tab.dot, t))
+        .child(pane_dots(ix, &tab.dots, t))
         .child(match renaming {
             Some(input) => div()
                 .flex_1()
@@ -400,13 +417,30 @@ pub fn status_words(dot: Dot) -> Option<&'static str> {
 
 /// A tab as VoiceOver reads it: the title, then what the badges and the dot show.
 fn tab_label(tab: &TabInfo) -> String {
+    let dropped = tab
+        .dots
+        .iter()
+        .enumerate()
+        .filter(|(n, d)| *n != tab.front && **d == Dot::Closed)
+        .count();
+    let also = if tab.dot() == Dot::Closed {
+        " more"
+    } else {
+        ""
+    };
+    let dropped_others = match dropped {
+        0 => String::new(),
+        1 => format!("1{also} pane disconnected"),
+        n => format!("{n}{also} panes disconnected"),
+    };
     let mut label = tab.label().to_owned();
     let more = format!("{} more panes", tab.heading.others);
     for (on, words) in [
         (tab.heading.others > 0, more.as_str()),
         (tab.broadcast, "broadcasting"),
         (tab.logging, "logging"),
-        (true, status_words(tab.dot).unwrap_or_default()),
+        (true, status_words(tab.dot()).unwrap_or_default()),
+        (!dropped_others.is_empty(), dropped_others.as_str()),
     ] {
         if on && !words.is_empty() {
             label.push_str(", ");
@@ -419,11 +453,28 @@ fn tab_label(tab: &TabInfo) -> String {
 /// zeron's `zeron-pulse` loader: 2.4 s, opacity 0.08 → 1.
 const PULSE: Duration = Duration::from_millis(2400);
 
+/// zeron's status dot.
+const DOT: f32 = 6.0;
+
+/// The tab's dots side by side, half a dot apart.
+fn pane_dots(ix: usize, dots: &[Dot], t: &Theme) -> impl IntoElement + use<> {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(DOT / 2.0))
+        .children(
+            dots.iter().enumerate().map(|(n, dot)| {
+                status_dot(SharedString::from(format!("tab-dot-{ix}-{n}")), *dot, t)
+            }),
+        )
+}
+
 /// A connecting dot breathes; gpui holds it still when `App::reduce_motion` is set. Synced, so
 /// a host's tab dot and sidebar dot pulse together. A dot waiting for an answer is a still ring.
 pub fn status_dot(id: impl Into<ElementId>, dot: Dot, t: &Theme) -> AnyElement {
     let color = dot.color(t);
-    let disc = div().flex_none().size(px(6.)).rounded_full();
+    let disc = div().flex_none().size(px(DOT)).rounded_full();
     let disc = if dot.hollow() {
         disc.border_1().border_color(color)
     } else {
@@ -488,8 +539,28 @@ pub fn step(active: usize, len: usize, delta: isize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Heading, TabInfo, reorder, step, tab_label};
+    use super::{Heading, TabInfo, reorder, step, tab_dots, tab_label};
     use crate::indicator::Dot;
+
+    #[test]
+    fn a_tab_has_one_dot_per_pane_in_order_and_a_files_pane_is_idle() {
+        assert_eq!(
+            tab_dots([Some(Dot::Connected), Some(Dot::Closed), None]),
+            [Dot::Connected, Dot::Closed, Dot::Idle]
+        );
+        assert_eq!(tab_dots([None]), [Dot::Idle]);
+    }
+
+    #[test]
+    fn a_dropped_pane_behind_the_focused_one_is_said_and_red() {
+        let mut tab = info(Dot::Connected);
+        tab.dots = vec![Dot::Connected, Dot::Closed, Dot::Closed];
+        assert_eq!(tab.dot(), Dot::Connected);
+        assert!(tab_label(&tab).ends_with("Connected, 2 panes disconnected"));
+        tab.front = 1;
+        assert_eq!(tab.dot(), Dot::Closed);
+        assert!(tab_label(&tab).ends_with("Disconnected, 1 more pane disconnected"));
+    }
 
     fn info(dot: Dot) -> TabInfo {
         TabInfo {
@@ -500,7 +571,8 @@ mod tests {
             },
             logging: false,
             broadcast: false,
-            dot,
+            dots: vec![dot],
+            front: 0,
             rename: None,
         }
     }
