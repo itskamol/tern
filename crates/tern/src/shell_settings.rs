@@ -6,9 +6,11 @@
 use crate::hover::Accessible as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, px,
 };
+
+use crate::text_input::TextInput;
 
 #[path = "shell_settings_nav.rs"]
 mod nav;
@@ -18,6 +20,23 @@ use super::Shell;
 use crate::keymap::{Keymap, Record, ShortcutId, badge, record};
 use crate::settings::{self, AppearanceMode, FONT_DEFAULT, FONT_MAX, FONT_MIN, Settings};
 use crate::settings_widgets as w;
+
+/// The Settings search field; the page re-filters on every keystroke.
+pub(super) struct SettingsSearch {
+    input: Entity<TextInput>,
+    _repaint: Subscription,
+}
+
+impl SettingsSearch {
+    pub(super) fn new(t: &crate::theme::Theme, cx: &mut Context<Shell>) -> Self {
+        let input = cx.new(|cx| TextInput::new("Search settings", false, t.input_colors(), cx));
+        let repaint = cx.observe(&input, |_, _, cx| cx.notify());
+        Self {
+            input,
+            _repaint: repaint,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
@@ -154,6 +173,10 @@ impl Shell {
 impl Shell {
     pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_page.take().is_some() {
+            // The next visit starts on a whole page, not on what was searched last.
+            self.settings_search
+                .input
+                .update(cx, |input, cx| input.set_text(String::new(), cx));
             self.restore_focus(window, cx);
         } else {
             self.picker = None;
@@ -192,14 +215,19 @@ impl Shell {
         cx.notify();
     }
 
-    pub(crate) fn render_settings(
-        &self,
-        section: Section,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let nav = nav::render(self, section, window, cx);
-        let page = match section {
+    /// The Settings search's field and what is typed in it.
+    pub(super) fn settings_search_input(&self) -> &Entity<TextInput> {
+        &self.settings_search.input
+    }
+
+    /// ⌘F on the Settings page: the caret goes to the search.
+    pub(super) fn focus_settings_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = gpui::Focusable::focus_handle(self.settings_search.input.read(cx), cx);
+        window.focus(&focus, cx);
+    }
+
+    fn settings_page_of(&self, section: Section, cx: &mut Context<Self>) -> gpui::Div {
+        match section {
             Section::Appearance => self.appearance_page(cx),
             Section::Terminal => self.terminal_page(cx),
             Section::Shortcuts => self.shortcuts_page(cx),
@@ -209,11 +237,60 @@ impl Shell {
             Section::History => self.history_page(cx),
             Section::Sync => self.sync_page(cx),
             Section::About => self.about_page(cx),
+        }
+    }
+
+    /// Every section's matching rows, each page in turn under its own header, or the one line
+    /// that says nothing matched.
+    fn search_results(&self, searching: &w::Searching, cx: &mut Context<Self>) -> gpui::Div {
+        let mut pages = Vec::new();
+        for section in Section::ALL {
+            searching.page(section.label());
+            let page = self.settings_page_of(section, cx);
+            if searching.matched() > 0 {
+                pages.push(page);
+            }
+        }
+        if pages.is_empty() {
+            return w::page_column().child(
+                div()
+                    .mt(px(32.))
+                    .text_size(px(13.))
+                    .text_color(self.theme.muted)
+                    .child("No setting matches"),
+            );
+        }
+        div().flex().flex_col().children(pages)
+    }
+
+    pub(crate) fn render_settings(
+        &self,
+        section: Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let nav = nav::render(self, section, window, cx);
+        let query = crate::settings_search::Query::new(self.settings_search.input.read(cx).text());
+        let page = match w::Searching::start(query) {
+            Some(searching) => self.search_results(&searching, cx),
+            None => self.settings_page_of(section, cx),
         };
         div()
             .flex_1()
             .min_h_0()
             .flex()
+            .on_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, w, cx| {
+                let m = e.keystroke.modifiers;
+                let find = if cfg!(target_os = "macos") {
+                    m.platform && !m.control && !m.alt && !m.shift
+                } else {
+                    m.control && !m.alt && !m.shift
+                };
+                if find && e.keystroke.key == "f" {
+                    s.focus_settings_search(w, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(self.side_tile(
                 super::look::snap(self.settings.sidebar_width, self.frame.scale),
                 nav,

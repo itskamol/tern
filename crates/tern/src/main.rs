@@ -36,6 +36,7 @@ mod platform;
 mod session;
 mod session_log;
 mod settings;
+mod settings_search;
 mod settings_widgets;
 mod shell;
 mod sidebar;

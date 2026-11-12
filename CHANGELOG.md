@@ -6,6 +6,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- Search Settings: one field at the top of the Settings sidebar searches every section (⌘F goes to it). Matching settings show in place with their own controls, grouped by section, with the matched words highlighted; "No setting matches" when nothing does. What you type is plain text.
 - Hold ⌥⌘ in a split tab and each pane shows its number and host, in reading order; ⌥⌘1–9 moves to that pane. ⌥⌘ and the arrows still move between panes. The chords are fixed, listed under Settings → Shortcuts → Fixed and refused for other shortcuts.
 - Zoom a pane: ⇧⌘↩ (Shell → Zoom Pane) makes the focused pane fill its tab, and again brings the split back as it was. The tab says "zoomed"; every session keeps running behind it. Splitting, closing or moving to another pane ends the zoom, and a relaunch opens the split.
 - Each tab shows one status dot per pane, in reading order, instead of one for the tab. A pane whose session dropped is red, so a dead pane in a background tab is seen; VoiceOver says how many panes are disconnected.

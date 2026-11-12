@@ -254,8 +254,36 @@ pub(super) fn render(
         .flex_col()
         .gap(px(SPACE_SM))
         .child(header)
+        .child(search_field(shell, &th))
         .child(list)
         .into_any_element()
+}
+
+/// The Settings search, in zeron's `search_input_frame` as the hosts sidebar draws it (10 x 6
+/// padding, 8 radius, 4 % ink, a 13 pt magnifier).
+fn search_field(shell: &Shell, th: &Theme) -> impl IntoElement + use<> {
+    div().px(px(SPACE_SM)).pb(px(8.)).child(
+        div()
+            .px(px(10.))
+            .py(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .rounded(px(8.))
+            .bg(th.ink(0.04))
+            .text_size(px(13.))
+            .child(
+                crate::icons::icon(crate::icons::SEARCH)
+                    .size(px(13.))
+                    .text_color(th.muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(shell.settings_search_input().clone()),
+            ),
+    )
 }
 
 #[cfg(test)]

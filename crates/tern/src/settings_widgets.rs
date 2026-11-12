@@ -2,6 +2,11 @@
 // section_card, card_row, row_title, meta_line, toggle_switch) (MIT).
 //! The building blocks of the Settings page, with zeron's sizes. zeron frosts its switch with
 //! gradients; tern's surfaces are opaque, so the flat tones are used.
+//!
+//! Search filters the rows where the pages build them, so a match keeps its own control: while
+//! a [`Searching`] scope lives (one Settings frame), [`row`] draws only rows that match, with
+//! the words highlighted, and [`section`] drops a section none of whose rows did. The scope is
+//! per thread and ends with the frame, so no page needs to know about search.
 
 use crate::hover::Accessible as _;
 use std::time::Instant;
@@ -12,8 +17,82 @@ use gpui::{
     SharedString, Stateful, Styled, Window, div, px,
 };
 
+use std::cell::RefCell;
+
+use gpui::{HighlightStyle, StyledText};
+
 use crate::hover::HoverFade as _;
+use crate::settings_search::{Hits, Query, row_matches};
 use crate::theme::Theme;
+
+/// The search running while this frame's pages are built, and how many rows it has let through
+/// in the card, section and page being built.
+struct Scope {
+    query: Query,
+    page: &'static str,
+    in_card: usize,
+    in_section: usize,
+    in_page: usize,
+}
+
+thread_local! {
+    static SEARCH: RefCell<Option<Scope>> = const { RefCell::new(None) };
+}
+
+/// While it lives, the pages built are filtered by `query`; dropping it ends the search.
+#[must_use]
+pub struct Searching(());
+
+impl Searching {
+    /// `None` for an empty query: the page is built whole.
+    pub fn start(query: Query) -> Option<Self> {
+        if query.is_empty() {
+            return None;
+        }
+        SEARCH.with(|s| {
+            *s.borrow_mut() = Some(Scope {
+                query,
+                page: "",
+                in_card: 0,
+                in_section: 0,
+                in_page: 0,
+            });
+        });
+        Some(Self(()))
+    }
+
+    /// The page about to be built, whose name also matches; returns nothing.
+    pub fn page(&self, name: &'static str) {
+        with_scope(|s| {
+            s.page = name;
+            s.in_page = 0;
+        });
+    }
+
+    /// Rows the last page let through.
+    pub fn matched(&self) -> usize {
+        with_scope(|s| s.in_page).unwrap_or(0)
+    }
+}
+
+impl Drop for Searching {
+    fn drop(&mut self) {
+        SEARCH.with(|s| s.borrow_mut().take());
+    }
+}
+
+fn with_scope<R>(f: impl FnOnce(&mut Scope) -> R) -> Option<R> {
+    SEARCH.with(|s| s.borrow_mut().as_mut().map(f))
+}
+
+/// The search's tint on matched words: the drop zone's accent wash (`shell_split.rs`).
+fn highlighted(text: SharedString, ranges: Vec<std::ops::Range<usize>>, t: &Theme) -> StyledText {
+    let style = HighlightStyle {
+        background_color: Some(t.accent.opacity(0.22)),
+        ..Default::default()
+    };
+    StyledText::new(text).with_highlights(ranges.into_iter().map(|r| (r, style)))
+}
 
 const PAGE_MAX_WIDTH: f32 = 760.0;
 const PAGE_PAD_X: f32 = 40.0;
@@ -44,6 +123,9 @@ pub fn page_header(t: &Theme, title: &'static str) -> Div {
 }
 
 pub fn page_subtitle(t: &Theme, copy: impl Into<SharedString>) -> Div {
+    if with_scope(|_| ()).is_some() {
+        return div();
+    }
     div()
         .mt(px(4.))
         .px(px(SECTION_LABEL_INSET))
@@ -55,6 +137,10 @@ pub fn page_subtitle(t: &Theme, copy: impl Into<SharedString>) -> Div {
 
 /// A labeled block: the muted label, then the card 8 below it, 32 below the previous block.
 pub fn section(t: &Theme, label: &'static str, block: impl IntoElement) -> Div {
+    // `block`'s rows were built before this call: none of them matched, so neither does it.
+    if with_scope(|s| std::mem::take(&mut s.in_section)) == Some(0) {
+        return div();
+    }
     div()
         .mt(px(SECTION_GAP))
         .flex()
@@ -73,6 +159,7 @@ pub fn section(t: &Theme, label: &'static str, block: impl IntoElement) -> Div {
 
 /// zeron `section_card`: radius 12, a 4.5% ink fill, no outline.
 pub fn card(t: &Theme) -> Div {
+    with_scope(|s| s.in_card = 0);
     div()
         .rounded(px(12.))
         .bg(t.ink(0.045))
@@ -89,6 +176,23 @@ pub fn row(
     description: Option<SharedString>,
     control: impl IntoElement,
 ) -> Div {
+    let title: SharedString = title.into();
+    let found = with_scope(|s| {
+        let description = description.as_deref().unwrap_or_default();
+        let hits = row_matches(&s.query, s.page, &title, description)?;
+        let first_shown = s.in_card == 0;
+        s.in_card += 1;
+        s.in_section += 1;
+        s.in_page += 1;
+        Some((hits, first_shown))
+    });
+    let (hits, first) = match found {
+        None => (Hits::default(), first),
+        Some(None) => return div(),
+        Some(Some((hits, first_shown))) => (hits, first_shown),
+    };
+    let title = highlighted(title, hits.title, t);
+    let description = description.map(|d| highlighted(d, hits.description, t));
     div()
         .mx(px(16.))
         .py(px(12.))
@@ -111,7 +215,7 @@ pub fn row(
                         .line_height(px(17.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(t.text)
-                        .child(title.into()),
+                        .child(title),
                 )
                 .when_some(description, |el, d| {
                     el.child(
