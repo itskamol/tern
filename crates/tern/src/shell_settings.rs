@@ -233,18 +233,6 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .flex()
-            .on_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, w, cx| {
-                let m = e.keystroke.modifiers;
-                let find = if cfg!(target_os = "macos") {
-                    m.platform && !m.control && !m.alt && !m.shift
-                } else {
-                    m.control && !m.alt && !m.shift
-                };
-                if find && e.keystroke.key == "f" {
-                    s.focus_settings_search(w, cx);
-                    cx.stop_propagation();
-                }
-            }))
             .child(self.side_tile(
                 super::look::snap(self.settings.sidebar_width, self.frame.scale),
                 nav,

@@ -705,6 +705,10 @@ impl Render for Shell {
                     cx.stop_propagation();
                     return;
                 }
+                if s.settings_page.is_some() && s.settings_find_key(e, w, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 if e.keystroke.key == "escape" && s.settings_page.is_some() && s.form.is_none() {
                     s.toggle_settings(w, cx);
                     cx.stop_propagation();

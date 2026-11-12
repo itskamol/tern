@@ -36,6 +36,26 @@ impl Shell {
         window.focus(&focus, cx);
     }
 
+    /// ⌘F (Ctrl+F off macOS) on the Settings page: the caret goes to the search. Heard at the
+    /// window's root, where Settings leaves the keyboard. True when it was that key.
+    pub(crate) fn settings_find_key(
+        &mut self,
+        e: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let m = e.keystroke.modifiers;
+        let find = if cfg!(target_os = "macos") {
+            m.platform && !m.control && !m.alt && !m.shift
+        } else {
+            m.control && !m.alt && !m.shift
+        };
+        if find && e.keystroke.key == "f" {
+            self.focus_settings_search(window, cx);
+        }
+        find && e.keystroke.key == "f"
+    }
+
     pub(super) fn clear_settings_search(&mut self, cx: &mut Context<Self>) {
         self.settings_search
             .input
