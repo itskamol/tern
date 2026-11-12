@@ -30,6 +30,11 @@ actions!(tern, [CloseTab, NextTab, PrevTab]);
 #[action(namespace = tern, no_json)]
 pub struct ActivateTab(pub usize);
 
+/// Focus the front tab's pane numbered `n` (1–9) in reading order: ⌥⌘ and the digit.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tern, no_json)]
+pub struct FocusPaneNumber(pub usize);
+
 pub fn bindings() -> Vec<KeyBinding> {
     // ⌘W and ⌘⇧[ / ⌘⇧] are in the keymap; these second chords and the slots stay fixed.
     let mut b = vec![
@@ -49,6 +54,11 @@ pub fn bindings() -> Vec<KeyBinding> {
                 slot + 1
             ),
             ActivateTab(slot),
+            None,
+        ));
+        b.push(KeyBinding::new(
+            &crate::keymap::pane_slot(slot + 1),
+            FocusPaneNumber(slot + 1),
             None,
         ));
     }

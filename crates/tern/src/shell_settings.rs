@@ -440,6 +440,17 @@ impl Shell {
                     .child(w::row(
                         &t,
                         false,
+                        "Focus pane 1–9 (hold to see the numbers)",
+                        None,
+                        div().text_sm().text_color(t.muted).child(if cfg!(target_os = "macos") {
+                            "⌥⌘1 … ⌥⌘9"
+                        } else {
+                            "Ctrl+Alt+1 … Ctrl+Alt+9"
+                        }),
+                    ))
+                    .child(w::row(
+                        &t,
+                        false,
                         "Next / previous tab",
                         None,
                         div().text_sm().text_color(t.muted).child(if cfg!(target_os = "macos") {

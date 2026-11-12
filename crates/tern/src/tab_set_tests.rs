@@ -628,3 +628,33 @@ fn zoom_is_not_saved() {
     tabs.toggle_zoom();
     assert_eq!(format!("{:?}", tabs.saved()), before);
 }
+
+#[test]
+fn a_pane_number_is_its_place_in_reading_order_and_focuses_that_pane() {
+    let (mut tabs, _) = set(&["a"]);
+    let below = tabs.new_pane_id();
+    tabs.split(1, Direction::Down, pane(below), floor())
+        .unwrap();
+    let right = tabs.new_pane_id();
+    tabs.split(1, Direction::Right, pane(right), floor())
+        .unwrap();
+    let tab = tabs.active_tab().unwrap();
+    assert_eq!(
+        [1, right, below].map(|id| tab.number_of(id)),
+        [Some(1), Some(2), Some(3)]
+    );
+    assert_eq!(tab.number_of(99), None);
+    assert!(tabs.focus_number(3));
+    assert_eq!(tabs.active_tab().unwrap().focused(), below);
+    assert!(tabs.focus_number(1));
+    assert_eq!(tabs.active_tab().unwrap().focused(), 1);
+}
+
+#[test]
+fn a_number_with_no_pane_does_nothing() {
+    let mut tabs = side_by_side();
+    let focused = tabs.active_tab().unwrap().focused();
+    assert!(!tabs.focus_number(3));
+    assert!(!tabs.focus_number(0));
+    assert_eq!(tabs.active_tab().unwrap().focused(), focused);
+}

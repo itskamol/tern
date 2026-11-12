@@ -266,6 +266,21 @@ const RESERVED: &[&str] = if cfg!(target_os = "macos") {
     &RESERVED_OTHER
 };
 
+/// ⌥⌘ and a digit on macOS, Ctrl+Alt and a digit elsewhere: focus pane `n` (1–9).
+pub fn pane_slot(n: usize) -> String {
+    let held = if cfg!(target_os = "macos") {
+        "alt-cmd"
+    } else {
+        "ctrl-alt"
+    };
+    format!("{held}-{n}")
+}
+
+/// A chord tern keeps for itself: the menu's and the clipboard's, and the pane numbers.
+fn reserved(combo: &str) -> bool {
+    RESERVED.contains(&combo) || (1..=9).any(|n| pane_slot(n) == combo)
+}
+
 /// The user's overrides; an empty string unbinds. Anything absent uses its default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Keymap(pub BTreeMap<ShortcutId, String>);
@@ -320,11 +335,8 @@ impl Keymap {
 
     /// Why `combo` cannot go to `id`, or `None` when it can.
     pub fn refusal(&self, id: ShortcutId, combo: &str) -> Option<String> {
-        if RESERVED.contains(&combo) {
-            return Some(format!(
-                "{} is kept for quitting and the clipboard",
-                badge(combo)
-            ));
+        if reserved(combo) {
+            return Some(format!("{} is one of tern's fixed shortcuts", badge(combo)));
         }
         ShortcutId::ALL
             .iter()
@@ -527,14 +539,22 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_number_chord_cannot_be_given_to_a_shortcut() {
+        let k = Keymap::default();
+        for n in 1..=9 {
+            let chord = pane_slot(n);
+            let why = k.refusal(ShortcutId::Snippets, &chord);
+            assert!(why.is_some_and(|w| w.contains("fixed")), "{chord}");
+        }
+        assert_eq!(k.refusal(ShortcutId::Snippets, &pane_slot(0)), None);
+    }
+
+    #[test]
     fn no_two_defaults_share_a_chord_or_take_a_reserved_one() {
         let mut seen = std::collections::BTreeSet::new();
         for id in ShortcutId::ALL {
             assert!(seen.insert(id.default_combo()), "{id:?} repeats a chord");
-            assert!(
-                !RESERVED.contains(&id.default_combo()),
-                "{id:?} is reserved"
-            );
+            assert!(!reserved(id.default_combo()), "{id:?} is reserved");
         }
         let (search, snippets) = if cfg!(target_os = "macos") {
             ("cmd-shift-f", "cmd-shift-s")

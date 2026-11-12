@@ -158,6 +158,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 form: None,
                 confirm_delete: None,
                 renaming: None,
+                pane_numbers: false,
                 broadcast: None,
                 broadcast_picker: None,
                 panels: Default::default(),
@@ -281,6 +282,8 @@ pub struct Shell {
     drop_hint: Option<(PaneId, split::Direction)>,
     /// The tab whose title is being edited in the strip.
     renaming: Option<tabs_ui::Rename>,
+    /// ⌥⌘ is held: each pane of a split tab shows its number and host.
+    pane_numbers: bool,
     /// Input typed in one tab also going to others, and the list that picks them.
     broadcast: Option<broadcast_ui::Broadcast>,
     broadcast_picker: Option<broadcast_ui::BroadcastPicker>,
@@ -649,6 +652,9 @@ impl Render for Shell {
                 s.show_tab(tabs::step(s.tabs.active(), s.tabs.len(), -1), w, cx)
             }))
             .on_action(cx.listener(|s, a: &ActivateTab, w, cx| s.show_tab(a.0, w, cx)))
+            .on_modifiers_changed(cx.listener(|s, e: &gpui::ModifiersChangedEvent, _, cx| {
+                s.hold_pane_numbers(e.modifiers, cx)
+            }))
             .on_action(cx.listener(|s, _: &ToggleHostPicker, w, cx| s.toggle_picker(w, cx)))
             .on_action(cx.listener(|s, _: &FocusHostSearch, w, cx| s.focus_search(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSnippets, w, cx| s.toggle_snippet_picker(w, cx)))

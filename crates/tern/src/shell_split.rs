@@ -247,6 +247,32 @@ impl Shell {
         cx.notify();
     }
 
+    /// ⌥⌘ and a digit: the pane with that number takes the keyboard. A number with no pane
+    /// does nothing.
+    fn focus_pane_number(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.tabs.active_tab().and_then(|tab| {
+            tab.in_reading_order()
+                .get(n.wrapping_sub(1))
+                .map(|p| p.pane_id())
+        });
+        if let Some(id) = id {
+            self.focus_pane(id, window, cx);
+        }
+    }
+
+    /// Shows the pane numbers while ⌥⌘ (Ctrl+Alt off macOS), and nothing else, is held.
+    pub(super) fn hold_pane_numbers(&mut self, m: gpui::Modifiers, cx: &mut Context<Self>) {
+        let held = if cfg!(target_os = "macos") {
+            m.alt && m.platform && !m.control && !m.shift
+        } else {
+            m.alt && m.control && !m.platform && !m.shift
+        };
+        if held != self.pane_numbers {
+            self.pane_numbers = held;
+            cx.notify();
+        }
+    }
+
     /// The focused pane fills the tab, or the split comes back (⇧⌘↩). Every session keeps
     /// running behind a zoom; a pane hidden by it keeps its size until it shows again.
     pub(crate) fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
@@ -439,6 +465,12 @@ impl Shell {
             })
             .when_some(hint, |el, side| el.child(drop_zone(side, &t)))
             .when(asking, |el| el.child(password_badge(combo, &t)))
+            .when_some(
+                (self.pane_numbers && split)
+                    .then(|| tab.number_of(id))
+                    .flatten(),
+                |el, n| el.child(pane_number(n, &pane.host, &t)),
+            )
             .into_any_element()
     }
 }
@@ -462,6 +494,23 @@ fn password_badge(combo: &str, t: &Theme) -> gpui::Div {
         .text_color(t.on_accent)
         .text_size(px(11.))
         .child(text)
+}
+
+/// The pane's number and host while ⌥⌘ is held, at its top left: the "Password asked"
+/// badge's look, so the two read as one family of pane notes.
+fn pane_number(n: usize, host: &str, t: &Theme) -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(8.))
+        .left(px(8.))
+        .px(px(6.))
+        .py(px(2.))
+        .rounded(px(4.))
+        .bg(t.accent)
+        .text_color(t.on_accent)
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .child(SharedString::from(format!("{n}  {host}")))
 }
 
 /// The half of a pane a dropped host would take.
@@ -501,6 +550,9 @@ pub(super) fn pane_actions(root: gpui::Div, cx: &mut Context<Shell>) -> gpui::Di
     .on_action(cx.listener(|s, _: &ResizePaneDown, _, cx| s.step_pane(Down, cx)))
     .on_action(cx.listener(|s, _: &EqualizePanes, _, cx| s.equalize_panes(cx)))
     .on_action(cx.listener(|s, _: &ZoomPane, _, cx| s.toggle_zoom(cx)))
+    .on_action(
+        cx.listener(|s, a: &crate::tabs::FocusPaneNumber, w, cx| s.focus_pane_number(a.0, w, cx)),
+    )
     .on_action(cx.listener(|s, _: &ClosePane, w, cx| s.close_pane_or_tab(w, cx)))
     .on_action(cx.listener(|s, _: &FocusPaneLeft, w, cx| s.move_pane_focus(Left, w, cx)))
     .on_action(cx.listener(|s, _: &FocusPaneRight, w, cx| s.move_pane_focus(Right, w, cx)))
