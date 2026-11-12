@@ -170,7 +170,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 }),
                 quit_ask: false,
                 conflict_all: false,
-                _transfers_sub: None,
+                _transfers_subs: Vec::new(),
                 error: None,
                 picker: None,
                 history: Default::default(),
@@ -198,10 +198,13 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 _clock: None,
             };
             shell.refresh_hosts();
-            shell._transfers_sub = Some(cx.subscribe(
-                &shell.transfers,
-                |s, _, done: &crate::transfers::Finished, cx| s.on_transfer_finished(done, cx),
-            ));
+            shell._transfers_subs = vec![
+                cx.subscribe(
+                    &shell.transfers,
+                    |s, _, done: &crate::transfers::Finished, cx| s.on_transfer_finished(done, cx),
+                ),
+                cx.observe(&shell.transfers, |s, _, cx| s.on_transfers_changed(cx)),
+            ];
             shell
         })
     })?;
@@ -294,7 +297,7 @@ pub struct Shell {
     quit_ask: bool,
     /// The conflict sheet's "apply to all" box.
     conflict_all: bool,
-    _transfers_sub: Option<Subscription>,
+    _transfers_subs: Vec<Subscription>,
     error: Option<String>,
     picker: Option<Picker>,
     history: history_ui::HistoryUi,

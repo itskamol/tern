@@ -52,6 +52,8 @@ pub struct Entry {
 pub struct Messages {
     list: VecDeque<Entry>,
     latest: Option<(String, Instant)>,
+    /// Work in progress, oldest first; the newest is the one shown.
+    progress: Vec<(&'static str, String)>,
 }
 
 impl Messages {
@@ -83,18 +85,37 @@ impl Messages {
         kind
     }
 
+    /// A message that follows work in progress ("Downloading\u{2026} 40%"): shown until
+    /// [`Self::end_progress`], its text replaced in place, never added to the list. `key`
+    /// names the work, so two can run at once.
+    pub fn set_progress(&mut self, key: &'static str, text: impl Into<String>) {
+        let text = text.into();
+        match self.progress.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, shown)) => *shown = text,
+            None => self.progress.push((key, text)),
+        }
+    }
+
+    pub fn end_progress(&mut self, key: &'static str) {
+        self.progress.retain(|(k, _)| *k != key);
+    }
+
     /// The list, oldest first.
     pub fn list(&self) -> impl DoubleEndedIterator<Item = &Entry> + ExactSizeIterator {
         self.list.iter()
     }
 
-    /// The Activity on screen at `now` and where it goes, if one was raised in the last
-    /// [`SHOWN_FOR`].
+    /// The Activity on screen at `now` and where it goes: one raised in the last [`SHOWN_FOR`],
+    /// else the newest work in progress.
     #[must_use]
     pub fn showing(&self, now: Instant, status_line: bool) -> Option<(Place, &str)> {
-        let (text, raised) = self.latest.as_ref()?;
-        (now.saturating_duration_since(*raised) < SHOWN_FOR)
-            .then(|| (place(Kind::Activity, false, status_line), text.as_str()))
+        let fresh = self
+            .latest
+            .as_ref()
+            .filter(|(_, raised)| now.saturating_duration_since(*raised) < SHOWN_FOR)
+            .map(|(text, _)| text.as_str());
+        let text = fresh.or_else(|| self.progress.last().map(|(_, text)| text.as_str()))?;
+        Some((place(Kind::Activity, false, status_line), text))
     }
 }
 
@@ -212,5 +233,61 @@ mod tests {
         );
         m.raise(Kind::Alert, "Sync failed", false, true, at, t0 + ms(5000));
         assert_eq!(m.showing(t0 + ms(5000), false).map(|s| s.1), Some("Synced"));
+    }
+
+    #[test]
+    fn progress_shows_until_it_ends_updates_in_place_and_stays_out_of_the_list() {
+        let mut m = Messages::default();
+        let t0 = Instant::now();
+        m.set_progress("update", "Downloading tern 0.4.0\u{2026} 10%");
+        m.set_progress("update", "Downloading tern 0.4.0\u{2026} 60%");
+        let later = t0 + SHOWN_FOR * 10;
+        assert_eq!(
+            m.showing(later, true),
+            Some((Place::StatusLine, "Downloading tern 0.4.0\u{2026} 60%"))
+        );
+        assert_eq!(m.list().len(), 0);
+        m.end_progress("update");
+        assert_eq!(m.showing(later, true), None);
+    }
+
+    #[test]
+    fn a_new_activity_shows_over_progress_for_its_time_then_progress_is_back() {
+        let mut m = Messages::default();
+        let t0 = Instant::now();
+        m.set_progress("transfers", "Copying a.txt 40%");
+        m.raise(
+            Kind::Activity,
+            "Synced",
+            false,
+            false,
+            SystemTime::now(),
+            t0,
+        );
+        assert_eq!(m.showing(t0, false), Some((Place::Titlebar, "Synced")));
+        assert_eq!(
+            m.showing(t0 + SHOWN_FOR, false),
+            Some((Place::Titlebar, "Copying a.txt 40%"))
+        );
+    }
+
+    #[test]
+    fn ending_one_progress_leaves_the_other() {
+        let mut m = Messages::default();
+        let later = Instant::now() + SHOWN_FOR;
+        m.set_progress("update", "Checking for updates\u{2026}");
+        m.set_progress("transfers", "Copying a.txt 40%");
+        assert_eq!(
+            m.showing(later, true).map(|s| s.1),
+            Some("Copying a.txt 40%")
+        );
+        m.end_progress("transfers");
+        assert_eq!(
+            m.showing(later, true).map(|s| s.1),
+            Some("Checking for updates\u{2026}")
+        );
+        m.end_progress("nothing");
+        m.end_progress("update");
+        assert_eq!(m.showing(later, true), None);
     }
 }

@@ -1,5 +1,6 @@
-//! What a person sees for an update check: one place maps the check's result to the toast and the
-//! Version row in Settings → About, so the two cannot drift apart. Also the rule that only one
+//! What a person sees for an update check: one place maps the check's result to its message,
+//! the message's kind (ADR 0002) and the Version row in Settings → About, so they cannot drift
+//! apart. Also the rule that only one
 //! check runs at a time.
 
 /// A newer release: its version text and the page to open.
@@ -24,8 +25,8 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// The snackbar's message; `current` is the running version.
-    pub fn toast_text(&self, current: &str) -> String {
+    /// What the message says; `current` is the running version.
+    pub fn message(&self, current: &str) -> String {
         match self {
             Self::Checking => "Checking for updates…".into(),
             Self::UpToDate => format!("tern is up to date ({current})"),
@@ -33,6 +34,19 @@ impl Outcome {
             Self::Ready(v) => format!("tern {v} is ready; it installs when tern quits"),
             Self::NotInstallable(f) => format!("tern {} is available", f.version),
             Self::Failed(why) => format!("Could not check for updates: {why}"),
+        }
+    }
+
+    /// A result with something to do next ("Restart now", "Download") or a failure is an
+    /// Alert; the rest is Activity, shown in place while the check runs.
+    pub fn kind(&self) -> crate::messages::Kind {
+        match self {
+            Self::Ready(_) | Self::NotInstallable(_) | Self::Failed(_) => {
+                crate::messages::Kind::Alert
+            }
+            Self::Checking | Self::UpToDate | Self::Downloading(_) => {
+                crate::messages::Kind::Activity
+            }
         }
     }
 

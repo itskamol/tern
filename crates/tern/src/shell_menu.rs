@@ -231,7 +231,7 @@ impl Shell {
     fn open_new_tab(&mut self, host: &HostEntry, window: &mut Window, cx: &mut Context<Self>) {
         match ConnectSpec::from_host_entry(host) {
             Ok(spec) => self.open_tab(super::Launch::Ssh(spec), host.alias.clone(), window, cx),
-            Err(e) => self.notify_toast(super::ToastKind::Critical, e.to_string(), cx),
+            Err(e) => self.alert_failed(e.to_string(), cx),
         }
     }
 

@@ -79,6 +79,23 @@ impl Shell {
         cx.notify();
     }
 
+    /// Work in progress shown as an Activity ("Downloading\u{2026}"), replaced in place until
+    /// [`Self::end_progress_activity`]; `key` names the work.
+    pub(crate) fn progress_activity(
+        &mut self,
+        key: &'static str,
+        text: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.activity.messages.set_progress(key, text);
+        cx.notify();
+    }
+
+    pub(crate) fn end_progress_activity(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        self.activity.messages.end_progress(key);
+        cx.notify();
+    }
+
     /// An Alert for something that did not work, with no action.
     pub(crate) fn alert_failed(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.alert(Toast::new(super::ToastKind::Critical, text), cx);

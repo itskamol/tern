@@ -11,8 +11,8 @@ use gpui::{
 };
 use tern_ssh::HostEntry;
 
+use super::Shell;
 use super::connections_ui::{button, note};
-use super::{Shell, ToastKind};
 use crate::connections::{self, Connection};
 use crate::picker;
 
@@ -86,7 +86,7 @@ impl Shell {
             return self.close_import(window, cx);
         }
         if let Some(e) = self.store_error.clone() {
-            return self.notify_toast(ToastKind::Critical, e, cx);
+            return self.alert_failed(e, cx);
         }
         let mut next = self.connections.clone();
         let count = fresh.len();
@@ -98,17 +98,13 @@ impl Shell {
         if let Some(dir) = crate::settings::dir()
             && let Err(e) = connections::save(&dir, &next)
         {
-            return self.notify_toast(ToastKind::Critical, e.to_string(), cx);
+            return self.alert_failed(e.to_string(), cx);
         }
         self.connections = next;
         self.refresh_hosts();
         self.close_import(window, cx);
         let plural = if count == 1 { "" } else { "s" };
-        self.notify_toast(
-            ToastKind::Positive,
-            format!("Imported {count} host{plural}"),
-            cx,
-        );
+        self.activity(format!("Imported {count} host{plural}"), cx);
     }
 
     fn on_import_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

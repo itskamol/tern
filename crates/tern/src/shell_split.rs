@@ -67,7 +67,7 @@ impl Shell {
         let floor = self.pane_floor(cx);
         let room = self.tabs.can_split(pane, side, floor);
         if !room {
-            self.notify_toast(ToastKind::Default, NO_ROOM.to_owned(), cx);
+            self.activity(NO_ROOM.to_owned(), cx);
         }
         room
     }

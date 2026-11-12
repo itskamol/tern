@@ -1,5 +1,6 @@
 //! What a person sees for each result of an update check, and the one-at-a-time rule.
 use super::*;
+use crate::messages::Kind;
 
 fn available() -> Found {
     Found {
@@ -9,42 +10,49 @@ fn available() -> Found {
 }
 
 #[test]
-fn each_result_has_its_toast_and_its_version_row() {
-    // (outcome, toast, version row)
+fn each_result_has_its_message_kind_and_version_row() {
+    // (outcome, message, kind, version row)
     let cases = [
         (
             Outcome::Checking,
             "Checking for updates…",
+            Kind::Activity,
             "0.2.1; checking for updates…",
         ),
         (
             Outcome::UpToDate,
             "tern is up to date (0.2.1)",
+            Kind::Activity,
             "0.2.1; up to date",
         ),
         (
             Outcome::Downloading("0.2.2".into()),
             "tern 0.2.2 is available; downloading it…",
+            Kind::Activity,
             "0.2.1; 0.2.2 is downloading",
         ),
         (
             Outcome::Ready("0.2.2".into()),
             "tern 0.2.2 is ready; it installs when tern quits",
+            Kind::Alert,
             "0.2.1; 0.2.2 is downloaded and installs when tern quits",
         ),
         (
             Outcome::NotInstallable(available()),
             "tern 0.2.2 is available",
+            Kind::Alert,
             "0.2.1; 0.2.2 is available to download",
         ),
         (
             Outcome::Failed("could not reach the update feed".into()),
             "Could not check for updates: could not reach the update feed",
+            Kind::Alert,
             "0.2.1; the last check failed: could not reach the update feed",
         ),
     ];
-    for (outcome, toast, row) in cases {
-        assert_eq!(outcome.toast_text("0.2.1"), toast, "{outcome:?}");
+    for (outcome, message, kind, row) in cases {
+        assert_eq!(outcome.message("0.2.1"), message, "{outcome:?}");
+        assert_eq!(outcome.kind(), kind, "{outcome:?}");
         assert_eq!(
             version_row("0.2.1", Some(&outcome), None),
             row,

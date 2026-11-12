@@ -15,6 +15,9 @@ use crate::shell::connections_ui::button;
 use crate::statusline;
 use crate::transfers::{self, Finished};
 
+/// The copies' work in progress, in the status line or by the titlebar button.
+const TRANSFERS: &str = "transfers";
+
 /// The first live connection among `sessions` (label, connection) whose label is `label`: a
 /// second tab to the host still serves the panel when the first one is closed.
 fn connected_to<T>(
@@ -113,6 +116,14 @@ impl Shell {
             self.activity(text, cx);
         } else {
             self.alert(Toast::new(ToastKind::Critical, text), cx);
+        }
+    }
+
+    /// Running copies show as one progress Activity, updated in place until the last ends.
+    pub(super) fn on_transfers_changed(&mut self, cx: &mut Context<Self>) {
+        match crate::transfers::progress_line(self.transfers.read(cx).rows()) {
+            Some(line) => self.progress_activity(TRANSFERS, line, cx),
+            None => self.end_progress_activity(TRANSFERS, cx),
         }
     }
 

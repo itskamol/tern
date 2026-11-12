@@ -12,9 +12,9 @@ use gpui::{
     point, px,
 };
 
+use super::Shell;
 use super::connections_ui::{button, note, row};
 use super::settings_ui::Section;
-use super::{Shell, ToastKind};
 use crate::empty_state::{self, Listing};
 use crate::picker::{self, Key};
 use crate::settings_widgets as w;
@@ -78,7 +78,7 @@ impl Shell {
         }
         let active_session = self.tabs.active_tab().is_some() && self.settings_page.is_none();
         if !active_session {
-            return self.notify_toast(ToastKind::Default, "Open a session to use a snippet", cx);
+            return self.activity("Open a session to use a snippet", cx);
         }
         self.picker = None;
         let focus = cx.focus_handle();
@@ -127,11 +127,7 @@ impl Shell {
             .session()
             .is_some_and(|s| s.read(cx).insert_text(&snippet.command));
         if !sent {
-            self.notify_toast(
-                ToastKind::Critical,
-                "The session is not connected, so nothing was typed",
-                cx,
-            );
+            self.alert_failed("The session is not connected, so nothing was typed", cx);
         }
     }
 
@@ -549,7 +545,7 @@ impl Shell {
         };
         match saved {
             Ok(()) => self.snippets.items = next,
-            Err(e) => self.notify_toast(ToastKind::Critical, e, cx),
+            Err(e) => self.alert_failed(e, cx),
         }
         cx.notify();
     }

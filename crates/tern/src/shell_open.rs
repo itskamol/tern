@@ -110,7 +110,7 @@ impl Shell {
                         ix.filter(|ix| *ix != shell.tabs.active() || shell.settings_page.is_some())
                     {
                         let alias = shell.tabs[ix].alias.clone();
-                        shell.toast(
+                        shell.alert(
                             Toast::new(ToastKind::Critical, format!("{alias} disconnected"))
                                 .action("Show", move |s, window, cx| {
                                     if let Some(ix) = s

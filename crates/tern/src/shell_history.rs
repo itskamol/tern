@@ -18,7 +18,7 @@ use gpui::{
     point, px,
 };
 
-use super::{Shell, ToastKind};
+use super::Shell;
 use crate::command_history::{CommandHistory, Entry, Scope};
 use crate::picker;
 use crate::session::Put;
@@ -133,11 +133,7 @@ impl Shell {
             .and_then(|tab| tab.session())
             .filter(|_| self.settings_page.is_none());
         let Some(session) = session else {
-            return self.notify_toast(
-                ToastKind::Default,
-                "Open a session to see its command history",
-                cx,
-            );
+            return self.activity("Open a session to see its command history", cx);
         };
         let alias = session.read(cx).alias().to_owned();
         self.picker = None;
@@ -267,7 +263,7 @@ impl Shell {
             Put::FullScreen => "A full-screen program is open, so nothing was typed",
             Put::PasswordPrompt => "The session is asking for a password, so nothing was typed",
         };
-        self.notify_toast(ToastKind::Critical, why, cx);
+        self.alert_failed(why, cx);
     }
 
     fn delete_history_line(&mut self, cx: &mut Context<Self>) {
@@ -284,7 +280,7 @@ impl Shell {
             cx.update_global(|h: &mut CommandHistory, _| h.delete(&entry.host, &entry.line));
         if let Err(e) = result {
             tracing::warn!(error = %e, "command_history_delete_failed");
-            self.notify_toast(ToastKind::Critical, "Could not delete that line", cx);
+            self.alert_failed("Could not delete that line", cx);
         }
         self.history_search(cx);
         cx.notify();
@@ -549,7 +545,7 @@ impl Shell {
         });
         if let Err(e) = result {
             tracing::warn!(error = %e, "command_history_clear_failed");
-            self.notify_toast(ToastKind::Critical, "Could not clear the history", cx);
+            self.alert_failed("Could not clear the history", cx);
         }
         cx.notify();
     }

@@ -380,11 +380,7 @@ impl Shell {
             return cx.notify();
         }
         if password.is_empty() {
-            self.notify_toast(
-                ToastKind::Positive,
-                format!("Saved {}", draft.name.trim()),
-                cx,
-            );
+            self.activity(format!("Saved {}", draft.name.trim()), cx);
             return self.close_form(window, cx);
         }
         if let Some(form) = self.form.as_mut() {
@@ -445,7 +441,7 @@ impl Shell {
             };
             let _ = this.update_in(cx, |shell, window, cx| match result {
                 Ok(()) => {
-                    shell.notify_toast(ToastKind::Positive, "Password saved in the vault", cx);
+                    shell.activity("Password saved in the vault", cx);
                     shell.close_form(window, cx);
                 }
                 Err(message) => {
@@ -491,7 +487,7 @@ impl Shell {
                     );
                 }
             }
-            Err(e) => self.notify_toast(ToastKind::Critical, e, cx),
+            Err(e) => self.alert_failed(e, cx),
         }
         cx.notify();
     }

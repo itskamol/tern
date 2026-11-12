@@ -10,8 +10,8 @@ use gpui::{
 };
 use tern_ssh::Forward;
 
+use super::Shell;
 use super::broadcast_ui::TabId;
-use super::{Shell, ToastKind};
 use crate::forward_spec;
 use crate::keymap::{self, Keymap, ShortcutId};
 use crate::session::Status;
@@ -274,8 +274,7 @@ impl Shell {
         }
         let target = self.tabs.fill_target(|pane| pane.waiting_for_fill(cx));
         if target == FillTarget::Several {
-            return self.notify_toast(
-                ToastKind::Default,
+            return self.activity(
                 "Two panes are asking for a password: click the one to fill",
                 cx,
             );
@@ -318,7 +317,7 @@ impl Shell {
         } else {
             format!("{key} fills the password for {}", pane.host)
         };
-        self.notify_toast(ToastKind::Default, text, cx);
+        self.activity(text, cx);
     }
 
     /// ⌘K: clears the focused pane's scrollback and screen, keeping the prompt line.
@@ -348,14 +347,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match note {
-            SessionNote::ForwardFailed { forward, error } => self.notify_toast(
-                ToastKind::Critical,
-                format!("Port forward {forward} failed: {error}"),
-                cx,
-            ),
+            SessionNote::ForwardFailed { forward, error } => {
+                self.alert_failed(format!("Port forward {forward} failed: {error}"), cx)
+            }
             SessionNote::PasswordPrompt => self.hint_fill(session, cx),
-            SessionNote::Message(text) => self.notify_toast(ToastKind::Default, text.clone(), cx),
-            SessionNote::Problem(text) => self.notify_toast(ToastKind::Critical, text.clone(), cx),
+            SessionNote::Message(text) => self.activity(text.clone(), cx),
+            SessionNote::Problem(text) => self.alert_failed(text.clone(), cx),
         }
     }
 }

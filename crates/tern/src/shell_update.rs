@@ -10,8 +10,12 @@ use gpui::{AppContext as _, Context};
 use serde::Deserialize;
 
 use super::{Shell, Toast, ToastKind};
+use crate::messages::Kind;
 use crate::settings;
 use crate::update_outcome::{Found, Outcome, Trouble, reason, version_row};
+
+/// The update check's work in progress, in the status line or by the titlebar button.
+const UPDATE: &str = "update";
 
 /// Only a page on GitHub is ever opened, whatever the response says.
 const PAGE_PREFIX: &str = "https://github.com/";
@@ -233,10 +237,10 @@ fn stage(feed: &Feed, found: &Found) -> Option<Staged> {
     }
 }
 
-/// The toast for how a check ended; "Restart now" and "Download" go with the outcomes that have
+/// The Alert for how a check ended; "Restart now" and "Download" go with the outcomes that have
 /// something to do next.
-fn outcome_toast(outcome: &Outcome) -> Toast {
-    let text = outcome.toast_text(env!("CARGO_PKG_VERSION"));
+fn outcome_alert(outcome: &Outcome) -> Toast {
+    let text = outcome.message(env!("CARGO_PKG_VERSION"));
     let kind = match outcome {
         Outcome::Failed(_) => ToastKind::Critical,
         _ => ToastKind::Default,
@@ -308,8 +312,8 @@ impl Shell {
             return;
         }
         if manual {
-            let text = Outcome::Checking.toast_text(env!("CARGO_PKG_VERSION"));
-            self.progress_toast(text, cx);
+            let text = Outcome::Checking.message(env!("CARGO_PKG_VERSION"));
+            self.progress_activity(UPDATE, text, cx);
         }
         cx.notify();
         let dir = settings::dir();
@@ -352,7 +356,7 @@ impl Shell {
         }
         let downloading = Outcome::Downloading(found.version.clone());
         if manual {
-            self.progress_toast(downloading.toast_text(env!("CARGO_PKG_VERSION")), cx);
+            self.progress_activity(UPDATE, downloading.message(env!("CARGO_PKG_VERSION")), cx);
         }
         self.update_check.progress(downloading);
         cx.notify();
@@ -380,11 +384,12 @@ impl Shell {
             _ => {}
         }
         self.update_check.finish(outcome.clone());
-        if manual {
-            self.end_progress_toast(cx);
-        }
+        self.end_progress_activity(UPDATE, cx);
         if manual || actionable {
-            self.toast(outcome_toast(outcome), cx);
+            match outcome.kind() {
+                Kind::Alert => self.alert(outcome_alert(outcome), cx),
+                Kind::Activity => self.activity(outcome.message(env!("CARGO_PKG_VERSION")), cx),
+            }
         }
         cx.notify();
     }
@@ -434,7 +439,7 @@ impl Shell {
         match self.install_update() {
             Ok(true) => cx.quit(),
             Ok(false) => {}
-            Err(e) => self.notify_toast(ToastKind::Critical, format!("Could not update: {e}"), cx),
+            Err(e) => self.alert_failed(format!("Could not update: {e}"), cx),
         }
     }
 

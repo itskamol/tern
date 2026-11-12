@@ -260,11 +260,7 @@ impl Shell {
             && let Err(e) = connections::save(&dir, &next)
         {
             tracing::warn!(error = %e, "hosts_move_save_failed");
-            return self.notify_toast(
-                super::ToastKind::Critical,
-                format!("Could not move the host: {e}"),
-                cx,
-            );
+            return self.alert_failed(format!("Could not move the host: {e}"), cx);
         }
         let moved = self
             .connections

@@ -151,7 +151,21 @@ pub fn detail(p: &Progress) -> String {
     parts.join(" · ")
 }
 
-/// How the end of a batch reads in a toast: `Some(true)` when it went well.
+/// The Activity that follows running copies: the first batch's label and progress, and how
+/// many more wait. `None` when nothing runs.
+pub fn progress_line(rows: &[Row]) -> Option<String> {
+    let first = rows.first()?;
+    let mut line = match &first.progress {
+        Some(p) => format!("Copying {}: {}", first.label, detail(p)),
+        None => format!("Copying {}\u{2026}", first.label),
+    };
+    if rows.len() > 1 {
+        line += &format!(", {} more waiting", rows.len() - 1);
+    }
+    Some(line)
+}
+
+/// How the end of a batch reads: `true` when it went well.
 pub fn outcome(label: &str, s: &Summary) -> (bool, String) {
     if s.cancelled {
         return (false, format!("Cancelled: {label}"));
@@ -218,8 +232,40 @@ mod tests {
         assert_eq!(detail(&p), "1.0 KB of 4.0 KB · 2.0 KB/s · 2 s left");
     }
 
+    fn row(label: &str, progress: Option<Progress>) -> Row {
+        Row {
+            batch: 1,
+            label: label.into(),
+            progress,
+        }
+    }
+
     #[test]
-    fn the_toast_says_what_happened_and_the_first_failure() {
+    fn running_copies_read_as_one_line_with_the_first_batch_s_progress() {
+        assert_eq!(progress_line(&[]), None);
+        assert_eq!(
+            progress_line(&[row("a.txt to web-01", None)]).as_deref(),
+            Some("Copying a.txt to web-01\u{2026}")
+        );
+        let p = Progress {
+            batch: 1,
+            current: "a.txt".into(),
+            done: 1024,
+            total: 4096,
+            files_done: 0,
+            files_total: 1,
+            speed: 0,
+            eta: None,
+        };
+        let rows = [row("a.txt to web-01", Some(p)), row("logs to db-02", None)];
+        assert_eq!(
+            progress_line(&rows).as_deref(),
+            Some("Copying a.txt to web-01: 1.0 KB of 4.0 KB, 1 more waiting")
+        );
+    }
+
+    #[test]
+    fn the_end_says_what_happened_and_the_first_failure() {
         assert_eq!(
             outcome("3 items to web", &summary(3, 0, &[], false)),
             (true, "Copied 3 items to web".into())

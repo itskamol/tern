@@ -104,7 +104,7 @@ impl Shell {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                self.toast(
+                self.alert(
                     super::Toast::new(super::ToastKind::Default, format!("Logging to {name}"))
                         .action(crate::platform::REVEAL_LABEL, move |_, _, cx| {
                             cx.reveal_path(&path)
@@ -112,11 +112,7 @@ impl Shell {
                     cx,
                 );
             }
-            Err(e) => self.notify_toast(
-                super::ToastKind::Critical,
-                format!("Could not start the log: {e}"),
-                cx,
-            ),
+            Err(e) => self.alert_failed(format!("Could not start the log: {e}"), cx),
         }
     }
 
@@ -129,11 +125,7 @@ impl Shell {
             s.stop_logging()
         });
         if let Some(path) = path {
-            self.notify_toast(
-                super::ToastKind::Default,
-                format!("Log saved to {}", path.display()),
-                cx,
-            );
+            self.activity(format!("Log saved to {}", path.display()), cx);
         }
     }
 

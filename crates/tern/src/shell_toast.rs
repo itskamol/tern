@@ -31,7 +31,6 @@ const EXIT_CURVE: CubicBezier = CubicBezier::new(0.35, 0.0, 1.0, 1.0);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Default,
-    Positive,
     Critical,
 }
 
@@ -43,8 +42,6 @@ pub(crate) struct Toast {
     message: SharedString,
     action: Option<(SharedString, Action)>,
     duration: Duration,
-    /// Follows a transfer: stays until [`Shell::end_progress_toast`], its text replaced in place.
-    progress: bool,
 }
 
 impl Toast {
@@ -54,20 +51,12 @@ impl Toast {
             message: message.into(),
             action: None,
             duration: DEFAULT_DURATION,
-            progress: false,
         }
     }
 
     /// Stays up for `secs` instead of the usual few seconds.
     pub(crate) fn staying(mut self, secs: u64) -> Self {
         self.duration = Duration::from_secs(secs);
-        self
-    }
-
-    /// Stays up for as long as the transfer it reports runs.
-    pub(crate) fn lasting(mut self) -> Self {
-        self.duration = Duration::from_secs(3600);
-        self.progress = true;
         self
     }
 
@@ -194,42 +183,6 @@ impl Shell {
         }
     }
 
-    /// Shows or updates the one snackbar that follows a transfer ("Downloading a.txt… 40%").
-    pub(crate) fn progress_toast(
-        &mut self,
-        message: impl Into<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        let message = message.into();
-        if let Some((toast, _)) = self.toasts.showing.as_mut().filter(|(t, _)| t.progress) {
-            toast.message = message;
-            return cx.notify();
-        }
-        if let Some(queued) = self.toasts.queue.iter_mut().find(|t| t.progress) {
-            queued.message = message;
-            return;
-        }
-        self.toast(Toast::new(Kind::Default, message).lasting(), cx);
-    }
-
-    /// Takes the transfer snackbar down, so its result can be shown next.
-    pub(crate) fn end_progress_toast(&mut self, cx: &mut Context<Self>) {
-        self.toasts.queue.retain(|t| !t.progress);
-        if let Some((_, clock)) = self.toasts.showing.as_mut().filter(|(t, _)| t.progress) {
-            clock.dismiss(Instant::now());
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn notify_toast(
-        &mut self,
-        kind: Kind,
-        message: impl Into<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        self.toast(Toast::new(kind, message), cx);
-    }
-
     fn next_toast(&mut self, cx: &mut Context<Self>) {
         let Some(toast) = self.toasts.queue.pop_front() else {
             self.toasts.showing = None;
@@ -292,7 +245,6 @@ impl Shell {
         let colors = Colors::for_theme(self.theme.light);
         let icon = match toast.kind {
             Kind::Default => None,
-            Kind::Positive => Some(("✓", colors.positive)),
             Kind::Critical => Some(("!", colors.critical)),
         };
         let viewport = window.viewport_size();
@@ -403,7 +355,6 @@ struct Colors {
     background: Hsla,
     text: Hsla,
     action: Hsla,
-    positive: Hsla,
     critical: Hsla,
 }
 
@@ -413,7 +364,7 @@ impl Colors {
     }
 
     /// seed-design `theme-light` (packages/rootage/__generated__/color.json): bg-neutral-solid =
-    /// gray-900, fg-on-neutral-solid = gray-00, fg-positive = green-700, fg-critical = red-700.
+    /// gray-900, fg-on-neutral-solid = gray-00, fg-critical = red-700.
     /// The action is tern's dark-palette accent, which has the contrast the light accent lacks
     /// on this dark surface.
     fn light() -> Self {
@@ -421,7 +372,6 @@ impl Colors {
             background: hex(0x2a3038),
             text: hex(0xffffff),
             action: hex(0x8b7cf6),
-            positive: hex(0x079171),
             critical: hex(0xfa342c),
         }
     }
@@ -434,8 +384,7 @@ impl Colors {
             text: hex(0x16171b),
             // fg-brand in seed is its carrot orange; tern's brand is its accent.
             action: hex(0x6d5ce8),
-            // fg-positive = green-700, fg-critical = red-700 (dark).
-            positive: hex(0x22b27f),
+            // fg-critical = red-700 (dark).
             critical: hex(0xff6e60),
         }
     }
