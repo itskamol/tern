@@ -219,6 +219,14 @@ impl Scene {
         })
     }
 
+    /// Settles until `line` is in the history, or gives up after a few seconds.
+    fn wait_for_history(&mut self, line: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.history().iter().any(|l| l == line) && Instant::now() < deadline {
+            self.settle();
+        }
+    }
+
     /// The command history of the host this session is on, newest first.
     fn history(&mut self) -> Vec<String> {
         self.app.read(|cx| {
@@ -369,6 +377,8 @@ fn nothing_typed_at_a_password_prompt_is_recorded_shown_or_not() {
     s.keys("abc");
     s.wait_for("***");
     s.keys("\r");
+    // Under load the history can trail the screen: wait for the command, then look again.
+    s.wait_for_history("starpass");
     s.settle();
     assert_eq!(s.history(), ["starpass", "sudo true"]);
 }
