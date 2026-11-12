@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, point, px,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use super::Shell;
-use crate::theme::{TITLEBAR_HEIGHT, hex};
+use crate::theme::hex;
 
 /// seed-design: "기본적으로 4초 동안 표시됩니다."
 pub const DEFAULT_DURATION: Duration = Duration::from_secs(4);
@@ -330,22 +330,7 @@ impl Shell {
                         )
                     }),
             );
-        Some(
-            deferred(
-                anchored()
-                    .position(point(px(0.), px(TITLEBAR_HEIGHT)))
-                    .child(
-                        div()
-                            .w(viewport.width)
-                            .p(px(8.))
-                            .flex()
-                            .justify_end()
-                            .child(card),
-                    ),
-            )
-            .priority(3)
-            .into_any_element(),
-        )
+        Some(card.into_any_element())
     }
 }
 

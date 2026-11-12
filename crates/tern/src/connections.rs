@@ -60,6 +60,10 @@ pub struct Connection {
     /// Port forwards started once connected, each as `-L`/`-R`/`-D` text (see `forward_spec`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<String>,
+    /// Programs on this host may set the clipboard without asking ("Always for this host" in
+    /// the Ask Decision). The form does not edit it, so an edit keeps it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clipboard_always: bool,
 }
 
 /// What the form shows for keep-alive when the connection sets none; matches tern-ssh.
@@ -133,6 +137,7 @@ impl Connection {
                 .join(", "),
             forward_agent: entry.forward_agent,
             agent_socket: entry.agent_socket.as_ref().map(|p| p.display().to_string()),
+            clipboard_always: false,
             keep_alive: entry
                 .server_alive_interval
                 .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX)),
@@ -419,6 +424,7 @@ pub fn validate(draft: &Draft, others: &[&str], all: &[Connection]) -> Result<Co
         agent_socket: None,
         keep_alive,
         forwards,
+        clipboard_always: false,
     })
 }
 

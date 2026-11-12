@@ -14,8 +14,10 @@ use tern_vault::Key;
 use super::Session;
 use super::Status;
 use super::vault::{After, Then};
+use crate::clipboard::{Answer, Store};
 use crate::keeper::Keeper;
 use crate::password_command::{self as pc, Purpose};
+use gpui::ClipboardItem;
 
 /// Whether the text left of the cursor is a password prompt: `[sudo] password for me:`,
 /// `Password:`, `me@host's password:`, `Enter passphrase for key '/x':`. The line must END at
@@ -226,11 +228,68 @@ pub enum SessionNote {
     Message(String),
     /// A line for an Alert: something did not work.
     Problem(String),
+    /// A program set the clipboard (this many characters), or was refused; said at most once a
+    /// minute.
+    ClipboardWritten(usize),
+    ClipboardRefused,
+    /// A program wants to set the clipboard (this many characters) and the setting is Ask:
+    /// the app shows a Decision and answers with [`Session::answer_clipboard`].
+    ClipboardAsk(usize),
+    /// The person chose Always for this host: a saved connection keeps it.
+    ClipboardAlways,
 }
 
 impl EventEmitter<SessionNote> for Session {}
 
 impl Session {
+    /// A held write is dropped once the setting no longer asks: it was never let through.
+    pub fn set_clipboard_policy(&mut self, policy: crate::clipboard::Policy) {
+        self.clipboard.policy = policy;
+        if policy != crate::clipboard::Policy::Ask {
+            self.clipboard.forget();
+        }
+    }
+
+    /// This host is always allowed to set the clipboard (a saved connection said so).
+    pub fn allow_clipboard_always(&mut self) {
+        self.clipboard.always = true;
+    }
+
+    /// Characters in the write waiting for the person's answer, while one waits.
+    pub fn clipboard_waiting(&self) -> Option<usize> {
+        self.clipboard.held_chars()
+    }
+
+    pub(super) fn on_clipboard_store(&mut self, text: String, cx: &mut Context<Self>) {
+        let chars = text.chars().count();
+        match self.clipboard.store(text) {
+            Store::Write(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.say_clipboard(SessionNote::ClipboardWritten(chars), cx);
+            }
+            Store::Refuse => self.say_clipboard(SessionNote::ClipboardRefused, cx),
+            Store::Ask => cx.emit(SessionNote::ClipboardAsk(chars)),
+        }
+    }
+
+    fn say_clipboard(&mut self, note: SessionNote, cx: &mut Context<Self>) {
+        if self.clipboard.mention(std::time::Instant::now()) {
+            cx.emit(note);
+        }
+    }
+
+    /// The person's answer to the held write: writes it, or drops it.
+    pub fn answer_clipboard(&mut self, answer: Answer, cx: &mut Context<Self>) {
+        let was_always = self.clipboard.always;
+        if let Some(text) = self.clipboard.answer(answer) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        if self.clipboard.always && !was_always {
+            cx.emit(SessionNote::ClipboardAlways);
+        }
+        cx.notify();
+    }
+
     /// Starts every forward the connection lists. Called once the shell is up.
     pub(super) fn start_spec_forwards(&mut self, cx: &mut Context<Self>) {
         for forward in self.link.spec.forwards.clone() {

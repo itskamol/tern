@@ -488,3 +488,17 @@ fn a_drop_that_changes_nothing_says_so_and_leaves_the_list_alone() {
     assert!(!move_to(&mut all, 0, &Spot::At(5)));
     assert_eq!(all, before);
 }
+
+#[test]
+fn always_allowing_the_clipboard_survives_a_relaunch_and_is_left_out_when_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = Connection {
+        clipboard_always: true,
+        ..conn("web-01", "10.0.0.5", "me")
+    };
+    let plain = conn("db-02", "10.0.0.6", "me");
+    save(dir.path(), &[allowed.clone(), plain.clone()]).unwrap();
+    assert_eq!(load(dir.path()).unwrap(), vec![allowed, plain]);
+    let text = std::fs::read_to_string(dir.path().join("hosts.json")).unwrap();
+    assert_eq!(text.matches("clipboardAlways").count(), 1, "{text}");
+}

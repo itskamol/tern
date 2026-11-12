@@ -353,6 +353,16 @@ impl Shell {
             SessionNote::PasswordPrompt => self.hint_fill(session, cx),
             SessionNote::Message(text) => self.activity(text.clone(), cx),
             SessionNote::Problem(text) => self.alert_failed(text.clone(), cx),
+            SessionNote::ClipboardWritten(chars) => {
+                let who = session.read(cx).label();
+                self.activity(crate::clipboard::note(&who, *chars, true), cx);
+            }
+            SessionNote::ClipboardRefused => {
+                let who = session.read(cx).label();
+                self.activity(crate::clipboard::note(&who, 0, false), cx);
+            }
+            SessionNote::ClipboardAsk(chars) => self.ask_clipboard(session, *chars, cx),
+            SessionNote::ClipboardAlways => self.keep_clipboard_always(session, cx),
         }
     }
 }

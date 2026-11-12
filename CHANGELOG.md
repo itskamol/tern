@@ -4,6 +4,10 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- Ask before a program on the server sets the clipboard. Settings → Terminal → "Programs can copy to the clipboard" is now Allow (the default, as before), Ask or Deny. In Ask, the copy waits on a card at the top right until you choose Allow once, Always for this host or Deny. Always is kept with a saved connection; for a `~/.ssh/config` host it lasts while its tabs are open. A settings file from before keeps its choice.
+
 ### Changed
 
 - Messages start to come in two kinds. An Activity ("Copied 3 files", a host change, a program setting the clipboard) shows quietly in the status line for 4 s, or next to a new Activity button at the right of the titlebar when there is no status line (Settings open, Files tab in front, status line off). An Alert (a failure, or a message with Undo) is the snackbar, which now sits at the top right instead of the top centre. The Activity button opens the list of both, newest first; Escape or a click elsewhere closes it. Every message now names its kind. A running update download or copy shows as one Activity that updates in place, instead of a snackbar that stays for minutes.

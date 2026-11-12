@@ -19,6 +19,16 @@ use crate::platform::SshRuntime;
 
 struct Host(Entity<Session>);
 
+/// Notes seen so far, taken out as they are checked.
+#[derive(Clone, Default)]
+struct Notes(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+impl Notes {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut self.0.borrow_mut())
+    }
+}
+
 impl Render for Host {
     fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
         gpui::div()
@@ -156,6 +166,46 @@ impl Scene {
                 s.on_session_event(tern_ssh::SessionEvent::Data(bytes), cx)
             })
         });
+    }
+
+    /// What is on the clipboard now, as text.
+    fn clipboard(&mut self) -> Option<String> {
+        self.app
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .filter(|t| !t.is_empty())
+    }
+
+    fn set_clipboard(&mut self, policy: crate::clipboard::Policy) {
+        let session = self.session.clone();
+        self.app
+            .update(|cx| session.update(cx, |s, _| s.set_clipboard_policy(policy)));
+    }
+
+    fn answer_clipboard(&mut self, answer: crate::clipboard::Answer) {
+        let session = self.session.clone();
+        self.app
+            .update(|cx| session.update(cx, |s, cx| s.answer_clipboard(answer, cx)));
+        self.settle();
+    }
+
+    /// The clipboard notes the session sends the app from now on: "ask 5", "always", ...
+    fn notes(&mut self) -> Notes {
+        let notes = Notes::default();
+        let seen = notes.clone();
+        let session = self.session.clone();
+        self.app.update(|cx| {
+            cx.subscribe(&session, move |_, note: &super::SessionNote, _| {
+                let text = match note {
+                    super::SessionNote::ClipboardAsk(chars) => format!("ask {chars}"),
+                    super::SessionNote::ClipboardAlways => "always".into(),
+                    _ => return,
+                };
+                seen.0.borrow_mut().push(text);
+            })
+            .detach();
+        });
+        notes
     }
 
     /// The session's Shell folder as `host:path`.
@@ -501,4 +551,71 @@ fn the_folder_the_server_s_shell_reports_becomes_the_session_s_shell_folder() {
     s.settle();
     assert_eq!(s.shell_folder().as_deref(), Some("db-02:/srv data"));
     assert!(s.screen().contains("test@demo:/var/log$"));
+}
+
+/// "hello" as a program sets the clipboard: OSC 52 with base64.
+const SET_CLIPBOARD_HELLO: &str = "\x1b]52;c;aGVsbG8=\x07";
+
+#[test]
+fn in_ask_a_clipboard_write_waits_for_its_answer_and_deny_drops_it() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    let notes = s.notes();
+    s.set_clipboard(crate::clipboard::Policy::Ask);
+    s.remote_prints(SET_CLIPBOARD_HELLO);
+    s.settle();
+    assert_eq!(s.clipboard(), None, "Ask leaves the clipboard alone");
+    assert_eq!(notes.take(), ["ask 5"]);
+    s.answer_clipboard(crate::clipboard::Answer::Deny);
+    assert_eq!(s.clipboard(), None);
+
+    s.remote_prints(SET_CLIPBOARD_HELLO);
+    s.settle();
+    assert_eq!(notes.take(), ["ask 5"]);
+    s.answer_clipboard(crate::clipboard::Answer::Once);
+    assert_eq!(s.clipboard().as_deref(), Some("hello"));
+}
+
+#[test]
+fn always_for_this_host_writes_and_stops_asking() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    let notes = s.notes();
+    s.set_clipboard(crate::clipboard::Policy::Ask);
+    s.remote_prints(SET_CLIPBOARD_HELLO);
+    s.settle();
+    s.answer_clipboard(crate::clipboard::Answer::Always);
+    assert_eq!(s.clipboard().as_deref(), Some("hello"));
+    assert_eq!(notes.take(), ["ask 5", "always"]);
+    s.app
+        .update(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new())));
+    s.remote_prints("\x1b]52;c;aGk=\x07");
+    s.settle();
+    assert_eq!(s.clipboard().as_deref(), Some("hi"));
+}
+
+#[test]
+fn allow_writes_at_once_and_deny_never_does() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.set_clipboard(crate::clipboard::Policy::Deny);
+    s.remote_prints(SET_CLIPBOARD_HELLO);
+    s.settle();
+    assert_eq!(s.clipboard(), None);
+    s.set_clipboard(crate::clipboard::Policy::Allow);
+    s.remote_prints(SET_CLIPBOARD_HELLO);
+    s.settle();
+    assert_eq!(s.clipboard().as_deref(), Some("hello"));
+}
+
+#[test]
+fn leaving_ask_drops_the_write_it_held_without_writing_it() {
+    let mut s = scene();
+    s.log_in_with_vault();
+    s.set_clipboard(crate::clipboard::Policy::Ask);
+    s.remote_prints(SET_CLIPBOARD_HELLO);
+    s.settle();
+    s.set_clipboard(crate::clipboard::Policy::Allow);
+    s.answer_clipboard(crate::clipboard::Answer::Once);
+    assert_eq!(s.clipboard(), None);
 }

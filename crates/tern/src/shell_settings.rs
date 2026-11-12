@@ -120,12 +120,14 @@ impl Shell {
         }
         if what.terminal_options {
             let options = self.terminal_options();
+            let policy = self.settings.clipboard;
             for session in self
                 .tabs
                 .iter()
                 .flat_map(|t| t.panes())
                 .filter_map(Pane::session)
             {
+                session.update(cx, |s, _| s.set_clipboard_policy(policy));
                 let view = session.read(cx).view.clone();
                 view.update(cx, |v, cx| v.set_options(options.clone(), cx));
             }

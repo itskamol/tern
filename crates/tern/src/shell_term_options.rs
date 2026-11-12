@@ -10,6 +10,7 @@ use gpui::{
 use tern_term::{CursorStyleSetting, TerminalEvent, TerminalOptions};
 
 use super::Shell;
+use crate::clipboard::Policy;
 use crate::session::Session;
 use crate::settings::{CursorStyle, Settings};
 use crate::settings_widgets as w;
@@ -28,7 +29,8 @@ impl Shell {
             copy_on_select: s.copy_on_select,
             middle_click_paste: s.middle_click_paste,
             visual_bell: s.visual_bell,
-            clipboard_write: s.clipboard_write,
+            // Each session decides its clipboard writes (Allow / Ask / Deny), not the view.
+            clipboard_write: false,
         }
     }
 
@@ -37,9 +39,7 @@ impl Shell {
     }
 
     /// BEL from a session bounces the Dock icon while tern is behind other apps (macOS only
-    /// bounces for an inactive app, so a bell in the window being used stays quiet). A program
-    /// setting the clipboard is said as an Activity, at most once a minute per session, so a copy
-    /// the person did not make never goes unseen.
+    /// bounces for an inactive app, so a bell in the window being used stays quiet).
     pub(super) fn on_bell(
         &self,
         session: &Entity<Session>,
@@ -47,33 +47,43 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Subscription {
         let terminal = session.read(cx).terminal();
-        let session = session.downgrade();
-        let mut said: Option<std::time::Instant> = None;
         cx.subscribe_in(
             &terminal,
             window,
-            move |shell, _, event, window, cx| match event {
+            move |shell, _, event, window, _| match event {
                 TerminalEvent::Bell if shell.settings.bell_bounces_dock => {
                     window.request_attention();
-                }
-                TerminalEvent::ClipboardStore(text) => {
-                    if said.is_some_and(|at| at.elapsed() < CLIPBOARD_NOTE_EVERY) {
-                        return;
-                    }
-                    said = Some(std::time::Instant::now());
-                    let who = session
-                        .upgrade()
-                        .map_or_else(String::new, |s| s.read(cx).label());
-                    let text =
-                        clipboard_note(&who, text.chars().count(), shell.settings.clipboard_write);
-                    shell.activity(text, cx);
                 }
                 _ => {}
             },
         )
     }
 
+    /// Allow, Ask or Deny, as the Appearance row's buttons are drawn.
+    fn clipboard_choice(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let t = self.theme;
+        let mut row = div().flex().gap(px(6.));
+        for (id, label, policy) in [
+            ("clipboard-allow", "Allow", Policy::Allow),
+            ("clipboard-ask", "Ask", Policy::Ask),
+            ("clipboard-deny", "Deny", Policy::Deny),
+        ] {
+            let selected = self.settings.clipboard == policy;
+            row = row.child(
+                w::button(&t, id, label)
+                    .when(selected, |el| {
+                        el.bg(t.ink(0.18)).font_weight(gpui::FontWeight::MEDIUM)
+                    })
+                    .on_click(cx.listener(move |s, _, _, cx| {
+                        s.update_settings(|st| st.clipboard = policy, cx);
+                    })),
+            );
+        }
+        row
+    }
+
     pub(super) fn terminal_page(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let clipboard = self.clipboard_choice(cx);
         let t = self.theme;
         let s = &self.settings;
         let toggle = |id: &'static str, label: &'static str, on: bool, flip: fn(&mut Settings)| {
@@ -271,13 +281,12 @@ impl Shell {
                         &t,
                         false,
                         "Programs can copy to the clipboard",
-                        Some("OSC 52, as tmux and vim copy over SSH; tern says when it happens".into()),
-                        toggle(
-                            "clipboard-write",
-                            "Programs can copy to the clipboard",
-                            s.clipboard_write,
-                            |st| st.clipboard_write = !st.clipboard_write,
+                        Some(
+                            "OSC 52, as tmux and vim copy over SSH. Ask holds each copy until you \
+                             answer"
+                                .into(),
                         ),
+                        clipboard,
                     )),
             ))
             .child(w::section(
@@ -312,18 +321,6 @@ impl Shell {
     }
 }
 
-/// How often a session's clipboard writes are mentioned.
-const CLIPBOARD_NOTE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The Activity when a program on `who` set the clipboard, or tried to.
-fn clipboard_note(who: &str, chars: usize, allowed: bool) -> String {
-    if allowed {
-        format!("{who} copied {chars} characters to the clipboard")
-    } else {
-        format!("{who} tried to set the clipboard; allow it in Settings → Terminal")
-    }
-}
-
 /// 10000 → "10,000", as the stepper reads at a glance.
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
@@ -344,12 +341,5 @@ mod tests {
         assert_eq!(super::thousands(1_000), "1,000");
         assert_eq!(super::thousands(100_000), "100,000");
         assert_eq!(super::thousands(999), "999");
-    }
-
-    #[test]
-    fn the_clipboard_note_says_who_and_what_to_do() {
-        let note = super::clipboard_note("me@web:22", 5, true);
-        assert_eq!(note, "me@web:22 copied 5 characters to the clipboard");
-        assert!(super::clipboard_note("me@web:22", 5, false).contains("Settings → Terminal"));
     }
 }

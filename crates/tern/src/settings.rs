@@ -84,8 +84,10 @@ pub struct Settings {
     pub middle_click_paste: bool,
     /// Flash the terminal on BEL.
     pub visual_bell: bool,
-    /// Programs on the remote may set the clipboard (OSC 52).
-    pub clipboard_write: bool,
+    /// What a program on the remote setting the clipboard (OSC 52) gets. Files from before
+    /// Ask existed say `clipboardWrite: true/false`.
+    #[serde(alias = "clipboardWrite")]
+    pub clipboard: crate::clipboard::Policy,
     /// Bounce the Dock icon on BEL while tern is in the background.
     pub bell_bounces_dock: bool,
     /// Ask GitHub once a day whether a newer release exists; tern only says so, never installs.
@@ -138,7 +140,7 @@ impl Default for Settings {
             copy_on_select: false,
             middle_click_paste: false,
             visual_bell: false,
-            clipboard_write: true,
+            clipboard: crate::clipboard::Policy::Allow,
             bell_bounces_dock: true,
             check_for_updates: true,
             sync_auto: true,
@@ -197,7 +199,7 @@ impl Settings {
                 self.copy_on_select,
                 self.middle_click_paste,
                 self.visual_bell,
-                self.clipboard_write,
+                self.clipboard,
             ) != (
                 new.cursor_style,
                 new.cursor_blink,
@@ -205,7 +207,7 @@ impl Settings {
                 new.copy_on_select,
                 new.middle_click_paste,
                 new.visual_bell,
-                new.clipboard_write,
+                new.clipboard,
             ),
             option_as_meta: self.option_as_meta != new.option_as_meta,
             reopen_tabs: self.reopen_tabs != new.reopen_tabs,
@@ -443,6 +445,22 @@ mod tests {
     }
 
     #[test]
+    fn a_file_from_before_ask_keeps_its_clipboard_choice() {
+        let dir = temp_dir("clipboard-old");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"clipboardWrite": false}"#).unwrap();
+        assert_eq!(
+            Settings::load(&dir).clipboard,
+            crate::clipboard::Policy::Deny
+        );
+        std::fs::write(dir.join("settings.json"), r#"{"clipboardWrite": true}"#).unwrap();
+        assert_eq!(
+            Settings::load(&dir).clipboard,
+            crate::clipboard::Policy::Allow
+        );
+    }
+
+    #[test]
     fn missing_file_gives_defaults() {
         assert_eq!(Settings::load(&temp_dir("missing")), Settings::default());
     }
@@ -471,7 +489,7 @@ mod tests {
             copy_on_select: true,
             middle_click_paste: true,
             visual_bell: true,
-            clipboard_write: false,
+            clipboard: crate::clipboard::Policy::Ask,
             bell_bounces_dock: false,
             check_for_updates: false,
             sync_auto: false,

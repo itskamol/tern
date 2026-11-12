@@ -101,6 +101,8 @@ pub struct Session {
     ends_line: bool,
     /// Remote output that arrived while tern's own question was open (see [`Held`]).
     held: Held,
+    /// Programs on the remote setting the clipboard: the setting and this host's answers.
+    clipboard: crate::clipboard::Gate,
     /// The line being typed, for the command history.
     typing: history::Typing,
     pub view: Entity<TerminalView>,
@@ -141,7 +143,18 @@ impl Session {
             pixel_height: 0,
         };
         let terminal = cx.new(|_| Terminal::new(size.cols, size.rows));
-        let view = cx.new(|cx| TerminalView::new(terminal.clone(), theme, window, cx));
+        let view = cx.new(|cx| {
+            let mut view = TerminalView::new(terminal.clone(), theme, window, cx);
+            // The session decides every clipboard write (Allow / Ask / Deny), not the view.
+            view.set_options(
+                tern_term::TerminalOptions {
+                    clipboard_write: false,
+                    ..Default::default()
+                },
+                cx,
+            );
+            view
+        });
         cx.new(|cx| {
             let subscription = cx.subscribe(&terminal, |this: &mut Self, _, event, cx| {
                 this.on_terminal_event(event, cx);
@@ -181,6 +194,7 @@ impl Session {
                 auto_log,
                 size,
                 shell_folder: None,
+                clipboard: crate::clipboard::Gate::default(),
                 retry_tick: None,
                 forward_handles: Vec::new(),
                 _session_events: Task::ready(()),
@@ -325,8 +339,10 @@ impl Session {
             self.start_auto_log();
         }
         self.connected_at = None;
-        // A new shell may never report a folder; the last one's must not stand in for it.
+        // A new shell may never report a folder; the last one's must not stand in for it, and a
+        // write the old connection held is not this one's to make.
         self.shell_folder = None;
+        self.clipboard.forget();
         self.ended_at = None;
         self.latency = None;
         self.begin(cx);
@@ -583,9 +599,8 @@ impl Session {
                     cx.notify();
                 }
             }
-            TerminalEvent::TitleChanged(_)
-            | TerminalEvent::Bell
-            | TerminalEvent::ClipboardStore(_) => {}
+            TerminalEvent::ClipboardStore(text) => self.on_clipboard_store(text.clone(), cx),
+            TerminalEvent::TitleChanged(_) | TerminalEvent::Bell => {}
         }
     }
 

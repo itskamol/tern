@@ -14,6 +14,7 @@ use tern_vault::{Key, Vault};
 use super::{Shell, Toast, ToastKind};
 use crate::connections::{self, Connection, DEFAULT_KEEP_ALIVE, Draft};
 use crate::keeper::{Keeper, Tried, Typed};
+use crate::session::Session;
 use crate::sidebar;
 use crate::text_input::TextInput;
 use crate::theme::Theme;
@@ -351,6 +352,9 @@ impl Shell {
             Ok(c) => Connection {
                 proxy_command: form.proxy_command.clone(),
                 agent_socket: form.agent_socket.clone(),
+                clipboard_always: editing
+                    .and_then(|ix| self.connections.get(ix))
+                    .is_some_and(|c| c.clipboard_always),
                 ..c
             },
             Err(e) => {
@@ -489,6 +493,46 @@ impl Shell {
             }
             Err(e) => self.alert_failed(e, cx),
         }
+        cx.notify();
+    }
+
+    /// "Always for this host": every open session of the host stops asking and its waiting
+    /// write goes through. A saved connection keeps it across relaunches; a `~/.ssh/config`
+    /// host has none, so there it lasts while those sessions do.
+    pub(super) fn keep_clipboard_always(
+        &mut self,
+        session: &Entity<Session>,
+        cx: &mut Context<Self>,
+    ) {
+        let alias = session.read(cx).alias().to_owned();
+        if let Some(ix) = self.connections.iter().position(|c| c.name == alias) {
+            let mut next = self.connections.clone();
+            if let Some(c) = next.get_mut(ix) {
+                c.clipboard_always = true;
+            }
+            if let Some(dir) = crate::settings::dir()
+                && let Err(e) = connections::save(&dir, &next)
+            {
+                self.alert_failed(format!("Could not save {alias}: {e}"), cx);
+            } else {
+                self.connections = next;
+            }
+        }
+        let others: Vec<Entity<Session>> = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes())
+            .filter_map(|p| p.session())
+            .filter(|s| *s != session && s.read(cx).alias() == alias)
+            .cloned()
+            .collect();
+        for other in others {
+            other.update(cx, |s, cx| {
+                s.allow_clipboard_always();
+                s.answer_clipboard(crate::clipboard::Answer::Once, cx);
+            });
+        }
+        self.forget_decisions_of(&alias, cx);
         cx.notify();
     }
 

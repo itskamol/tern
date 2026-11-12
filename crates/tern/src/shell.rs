@@ -612,7 +612,7 @@ impl Render for Shell {
         let (line_activity, bar_activity) = self.activity_slots();
         let status_line = self.render_status_line(panel_bg, line_activity, cx);
         let theme_picker = self.render_theme_picker(window, cx);
-        let toast = self.render_toast(window, cx);
+        let toast = self.render_top_right(window, cx);
         let activity_list = self.render_activity_list(window, cx);
         let context_menu = self.render_menu(cx);
         let sidebar_now = self.sidebar_now();

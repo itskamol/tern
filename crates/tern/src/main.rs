@@ -3,6 +3,7 @@
 
 mod alloc;
 mod chrome;
+mod clipboard;
 mod command_history;
 mod connections;
 #[cfg(any(debug_assertions, feature = "dev-keys"))]

@@ -87,6 +87,17 @@ impl Shell {
             window,
             cx,
         );
+        let always = self
+            .connections
+            .iter()
+            .any(|c| c.name == alias && c.clipboard_always);
+        let policy = self.settings.clipboard;
+        session.update(cx, |s, _| {
+            s.set_clipboard_policy(policy);
+            if always {
+                s.allow_clipboard_always();
+            }
+        });
         let meta = self.settings.option_as_meta;
         let view = session.read(cx).view.clone();
         let options = self.terminal_options();

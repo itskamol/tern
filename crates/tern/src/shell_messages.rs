@@ -6,14 +6,20 @@ use std::time::{Instant, SystemTime};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, AnyElement, Context, InteractiveElement, IntoElement, MouseDownEvent, ParentElement,
-    Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Task, Window, anchored,
-    deferred, div, point, px,
+    Anchor, AnyElement, App, Context, InteractiveElement, IntoElement, MouseDownEvent,
+    ParentElement, Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Task, Window,
+    anchored, deferred, div, point, px,
 };
+
+use std::collections::VecDeque;
+
+use gpui::{Entity, WeakEntity};
 
 use super::Shell;
 use super::toast::Toast;
+use crate::clipboard::Answer;
 use crate::messages::{Kind, Messages, Place, SHOWN_FOR, Work};
+use crate::session::Session;
 use crate::theme::{SPACE_SM, TITLEBAR_HEIGHT};
 
 /// Whether the Activity list is open. A press outside it closes it before the titlebar button
@@ -51,8 +57,17 @@ impl ListState {
     }
 }
 
+/// A Decision waiting for its answer: a session holding a clipboard write.
+#[derive(Debug)]
+struct Decision {
+    session: WeakEntity<Session>,
+    who: String,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ActivityUi {
+    /// Questions tern cannot go on without, oldest first; the first one's card shows.
+    decisions: VecDeque<Decision>,
     messages: Messages,
     list_state: ListState,
     /// The one wake-up for when the newest Activity's time is up; a newer one replaces it.
@@ -133,12 +148,153 @@ impl Shell {
             .map(|(place, text)| (place, SharedString::from(text.to_owned())))
     }
 
+    /// A session holds a clipboard write (the setting is Ask): its Decision waits in line. A
+    /// second write from the same session replaces the held text, not the question.
+    pub(super) fn ask_clipboard(
+        &mut self,
+        session: &Entity<Session>,
+        chars: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let weak = session.downgrade();
+        if !self.activity.decisions.iter().any(|d| d.session == weak) {
+            let who = session.read(cx).label();
+            self.activity.messages.raise(
+                Kind::Decision,
+                crate::clipboard::question(&who, chars),
+                false,
+                false,
+                SystemTime::now(),
+                Instant::now(),
+            );
+            self.activity
+                .decisions
+                .push_back(Decision { session: weak, who });
+        }
+        cx.notify();
+    }
+
+    /// The answer to the Decision in front.
+    fn answer_decision(&mut self, answer: Answer, cx: &mut Context<Self>) {
+        let Some(front) = self.activity.decisions.pop_front() else {
+            return;
+        };
+        if let Some(session) = front.session.upgrade() {
+            session.update(cx, |s, cx| s.answer_clipboard(answer, cx));
+        }
+        cx.notify();
+    }
+
+    /// Drops the Decisions of `alias`'s sessions: their writes went through or are gone.
+    pub(super) fn forget_decisions_of(&mut self, alias: &str, cx: &App) {
+        self.activity.decisions.retain(|d| {
+            d.session
+                .upgrade()
+                .is_some_and(|s| s.read(cx).alias() != alias)
+        });
+    }
+
+    /// The front Decision's card, while its session still holds the write. Card as the
+    /// Activity list's (tern's port forwards popover: 340 wide, 12 radius, 13 pt), inset and
+    /// gap `SPACE_SM`; buttons are the connection form's, 6 apart as in that popover's input
+    /// row.
+    fn decision_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        while let Some(front) = self.activity.decisions.front() {
+            let waiting = front
+                .session
+                .upgrade()
+                .and_then(|s| s.read(cx).clipboard_waiting());
+            if waiting.is_some() {
+                break;
+            }
+            self.activity.decisions.pop_front();
+        }
+        let front = self.activity.decisions.front()?;
+        let chars = front
+            .session
+            .upgrade()
+            .and_then(|s| s.read(cx).clipboard_waiting())?;
+        let t = self.theme;
+        let button = |id: &'static str, label: &'static str, primary: bool, answer: Answer| {
+            super::connections_ui::button(id, label, primary, &t)
+                .on_click(cx.listener(move |s, _, _, cx| s.answer_decision(answer, cx)))
+        };
+        Some(
+            div()
+                .id("decision")
+                .occlude()
+                .w(px(340.))
+                .p(px(SPACE_SM))
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_SM))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(t.border)
+                .bg(t.popup)
+                .shadow_lg()
+                .text_size(px(13.))
+                .text_color(t.text)
+                .child(SharedString::from(crate::clipboard::question(
+                    &front.who, chars,
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .child(button("decision-once", "Allow once", true, Answer::Once))
+                        .child(button(
+                            "decision-always",
+                            "Always for this host",
+                            false,
+                            Answer::Always,
+                        ))
+                        .child(button("decision-deny", "Deny", false, Answer::Deny)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The top right under the titlebar: the Decision card, then the snackbar under it, so
+    /// neither covers the other.
+    pub(super) fn render_top_right(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let decision = self.decision_card(cx);
+        let snackbar = self.render_toast(window, cx);
+        if decision.is_none() && snackbar.is_none() {
+            return None;
+        }
+        Some(
+            deferred(
+                anchored()
+                    .position(point(px(0.), px(TITLEBAR_HEIGHT)))
+                    .child(
+                        div()
+                            .w(window.viewport_size().width)
+                            .p(px(SPACE_SM))
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap(px(SPACE_SM))
+                            .children(decision)
+                            .children(snackbar),
+                    ),
+            )
+            .priority(3)
+            .into_any_element(),
+        )
+    }
+
     /// The Activity on screen now, for the status line and for the titlebar: at most one is set.
     pub(super) fn activity_slots(&self) -> (Option<SharedString>, Option<SharedString>) {
         match self.activity_now() {
             Some((Place::StatusLine, text)) => (Some(text), None),
             Some((Place::Titlebar, text)) => (None, Some(text)),
-            Some((Place::Snackbar, _)) | None => (None, None),
+            Some((Place::Snackbar | Place::Card, _)) | None => (None, None),
         }
     }
 

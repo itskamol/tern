@@ -389,7 +389,9 @@ impl Shell {
         if manual || actionable {
             match outcome.kind() {
                 Kind::Alert => self.alert(outcome_alert(outcome), cx),
-                Kind::Activity => self.activity(outcome.message(env!("CARGO_PKG_VERSION")), cx),
+                Kind::Activity | Kind::Decision => {
+                    self.activity(outcome.message(env!("CARGO_PKG_VERSION")), cx)
+                }
             }
         }
         cx.notify();

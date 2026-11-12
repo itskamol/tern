@@ -17,6 +17,8 @@ pub const KEPT: usize = 200;
 pub enum Kind {
     Activity,
     Alert,
+    /// A question tern cannot go on without; its card stays until answered.
+    Decision,
 }
 
 /// Work whose progress shows as an Activity until it ends.
@@ -31,6 +33,8 @@ pub enum Place {
     StatusLine,
     Titlebar,
     Snackbar,
+    /// The Decision card, at the top right above any snackbar.
+    Card,
 }
 
 /// Where a message of `kind` shows. A message with an action is an Alert whatever it was
@@ -38,6 +42,7 @@ pub enum Place {
 #[must_use]
 pub fn place(kind: Kind, has_action: bool, status_line: bool) -> Place {
     match (kind, has_action) {
+        (Kind::Decision, _) => Place::Card,
         (Kind::Activity, false) if status_line => Place::StatusLine,
         (Kind::Activity, false) => Place::Titlebar,
         _ => Place::Snackbar,
@@ -75,7 +80,10 @@ impl Messages {
         at: SystemTime,
         now: Instant,
     ) -> Kind {
-        let kind = if has_action { Kind::Alert } else { kind };
+        let kind = match kind {
+            Kind::Activity if has_action => Kind::Alert,
+            other => other,
+        };
         let text = text.into();
         if kind == Kind::Activity {
             self.latest = Some((text.clone(), now));
@@ -155,6 +163,29 @@ mod tests {
         assert_eq!(place(Kind::Alert, false, true), Place::Snackbar);
         assert_eq!(place(Kind::Alert, false, false), Place::Snackbar);
         assert_eq!(place(Kind::Alert, true, true), Place::Snackbar);
+    }
+
+    #[test]
+    fn a_decision_is_its_card_wherever_the_status_line_is() {
+        assert_eq!(place(Kind::Decision, true, true), Place::Card);
+        assert_eq!(place(Kind::Decision, true, false), Place::Card);
+    }
+
+    #[test]
+    fn a_decision_with_its_answers_stays_a_decision_in_the_list_and_never_quiet() {
+        let mut m = Messages::default();
+        let now = Instant::now();
+        let kind = m.raise(
+            Kind::Decision,
+            "web-01 asks",
+            true,
+            false,
+            SystemTime::now(),
+            now,
+        );
+        assert_eq!(kind, Kind::Decision);
+        assert_eq!(m.list().next().map(|e| e.kind), Some(Kind::Decision));
+        assert_eq!(m.showing(now, true), None);
     }
 
     #[test]
