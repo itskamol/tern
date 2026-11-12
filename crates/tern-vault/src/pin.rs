@@ -47,10 +47,10 @@ fn wrap_with(passphrase: &SecretString, pin: &str, work_factor: u8) -> Result<Ve
 /// # Errors
 /// [`VaultError::WrongPassphrase`] for a wrong PIN or an altered blob.
 pub fn unwrap(blob: &[u8], pin: &str) -> Result<SecretString, VaultError> {
-    let identity = age::scrypt::Identity::new(SecretString::from(pin.to_owned()));
+    let identity = crate::cap::identity(SecretString::from(pin.to_owned()));
     let plain = Zeroizing::new(
         crate::gate::one_at_a_time(|| age::decrypt(&identity, blob))
-            .map_err(|_| VaultError::WrongPassphrase)?,
+            .map_err(|e| crate::cap::read_error(e, |_| VaultError::WrongPassphrase))?,
     );
     String::from_utf8(plain.to_vec())
         .map(SecretString::from)
