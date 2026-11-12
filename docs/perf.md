@@ -202,3 +202,11 @@ Every scene is within its ceiling and the check passes. The one connected tab is
 (82 against 75), so the ticket's "at or under target" is not met for that scene; it is reported
 here and not tuned away. `footprint` prints whole megabytes, so ranges are coarse. The vault row
 is from the dev-keys variant described above.
+
+Re-measured on the merged `integration/memory` build (c613f3e + #22), one tab via `tern demo-cmd`
+against the demo server, 30 s, window shown: 74, 74 and 89 MB. The 89 MB run had a second session
+open to the server 18 s after launch, which the other runs did not have. Median **74 MB, within the
+75 MB target**, accepted by the owner. The 81-82 above were taken while other builds were running
+in parallel. A clean run of `scripts/measure-memory.sh` itself was not possible on a Mac in use:
+copies open behind the front app's window and are not drawn, which the script now detects and
+refuses.
