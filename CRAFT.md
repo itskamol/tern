@@ -5,9 +5,9 @@ tern is held to a higher bar than the projects it copies from. These rules are e
 
 - **No panics in shipped code.** `unwrap`, `expect`, `panic!`, `todo!` are denied outside tests.
   Errors are typed (`thiserror`) in libraries and reported to the user, never swallowed.
-- **`unsafe` is denied workspace-wide.** The one exception is a module calling a platform API
-  with no safe binding: it opens with `#![allow(unsafe_code)]` and a `//!` naming its single
-  `unsafe` and why it holds (`drawables.rs`).
+- **`unsafe` is denied workspace-wide.** The exceptions are modules calling a platform or C API
+  with no safe binding (`alloc.rs`, `drawables.rs`, `lock_on_sleep.rs`): each allows it in the
+  smallest scope and says why every `unsafe` holds.
 - **No god-files.** Every source file stays under 800 lines. Split by responsibility, not by size.
 - **Files: keep related code together.** Add to the closest related file while it stays under 800 lines;
   split only when a file would cross the limit, along a real seam. Tests live in the module's own
@@ -17,7 +17,8 @@ tern is held to a higher bar than the projects it copies from. These rules are e
 - **Idle means idle.** No per-frame loops; repaint only on new bytes, input or resize. Memory is a feature:
   idle RSS with one tab is measured on every release and must not regress.
 - **Memory is designed, not hoped for.** See `docs/perf.md`.
-  - Scrollback is bounded (default 5,000 lines) because it dominates: 24 B per cell, full-width rows.
+  - Scrollback is bounded (default 10,000 lines) because it dominates: 24 B per cell, and a wrapped
+    line's rows are full width. Costs: `docs/perf.md`.
   - Every channel between SSH and UI is **bounded**. A fast `cat` must apply backpressure to the
     socket, never pile up in an unbounded queue.
   - One tokio runtime, on one dedicated thread, for all SSH I/O. No thread per connection.

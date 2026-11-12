@@ -22,7 +22,11 @@
 When the UI falls behind, tern stops reading the channel, russh's queue fills, and russh stops
 reading the socket, so the server slows down instead of tern's memory growing.
 
-So the default scrollback is **5,000 lines**, configurable. A fresh tab pays only for what it has printed.
+So the default scrollback is **10,000 lines** (`SCROLLBACK_DEFAULT`), configurable from 1,000 to 100,000.
+A fresh tab pays only for what it has printed. Long lines are the expensive case: a wrapped line's
+rows are full width and cannot be trimmed. A pm2-style log flood (lines of 200-290 characters,
+wrapping) through one tab raised the footprint by 21 MB at 1,000 lines and 68 MB at 10,000, about
+5 KB per line, and it stays there while the tab is open (2026-11-12, release build, demo server).
 
 ## Paint
 
@@ -210,3 +214,12 @@ open to the server 18 s after launch, which the other runs did not have. Median 
 in parallel. A clean run of `scripts/measure-memory.sh` itself was not possible on a Mac in use:
 copies open behind the front app's window and are not drawn, which the script now detects and
 refuses.
+
+## 2026-11-12 — tern's heap was labelled GPU memory
+
+mimalloc tags the memory it maps with VM tag 100 by default, which macOS names
+`VM_MEMORY_IOACCELERATOR`, so `vmmap`, `footprint` and Activity Monitor showed tern's heap as
+"IOAccelerator" (GPU). Readings above that name IOAccelerator are heap. With
+`MIMALLOC_OS_TAG=254` the category read 0 MB while the footprint was unchanged; the real GPU
+memory is "IOAccelerator (graphics)", about 4 MB. `alloc.rs` now tags the heap 240
+("App-Specific Tag 1"), set by an image initializer because the first arena is mapped before `main`.
