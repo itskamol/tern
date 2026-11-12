@@ -68,6 +68,18 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 | Reduced motion | honours the OS setting; all motion off | §1.12 |
 | Connecting indicator | zeron-pulse cell wave, 2.4s, staggered opacity 0.08→1 | §1.12 |
 
+## Files panel
+
+| Feature | Value | Source |
+| --- | --- | --- |
+| Width | the sidebar's range and default, drag from the left edge, double-click resets, persisted as `filesPanelWidth` | the sidebar's, above |
+| Header | 34px, host name 13px | the Files tab's panel header |
+| Row | 26px, name 12px, icon 15px, padding 8px, gap 6px | the Files tab's row (`files_tab_view.rs`), padding and gap trimmed for the narrower panel |
+| Size column | 52px, 11px text | the Files tab's 64px less 12px, so a name keeps 83px at the default width |
+| Modified column | 72px, 11px text; left out below 256px of panel | the Files tab's 92px less 20px; 256 − 16 − 15 − 52 − 72 − 3×6 = 83px of name, and below that the name would have under 70px |
+| Breadcrumb | 22px parts, 12px text, the front clips | worked out from the row height less 4px |
+| Footer | 11px text, Download button 26px | the Files tab's footer |
+
 ## Messages (ADR 0002)
 
 Every message is one of three kinds, and the code shows none without its kind: `Shell::activity`,

@@ -54,6 +54,8 @@ pub struct Settings {
     pub sharp_text: bool,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
+    /// The Files panel's width; it shares the sidebar's range.
+    pub files_panel_width: f32,
     pub terminal_font_size: f32,
     /// Terminal font family; `None` is the bundled Geist Mono.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,6 +127,7 @@ impl Default for Settings {
             sharp_text: true,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
+            files_panel_width: SIDEBAR_DEFAULT,
             terminal_font_size: FONT_DEFAULT,
             terminal_font_family: None,
             reduce_motion: false,
@@ -244,6 +247,13 @@ impl Settings {
         // Whole points are whole device pixels at 1x and 2x; the shell snaps the rest.
         self.sidebar_width = clamp_or(
             self.sidebar_width,
+            SIDEBAR_MIN,
+            SIDEBAR_MAX,
+            SIDEBAR_DEFAULT,
+        )
+        .round();
+        self.files_panel_width = clamp_or(
+            self.files_panel_width,
             SIDEBAR_MIN,
             SIDEBAR_MAX,
             SIDEBAR_DEFAULT,
@@ -474,6 +484,7 @@ mod tests {
             sharp_text: false,
             sidebar_width: 312.0,
             sidebar_collapsed: true,
+            files_panel_width: 288.0,
             terminal_font_size: 15.0,
             terminal_font_family: Some("JetBrainsMono Nerd Font Mono".into()),
             reduce_motion: true,
@@ -645,6 +656,23 @@ mod tests {
         assert_eq!(at(9000.0), SIDEBAR_MAX);
         assert_eq!(at(300.0), 300.0);
         assert_eq!(at(f32::NAN), SIDEBAR_DEFAULT);
+    }
+
+    #[test]
+    fn the_files_panel_width_keeps_the_sidebars_range() {
+        let at = |w: f32| {
+            Settings {
+                files_panel_width: w,
+                ..Settings::default()
+            }
+            .clamped()
+            .files_panel_width
+        };
+        assert_eq!(at(10.0), SIDEBAR_MIN);
+        assert_eq!(at(9000.0), SIDEBAR_MAX);
+        assert_eq!(at(300.4), 300.0);
+        assert_eq!(at(f32::NAN), SIDEBAR_DEFAULT);
+        assert_eq!(Settings::default().files_panel_width, SIDEBAR_DEFAULT);
     }
 
     #[test]

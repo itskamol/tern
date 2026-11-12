@@ -25,6 +25,8 @@ actions!(tern, [FillPassword, ClearTerminal]);
 #[derive(Default)]
 pub(super) struct Panels {
     pub forwards: Option<ForwardsPanel>,
+    /// The Files panel, while it is open.
+    pub files: Option<Entity<crate::files_panel::FilesPanel>>,
 }
 
 pub(super) struct ForwardsPanel {

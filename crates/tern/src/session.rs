@@ -386,10 +386,6 @@ impl Session {
 
     /// The folder the remote shell last said it is in, when it reports one (OSC 7). Its host
     /// may not be this session's: a nested `ssh` reports its own.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Files panel (#37) is its first reader")
-    )]
     pub fn shell_folder(&self) -> Option<&ShellFolder> {
         self.shell_folder.as_ref()
     }

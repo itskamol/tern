@@ -42,6 +42,7 @@ pub enum ShortcutId {
     Settings,
     ToggleSidebar,
     BrowseFiles,
+    FilesPanel,
     CloseTab,
     NextTab,
     PrevTab,
@@ -55,7 +56,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 28] = [
+    pub const ALL: [ShortcutId; 29] = [
         ShortcutId::HostPicker,
         ShortcutId::SearchHosts,
         ShortcutId::Snippets,
@@ -74,6 +75,7 @@ impl ShortcutId {
         ShortcutId::Settings,
         ShortcutId::ToggleSidebar,
         ShortcutId::BrowseFiles,
+        ShortcutId::FilesPanel,
         ShortcutId::CloseTab,
         ShortcutId::NextTab,
         ShortcutId::PrevTab,
@@ -106,6 +108,7 @@ impl ShortcutId {
             ShortcutId::Settings => "Open settings",
             ShortcutId::ToggleSidebar => "Toggle sidebar",
             ShortcutId::BrowseFiles => "Files tab",
+            ShortcutId::FilesPanel => "Files panel",
             ShortcutId::CloseTab => "Close tab",
             ShortcutId::NextTab => "Next tab",
             ShortcutId::PrevTab => "Previous tab",
@@ -138,7 +141,9 @@ impl ShortcutId {
             ShortcutId::ResizeDown => "ctrl-cmd-down",
             ShortcutId::Settings => "cmd-,",
             ShortcutId::ToggleSidebar => "cmd-b",
-            ShortcutId::BrowseFiles => "cmd-shift-o",
+            // The panel took ⇧⌘O (#37); the tab keeps its place in the menu.
+            ShortcutId::BrowseFiles => "alt-cmd-o",
+            ShortcutId::FilesPanel => "cmd-shift-o",
             ShortcutId::CloseTab => "cmd-w",
             ShortcutId::NextTab => "cmd-shift-]",
             ShortcutId::PrevTab => "cmd-shift-[",
@@ -172,7 +177,8 @@ impl ShortcutId {
             ShortcutId::ResizeDown => "ctrl-shift-alt-down",
             ShortcutId::Settings => "ctrl-,",
             ShortcutId::ToggleSidebar => "ctrl-shift-b",
-            ShortcutId::BrowseFiles => "ctrl-alt-o",
+            ShortcutId::BrowseFiles => "ctrl-shift-alt-o",
+            ShortcutId::FilesPanel => "ctrl-alt-o",
             ShortcutId::CloseTab => "ctrl-shift-w",
             ShortcutId::NextTab => "ctrl-shift-]",
             ShortcutId::PrevTab => "ctrl-shift-[",
@@ -223,6 +229,7 @@ impl ShortcutId {
             ShortcutId::Settings => Box::new(OpenSettings),
             ShortcutId::ToggleSidebar => Box::new(ToggleSidebar),
             ShortcutId::BrowseFiles => Box::new(crate::shell::OpenFiles),
+            ShortcutId::FilesPanel => Box::new(crate::shell::ToggleFilesPanel),
             ShortcutId::CloseTab => Box::new(CloseTab),
             ShortcutId::NextTab => Box::new(NextTab),
             ShortcutId::PrevTab => Box::new(PrevTab),

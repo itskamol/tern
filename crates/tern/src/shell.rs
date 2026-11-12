@@ -29,6 +29,7 @@ actions!(
     [
         ToggleSidebar,
         OpenFiles,
+        ToggleFilesPanel,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
@@ -56,6 +57,8 @@ actions!(
 
 #[path = "shell_broadcast.rs"]
 mod broadcast_ui;
+#[path = "shell_files_panel.rs"]
+mod files_panel_ui;
 #[path = "shell_files.rs"]
 mod files_ui;
 #[path = "shell_pane.rs"]
@@ -673,6 +676,7 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_sidebar(cx)))
             .on_action(cx.listener(|s, _: &OpenFiles, w, cx| s.open_files_tab(None, w, cx)))
+            .on_action(cx.listener(|s, _: &ToggleFilesPanel, _, cx| s.toggle_files_panel(cx)))
             .on_action(cx.listener(|s, _: &FillPassword, w, cx| s.fill_password(w, cx)))
             .on_action(cx.listener(|s, _: &ClearTerminal, _, cx| s.clear_terminal(cx)))
             .on_action(cx.listener(|s, _: &NewConnection, w, cx| s.open_form(None, None, w, cx)))
@@ -752,6 +756,7 @@ impl Render for Shell {
                             .child(div().flex_1().min_h_0().child(self.panel_content(cx)))
                             .when_some(status_line, |el, line| el.child(line)),
                     )
+                    .children(self.files_panel_tile(cx))
                     .children(handle)
                     .into_any_element(),
             })

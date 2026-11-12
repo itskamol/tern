@@ -78,7 +78,7 @@ fn app_menus() -> Vec<Menu> {
         CheckForUpdates, ClosePane, DecreaseFontSize, EqualizePanes, FocusPaneDown, FocusPaneLeft,
         FocusPaneRight, FocusPaneUp, IncreaseFontSize, NewConnection, OpenFiles, OpenSettings,
         ResetFontSize, ShowAbout, SplitDown, SplitDownWithHost, SplitRight, SplitRightWithHost,
-        ToggleSidebar, ToggleSnippets, ZoomPane,
+        ToggleFilesPanel, ToggleSidebar, ToggleSnippets, ZoomPane,
     };
     use crate::shell::{RedoHosts, UndoHosts};
     use crate::tabs::{CloseTab, NextTab, PrevTab};
@@ -135,6 +135,7 @@ fn app_menus() -> Vec<Menu> {
             "View",
             vec![
                 MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
+                MenuItem::action("Files Panel", ToggleFilesPanel),
                 MenuItem::action("Files Tab", OpenFiles),
                 MenuItem::separator(),
                 MenuItem::action("Bigger Text", IncreaseFontSize),
