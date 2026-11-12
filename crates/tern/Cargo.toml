@@ -23,7 +23,6 @@ tern-vault.workspace = true
 base64 = "0.23"
 chrono.workspace = true
 ureq.workspace = true
-image.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
 tracing-appender = "0.2"
