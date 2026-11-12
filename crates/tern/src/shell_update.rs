@@ -512,6 +512,17 @@ mod tests {
     }
 
     #[test]
+    fn this_build_knows_its_github_repository() {
+        // Without `repository` in the app crate's manifest the feed is None and the daily
+        // check silently never runs (0.2.0 and 0.3.0 shipped that way).
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        assert!(
+            Feed::github(repository).is_some(),
+            "no GitHub feed from CARGO_PKG_REPOSITORY = {repository:?}"
+        );
+    }
+
+    #[test]
     fn releases_come_from_this_build_s_repository_or_a_test_feed() {
         let github = Feed::github("https://github.com/someone/tern").unwrap();
         assert_eq!(
