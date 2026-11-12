@@ -5,7 +5,7 @@ tern needs Rust 1.99 or newer. Install it with [rustup](https://rustup.rs); dist
 ## macOS (Apple silicon)
 
 ```sh
-git clone https://github.com/your-moon/tern && cd tern
+git clone https://github.com/itskamol/tern && cd tern
 scripts/make-local-identity.sh   # once: a stable local signature, so Keychain access survives updates
 scripts/bundle-app.sh            # builds target/release/bundle/tern.app
 cp -R target/release/bundle/tern.app /Applications/
@@ -24,7 +24,7 @@ sudo apt-get install -y --no-install-recommends \
   libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
   libx11-xcb-dev libxcb1-dev libxcb-xkb-dev libxcb-shape0-dev libxcb-xfixes0-dev \
   libvulkan-dev libdbus-1-dev
-git clone https://github.com/your-moon/tern && cd tern
+git clone https://github.com/itskamol/tern && cd tern
 cargo build --release -p tern
 ```
 
