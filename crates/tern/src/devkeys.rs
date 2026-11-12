@@ -1,4 +1,4 @@
-//! Debug builds only: `TERN_DEV_KEYS="cmd-k s t b"` replays keystrokes into the window after
+//! Debug builds, and release builds made with the `dev-keys` feature (never shipped): `TERN_DEV_KEYS="cmd-k s t b"` replays keystrokes into the window after
 //! start-up (`sleep-500` waits half a second, for a prompt to arrive; `click:x,y` and
 //! `dblclick:x,y` click, `scroll:x,y,dy` scrolls, `type:text` types, `rclick:x,y` right-clicks and `drag:x0,y0,x1,y1` drags at window points),
 //! start-up, so a scripted visual check can drive the app without taking keyboard focus from

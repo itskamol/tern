@@ -42,6 +42,11 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSString", "NSNotification", "NSOperation", "NSDistributedNotificationCenter"] }
 
+[features]
+# Compiles the TERN_DEV_KEYS replay (devkeys.rs) into a release build. Off by default and never
+# in a shipped bundle: scripts/measure-memory.sh builds one copy with it to open a throwaway vault.
+dev-keys = []
+
 [dev-dependencies]
 tempfile = "3"
 # Layout and scroll tests drive a real gpui window through its test platform.
