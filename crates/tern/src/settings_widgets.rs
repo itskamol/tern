@@ -69,7 +69,7 @@ impl Searching {
         });
     }
 
-    /// Rows the last page let through.
+    /// Rows the page being built has let through: none, and the page is left out.
     pub fn matched(&self) -> usize {
         with_scope(|s| s.in_page).unwrap_or(0)
     }
@@ -123,9 +123,6 @@ pub fn page_header(t: &Theme, title: &'static str) -> Div {
 }
 
 pub fn page_subtitle(t: &Theme, copy: impl Into<SharedString>) -> Div {
-    if with_scope(|_| ()).is_some() {
-        return div();
-    }
     div()
         .mt(px(4.))
         .px(px(SECTION_LABEL_INSET))
