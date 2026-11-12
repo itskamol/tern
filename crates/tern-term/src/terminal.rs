@@ -39,7 +39,7 @@ pub use osc133::{GridPos, PromptMark};
 const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
 /// Scrollback history kept client-side (lines).
-pub const SCROLLBACK_LINES: usize = 10_000;
+pub const SCROLLBACK_LINES: usize = 5_000;
 
 /// Emitted by [`Terminal`] (it is an `EventEmitter`).
 #[derive(Clone, Debug, PartialEq, Eq)]

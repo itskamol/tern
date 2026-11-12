@@ -4,6 +4,14 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+
+- New terminals keep 5,000 lines of scrollback, down from 10,000. A tab full of long, wrapping log lines (pm2, docker logs) took about 25 MB instead of 80 MB in a measured run. A setting saved before keeps its value; Settings → Terminal changes it.
+
+### Fixed
+
+- Activity Monitor no longer counts tern's own memory as GPU memory. The allocator labelled its memory "IOAccelerator"; it now shows as "App-Specific Tag 1".
+
 ## [0.3.1] - 2026-11-12
 
 ### Fixed

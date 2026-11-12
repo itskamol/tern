@@ -17,7 +17,7 @@ tern is held to a higher bar than the projects it copies from. These rules are e
 - **Idle means idle.** No per-frame loops; repaint only on new bytes, input or resize. Memory is a feature:
   idle RSS with one tab is measured on every release and must not regress.
 - **Memory is designed, not hoped for.** See `docs/perf.md`.
-  - Scrollback is bounded (default 10,000 lines) because it dominates: 24 B per cell, and a wrapped
+  - Scrollback is bounded (default 5,000 lines) because it dominates: 24 B per cell, and a wrapped
     line's rows are full width. Costs: `docs/perf.md`.
   - Every channel between SSH and UI is **bounded**. A fast `cat` must apply backpressure to the
     socket, never pile up in an unbounded queue.

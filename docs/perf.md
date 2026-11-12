@@ -22,11 +22,21 @@
 When the UI falls behind, tern stops reading the channel, russh's queue fills, and russh stops
 reading the socket, so the server slows down instead of tern's memory growing.
 
-So the default scrollback is **10,000 lines** (`SCROLLBACK_DEFAULT`), configurable from 1,000 to 100,000.
+So the default scrollback is **5,000 lines** (`SCROLLBACK_DEFAULT`), configurable from 1,000 to 100,000.
 A fresh tab pays only for what it has printed. Long lines are the expensive case: a wrapped line's
 rows are full width and cannot be trimmed. A pm2-style log flood (lines of 200-290 characters,
-wrapping) through one tab raised the footprint by 21 MB at 1,000 lines and 68 MB at 10,000, about
-5 KB per line, and it stays there while the tab is open (2026-11-12, release build, demo server).
+wrapping) through one tab, from a 76 MB start, the same run at each setting (2026-11-12, release
+build, demo server):
+
+| Scrollback | Footprint after the flood |
+| --- | --- |
+| 5,000 | 101 MB (+25) |
+| 10,000 | 157 MB (+81) |
+
+That is why the default is 5,000 and not 10,000 as in Alacritty, while 5,000 lines still hold a
+long log to read back. It was 10,000 until 0.3.1; a `settings.json` saved before then keeps 10,000
+until changed in Settings. The memory stays while the tab is open: Clear Scrollback (⌘K) after
+the 10,000 run brought 155 MB down only to 139 MB.
 
 ## Paint
 

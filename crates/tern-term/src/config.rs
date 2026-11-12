@@ -276,6 +276,6 @@ mod tests {
         let d = TerminalOptions::default();
         assert!(!d.copy_on_select && !d.middle_click_paste && !d.cursor_blink);
         assert_eq!(d.cursor_style, CursorStyleSetting::Block);
-        assert_eq!(d.scrollback_lines, 10_000);
+        assert_eq!(d.scrollback_lines, 5_000);
     }
 }

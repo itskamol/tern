@@ -111,7 +111,7 @@ pub enum CursorStyle {
 
 pub const SCROLLBACK_MIN: usize = 1_000;
 pub const SCROLLBACK_MAX: usize = 100_000;
-pub const SCROLLBACK_DEFAULT: usize = 10_000;
+pub const SCROLLBACK_DEFAULT: usize = 5_000;
 /// The stops the Settings stepper moves between.
 pub const SCROLLBACK_STEPS: [usize; 5] = [1_000, 5_000, 10_000, 50_000, 100_000];
 
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(got.terminal_font_size, 15.0);
         assert!(!got.option_as_meta);
         assert_eq!(got.cursor_style, CursorStyle::Block);
-        assert_eq!(got.scrollback_lines, SCROLLBACK_DEFAULT);
+        assert_eq!(got.scrollback_lines, 5_000);
         assert!(got.bell_bounces_dock);
         // A file from before the option keeps the safe choice.
         assert!(got.vault_lock_on_sleep);
@@ -396,7 +396,10 @@ mod tests {
 
     #[test]
     fn scrollback_steps_between_stops_and_clamps() {
-        let mut s = Settings::default();
+        let mut s = Settings {
+            scrollback_lines: 10_000,
+            ..Settings::default()
+        };
         s.step_scrollback(true);
         assert_eq!(s.scrollback_lines, 50_000);
         s.step_scrollback(false);
