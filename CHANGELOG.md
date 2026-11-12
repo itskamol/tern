@@ -6,6 +6,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Changed
 
+- Messages start to come in two kinds. An Activity ("Copied 3 files", a host change, a program setting the clipboard) shows quietly in the status line for 4 s, or next to a new Activity button at the right of the titlebar when there is no status line (Settings open, Files tab in front, status line off). An Alert (a failure, or a message with Undo) is the snackbar, which now sits at the top right instead of the top centre. The Activity button opens the list of both, newest first; Escape or a click elsewhere closes it. More messages move over in later releases.
 - New terminals keep 5,000 lines of scrollback, down from 10,000. A tab full of long, wrapping log lines (pm2, docker logs) took about 25 MB instead of 80 MB in a measured run. A setting saved before keeps its value; Settings → Terminal changes it.
 
 ### Fixed

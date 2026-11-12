@@ -9,7 +9,7 @@ use gpui::{
 };
 use tern_ssh::{Conflict, ConnectSpec};
 
-use super::{Content, Pane, Shell, ToastKind};
+use super::{Content, Pane, Shell, Toast, ToastKind};
 use crate::files_tab::{FilesView, HostAccess};
 use crate::shell::connections_ui::button;
 use crate::statusline;
@@ -109,12 +109,11 @@ impl Shell {
             cancelled = done.summary.cancelled,
             "transfer_finished"
         );
-        let kind = if ok {
-            ToastKind::Positive
+        if ok {
+            self.activity(text, cx);
         } else {
-            ToastKind::Critical
-        };
-        self.notify_toast(kind, text, cx);
+            self.alert(Toast::new(ToastKind::Critical, text), cx);
+        }
     }
 
     /// Copies are running or waiting.

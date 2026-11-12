@@ -38,7 +38,7 @@ impl Shell {
 
     /// BEL from a session bounces the Dock icon while tern is behind other apps (macOS only
     /// bounces for an inactive app, so a bell in the window being used stays quiet). A program
-    /// setting the clipboard is said in a toast, at most once a minute per session, so a copy
+    /// setting the clipboard is said as an Activity, at most once a minute per session, so a copy
     /// the person did not make never goes unseen.
     pub(super) fn on_bell(
         &self,
@@ -66,7 +66,7 @@ impl Shell {
                         .map_or_else(String::new, |s| s.read(cx).label());
                     let text =
                         clipboard_note(&who, text.chars().count(), shell.settings.clipboard_write);
-                    shell.notify_toast(super::ToastKind::Default, text, cx);
+                    shell.activity(text, cx);
                 }
                 _ => {}
             },
@@ -315,7 +315,7 @@ impl Shell {
 /// How often a session's clipboard writes are mentioned.
 const CLIPBOARD_NOTE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// What the toast says when a program on `who` set the clipboard, or tried to.
+/// The Activity when a program on `who` set the clipboard, or tried to.
 fn clipboard_note(who: &str, chars: usize, allowed: bool) -> String {
     if allowed {
         format!("{who} copied {chars} characters to the clipboard")

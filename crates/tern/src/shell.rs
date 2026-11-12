@@ -71,6 +71,8 @@ mod history_ui;
 mod look;
 #[path = "shell_menu.rs"]
 mod menu;
+#[path = "shell_messages.rs"]
+mod messages_ui;
 #[path = "shell_open.rs"]
 mod open;
 #[path = "shell_settings.rs"]
@@ -183,6 +185,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 vault_ui: None,
                 last_input: std::time::Instant::now(),
                 toasts: toast::Toasts::new(),
+                activity: messages_ui::ActivityUi::default(),
                 tab_scroll: tabs::StripScroll::default(),
                 context_menu: None,
                 hostlist: hostlist::HostList::new(&theme, recent, cx),
@@ -308,6 +311,8 @@ pub struct Shell {
     /// The last key or mouse input to the window, for the vault's idle lock.
     last_input: std::time::Instant,
     toasts: toast::Toasts,
+    /// Activity and Alerts raised so far, and the Activity list.
+    activity: messages_ui::ActivityUi,
     tab_scroll: tabs::StripScroll,
     context_menu: Option<menu::ContextMenu>,
     hostlist: hostlist::HostList,
@@ -601,9 +606,11 @@ impl Render for Shell {
         let snippet_picker = self.render_snippet_picker(window, cx);
         let snippet_form = self.render_snippet_form(window, cx);
         let panel_bg = self.panel_background();
-        let status_line = self.render_status_line(panel_bg, cx);
+        let (line_activity, bar_activity) = self.activity_slots();
+        let status_line = self.render_status_line(panel_bg, line_activity, cx);
         let theme_picker = self.render_theme_picker(window, cx);
         let toast = self.render_toast(window, cx);
+        let activity_list = self.render_activity_list(window, cx);
         let context_menu = self.render_menu(cx);
         let sidebar_now = self.sidebar_now();
         if self.sidebar_tween.is_some() {
@@ -660,9 +667,10 @@ impl Render for Shell {
             // Capture phase: the terminal handles Escape itself, and ending a broadcast must
             // not depend on which pane has focus.
             .capture_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, _, cx| {
+                // The Activity list too: a focused terminal would take its Escape otherwise.
                 if e.keystroke.key == "escape"
                     && e.keystroke.modifiers == gpui::Modifiers::default()
-                    && s.on_broadcast_escape(cx)
+                    && (s.on_broadcast_escape(cx) || s.close_activity_list(cx))
                 {
                     cx.stop_propagation();
                 }
@@ -702,6 +710,10 @@ impl Render for Shell {
                 window.is_fullscreen(),
                 !self.settings.sidebar_collapsed,
                 strip,
+                chrome::Activity {
+                    text: bar_activity,
+                    open: self.activity_list_open(),
+                },
                 cx,
             ))
             .child(match self.settings_page {
@@ -731,6 +743,7 @@ impl Render for Shell {
             .children(self.render_panels(cx))
             .children(self.render_conflict_sheet(window, cx))
             .children(self.render_quit_sheet(window, cx))
+            .children(activity_list)
             .when_some(toast, |el, t| el.child(t))
             .when_some(self.picker.as_ref(), |el, p| {
                 el.child(picker::render(

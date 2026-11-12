@@ -2,9 +2,9 @@
 // snackbar-region.css for sizes, colours and motion; docs/content/components/snackbar.mdx for
 // behaviour (4 s, pause while held, one at a time, queued, at most one action). CubicBezier is
 // from zeron crates/ui/src/motion.rs (MIT).
-//! Snackbars: short, low-severity feedback ("Synced", "Connection removed") shown at the top
-//! centre of the window, one at a time. seed-design places them at the bottom; tern keeps the
-//! terminal's last lines clear and puts them under the titlebar.
+//! The snackbar: what an Alert shows as (ADR 0002), and still what the old `toast` calls show.
+//! One at a time, at the top right under the titlebar. seed-design places it at the bottom;
+//! tern keeps the terminal's last lines clear, and the right edge covers less than the centre.
 
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -69,6 +69,19 @@ impl Toast {
         self.duration = Duration::from_secs(3600);
         self.progress = true;
         self
+    }
+
+    /// The text the Activity list keeps.
+    pub(crate) fn text(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.kind == Kind::Critical
+    }
+
+    pub(crate) fn has_action(&self) -> bool {
+        self.action.is_some()
     }
 
     /// One short, specific action ("Undo", "Show"), as seed-design allows at most one.
@@ -374,7 +387,7 @@ impl Shell {
                             .w(viewport.width)
                             .p(px(8.))
                             .flex()
-                            .justify_center()
+                            .justify_end()
                             .child(card),
                     ),
             )

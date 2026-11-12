@@ -27,6 +27,7 @@ mod keymap;
 mod lifecycle;
 mod lock_on_sleep;
 mod login;
+mod messages;
 mod panel_login;
 mod password_command;
 mod picker;

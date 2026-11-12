@@ -483,8 +483,8 @@ impl Shell {
                     format!("Remove {}", name.as_deref().unwrap_or("host")),
                 );
                 if let Some(name) = name {
-                    // The same step as ⌘Z, so the toast and Edit → Undo never disagree.
-                    self.toast(
+                    // The same step as ⌘Z, so the Alert and Edit → Undo never disagree.
+                    self.alert(
                         Toast::new(ToastKind::Default, format!("Removed {name}"))
                             .action("Undo", |s, w, cx| s.undo_hosts(w, cx)),
                         cx,

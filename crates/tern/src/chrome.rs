@@ -7,6 +7,7 @@
 
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Context, Empty, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement,
     Render, StatefulInteractiveElement, Styled, Window, WindowControlArea, actions, div, px,
@@ -206,13 +207,21 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
     }
 }
 
+/// The titlebar's Activity (ADR 0002): the Activity showing there now, and whether its list
+/// is open.
+pub struct Activity {
+    pub text: Option<gpui::SharedString>,
+    pub open: bool,
+}
+
 /// zeron's titlebar cluster: the sidebar toggle and + (find a host) at x = 88, 24 pt buttons,
-/// 16 pt icons, then the tabs.
+/// 16 pt icons, then the tabs. At the right end, the Activity button in the same 24 pt control.
 pub fn render_titlebar(
     t: &Theme,
     fullscreen: bool,
     sidebar_open: bool,
     tabs: impl IntoElement,
+    activity: Activity,
     cx: &mut gpui::Context<crate::shell::Shell>,
 ) -> impl IntoElement {
     div()
@@ -255,6 +264,35 @@ pub fn render_titlebar(
                 .h_full()
                 .window_control_area(WindowControlArea::Drag)
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
+        )
+        .when_some(activity.text, |el, text| {
+            // The status line's 11 pt, and never wider than the sidebar's default, so the tabs
+            // keep their room at the 900 pt minimum.
+            el.child(
+                div()
+                    .min_w_0()
+                    .max_w(px(crate::settings::SIDEBAR_DEFAULT))
+                    .truncate()
+                    .text_size(px(crate::statusline::TEXT_SIZE))
+                    .text_color(t.muted)
+                    .child(text),
+            )
+        })
+        .child(
+            control("activity", t)
+                .icon_button("Activity", t)
+                // Held at the control's own hover tint while its list is open.
+                .when(activity.open, |el| el.bg(t.ink(0.11)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|s, e: &gpui::MouseDownEvent, _, _| s.activity_button_down(e)),
+                )
+                .on_click(cx.listener(|s, _, _, cx| s.toggle_activity_list(cx)))
+                .child(
+                    crate::icons::icon(crate::icons::INFO)
+                        .size(px(16.))
+                        .text_color(t.muted),
+                ),
         )
 }
 

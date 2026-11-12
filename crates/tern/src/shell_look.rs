@@ -122,9 +122,10 @@ impl Shell {
     pub(super) fn render_status_line(
         &self,
         bg: gpui::Hsla,
+        activity: Option<gpui::SharedString>,
         cx: &App,
     ) -> Option<impl IntoElement + use<>> {
-        if !self.settings.show_status_line {
+        if !self.status_line_showing() {
             return None;
         }
         let session = self.tabs.active_tab()?.session()?.read(cx);
@@ -134,6 +135,7 @@ impl Shell {
             session.dot(),
             session.latency(),
             session.elapsed(),
+            activity,
             bg,
         ))
     }

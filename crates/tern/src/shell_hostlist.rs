@@ -230,15 +230,17 @@ impl Shell {
             && let Err(e) = connections::save(&dir, &list)
         {
             self.hostlist.history.clear();
-            return self.notify_toast(
-                super::ToastKind::Critical,
-                format!("Could not {}: {e}", verb.to_lowercase()),
+            return self.alert(
+                super::Toast::new(
+                    super::ToastKind::Critical,
+                    format!("Could not {}: {e}", verb.to_lowercase()),
+                ),
                 cx,
             );
         }
         self.connections = list;
         self.refresh_hosts();
-        self.notify_toast(super::ToastKind::Default, format!("{verb} {what}"), cx);
+        self.activity(format!("{verb} {what}"), cx);
         cx.notify();
     }
 

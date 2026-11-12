@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 
-use gpui::{Div, Hsla, IntoElement, ParentElement, Styled, div, px};
+use gpui::prelude::FluentBuilder;
+use gpui::{Div, Hsla, IntoElement, ParentElement, SharedString, Styled, div, px};
 
 use crate::indicator::Dot;
 use crate::theme::Theme;
@@ -13,7 +14,7 @@ use crate::theme::Theme;
 /// zeron `SESSION_FOOTER_HEIGHT`.
 pub const HEIGHT: f32 = 24.0;
 const SIDE_PAD: f32 = 10.0;
-const TEXT_SIZE: f32 = 11.0;
+pub const TEXT_SIZE: f32 = 11.0;
 
 /// `user@host:port`.
 pub fn host_label(user: &str, host: &str, port: u16) -> String {
@@ -60,13 +61,15 @@ pub fn format_latency(rtt: Duration) -> String {
     }
 }
 
-/// The strip for one tab; `elapsed` is `None` until the session has connected.
+/// The strip for one tab; `elapsed` is `None` until the session has connected, `activity` is
+/// the Activity showing now, if any.
 pub fn render(
     t: &Theme,
     label: &str,
     dot: Dot,
     latency: Option<Duration>,
     elapsed: Option<Duration>,
+    activity: Option<SharedString>,
     bg: Hsla,
 ) -> impl IntoElement + use<> {
     // `bg` is the terminal scheme's, which may be dark under the light appearance.
@@ -98,6 +101,10 @@ pub fn render(
                 .text_color(t.text)
                 .child(label.to_owned()),
         )
+        // An Activity (ADR 0002) sits by the host, in the line's own type: quiet, not a banner.
+        .when_some(activity, |row, text| {
+            row.child(div().min_w_0().truncate().text_color(t.text).child(text))
+        })
         .child(
             div()
                 .flex_none()
