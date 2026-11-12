@@ -188,8 +188,17 @@ whose binary is built from the same tree with `--features dev-keys`, which compi
 off by default and the script refuses a bundle whose binary carries the replay, so the other scenes
 and every shipped build are as shipped.
 
-Readings on the build with the wallpaper removed and drawables capped at 2: not recorded yet. The
-check was run on the machine where it was written, but another app kept taking focus from the copy
-and the script refused every reading (a dry run with the front check removed showed the scenes
-connect and the vault opens, and is not a measurement). Run it from an idle, unlocked Mac and paste
-the row it prints under this heading.
+Readings, release bundle of the branch over `integration/memory` at c613f3e (wallpaper removed,
+drawables capped at 2), screen unlocked, copy in front, medians of 3 with the range, in MB:
+
+| Scene | Target | Ceiling | Median | Range |
+| --- | --- | --- | --- | --- |
+| No tab | 70 | 80 | 70 | 70-71 |
+| One connected tab | 75 | 85 | **82** | 81-82 |
+| Start-up peak, no vault | 90 | 100 | 78 | 78-82 |
+| Start-up peak, vault | 380 | 400 | 336 | 336 |
+
+Every scene is within its ceiling and the check passes. The one connected tab is over its target
+(82 against 75), so the ticket's "at or under target" is not met for that scene; it is reported
+here and not tuned away. `footprint` prints whole megabytes, so ranges are coarse. The vault row
+is from the dev-keys variant described above.
