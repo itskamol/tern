@@ -311,3 +311,10 @@ fn clear_on_the_alternate_screen_leaves_the_program_s_screen() {
     assert_eq!(t.history_size(), 0);
     assert_eq!(t.row_text(1), "vim");
 }
+
+#[test]
+fn with_content_shows_the_bytes_and_keeps_no_history() {
+    let t = Terminal::with_content(20, 3, b"one\r\ntwo\r\nthree\r\nfour");
+    assert_eq!(t.row_text(2), "four");
+    assert_eq!(t.history_size(), 0);
+}

@@ -60,6 +60,8 @@ pub struct TerminalView {
     pub(crate) terminal: Entity<Terminal>,
     /// macOS: Option sends ESC-prefixed keys (Meta) instead of composing characters.
     option_as_meta: bool,
+    /// A display-only view: never focused, never reads keys or the pointer.
+    display_only: bool,
     focus_handle: FocusHandle,
     geometry: Option<GridGeometry>,
     resize_task: Option<Task<()>>,
@@ -110,9 +112,20 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let this = Self::build(terminal, theme, false, window, cx);
+        window.focus(&this.focus_handle, cx);
+        this
+    }
+
+    fn build(
+        terminal: Entity<Terminal>,
+        theme: TerminalTheme,
+        display_only: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         terminal.update(cx, |t, _| t.set_theme(theme));
         let focus_handle = cx.focus_handle();
-        window.focus(&focus_handle, cx);
         let ime = Ime::new(&focus_handle, window, cx);
         // Repaint exactly when the model changes.
         let subscription = cx.observe(&terminal, |this, _, cx| {
@@ -134,6 +147,7 @@ impl TerminalView {
         Self {
             terminal,
             option_as_meta: true,
+            display_only,
             focus_handle,
             geometry: None,
             resize_task: None,
@@ -583,7 +597,7 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.focus_handle.is_focused(window);
+        let focused = self.display_only || self.focus_handle.is_focused(window);
         let find_bar = self.find.as_ref().map(|query| {
             let t = self.terminal.read(cx);
             let theme = t.theme();
@@ -616,34 +630,39 @@ impl Render for TerminalView {
                 |overlay, t| overlay.opacity(BELL_PEAK_OPACITY * (1.0 - t)),
             )
         });
-        div()
+        let root = div()
             .id("tern-terminal")
             .size_full()
             .bg({
                 let theme = self.terminal.read(cx).theme();
                 theme.background.opacity(theme.background_alpha)
             })
-            .when(linking, |d| d.cursor_pointer())
-            .key_context("Terminal")
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
-            // Bound on the window as well: a drag that ends outside the view
-            // still has to end the gesture.
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
-            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
-            .on_scroll_wheel(
-                cx.listener(|this, event: &ScrollWheelEvent, _, cx| this.on_scroll(event, cx)),
-            )
-            .child(TerminalElement::new(cx.entity(), focused))
+            .when(linking, |d| d.cursor_pointer());
+        // A display-only view draws its cursor as a focused one would, and hears nothing.
+        let root = if self.display_only {
+            root
+        } else {
+            root.key_context("Terminal")
+                .track_focus(&self.focus_handle)
+                .on_key_down(cx.listener(Self::on_key_down))
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
+                .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
+                .on_mouse_move(cx.listener(Self::on_mouse_move))
+                .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+                // Bound on the window as well: a drag that ends outside the view
+                // still has to end the gesture.
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
+                .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
+                .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
+                .on_scroll_wheel(
+                    cx.listener(|this, event: &ScrollWheelEvent, _, cx| this.on_scroll(event, cx)),
+                )
+        };
+        root.child(TerminalElement::new(cx.entity(), focused))
             .children(find_bar)
             .children(bell)
     }
@@ -733,6 +752,7 @@ mod cache_tests;
 mod ime_tests;
 
 mod cursor;
+mod display;
 mod find_links;
 mod ime;
 mod resize;

@@ -101,6 +101,7 @@ impl Shell {
     /// Re-applies font and scheme to every open terminal; each re-measures its cells and the
     /// remote side is told the new grid size.
     pub(super) fn restyle_tabs(&self, cx: &mut Context<Self>) {
+        self.restyle_sample(cx);
         for tab in &self.tabs {
             for session in tab.panes().iter().filter_map(Pane::session) {
                 let theme = self.terminal_theme(&tab.alias);

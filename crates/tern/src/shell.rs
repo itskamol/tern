@@ -75,6 +75,8 @@ mod menu;
 mod messages_ui;
 #[path = "shell_open.rs"]
 mod open;
+#[path = "shell_sample.rs"]
+mod sample_ui;
 #[path = "shell_settings.rs"]
 mod settings_ui;
 #[path = "shell_split.rs"]
@@ -173,6 +175,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 history: Default::default(),
                 sidebar_tween: None,
                 settings_page: None,
+                sample: None,
                 theme_picker: None,
                 recording: None,
                 record_notice: None,
@@ -302,6 +305,8 @@ pub struct Shell {
     history: history_ui::HistoryUi,
     sidebar_tween: Option<WidthTween>,
     settings_page: Option<settings_ui::Section>,
+    /// The Settings sample terminal, alive only while a page showing it is open.
+    sample: Option<Entity<tern_term::TerminalView>>,
     theme_picker: Option<themes_ui::ThemePicker>,
     /// The shortcut being recorded in Settings → Shortcuts, and why the last one was refused.
     recording: Option<crate::keymap::ShortcutId>,
@@ -590,6 +595,7 @@ impl Render for Shell {
         self.sync_density(window);
         // ⌥⌘ released in another app never reaches this window: no labels while it is behind.
         self.pane_numbers &= window.is_window_active();
+        self.sync_sample(window, cx);
         self.sync_frame(window);
         let t = self.theme;
         let infos = self.tab_infos(cx);

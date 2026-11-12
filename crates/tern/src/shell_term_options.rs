@@ -164,6 +164,7 @@ impl Shell {
             ));
         w::page_column()
             .child(w::page_header(&t, "Terminal"))
+            .child(self.sample_terminal())
             .child(w::section(
                 &t,
                 "Font",

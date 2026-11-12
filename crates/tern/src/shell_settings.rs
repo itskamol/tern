@@ -142,6 +142,8 @@ impl Shell {
         if what.reopen_tabs {
             self.tabs.set_saving(self.settings.reopen_tabs);
         }
+        // The Settings sample follows every look and terminal change, whichever path made it.
+        self.restyle_sample(cx);
     }
 
     pub(super) fn apply_option_as_meta(&self, cx: &mut Context<Self>) {
@@ -305,6 +307,7 @@ impl Shell {
         }
         w::page_column()
             .child(w::page_header(&t, "Appearance"))
+            .child(self.sample_terminal())
             .child(w::section(
                 &t,
                 "Theme",

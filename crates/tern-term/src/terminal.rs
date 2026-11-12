@@ -254,6 +254,14 @@ impl Terminal {
         }
     }
 
+    /// A terminal that already shows `bytes`, for a view that is drawn but never connected.
+    /// Replies the parser would send (cursor reports and the like) are dropped.
+    pub fn with_content(cols: u16, rows: u16, bytes: &[u8]) -> Self {
+        let mut terminal = Self::with_scrollback(cols, rows, 0);
+        terminal.process(bytes);
+        terminal
+    }
+
     /// Advance the parser over bytes from the remote side, write any replies
     /// back through `write`, and repaint.
     pub fn feed(&mut self, bytes: &[u8], cx: &mut Context<Self>) {

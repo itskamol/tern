@@ -84,3 +84,17 @@ fn a_nested_end_marker_cannot_break_out_of_a_bracketed_paste() {
     assert!(!inner.windows(6).any(|w| w == b"\x1b[201~"), "{inner:?}");
     assert!(out.ends_with(b"\x1b[201~"));
 }
+
+#[test]
+fn display_height_is_rows_at_the_line_height_plus_padding() {
+    let theme = TerminalTheme {
+        font_size: 13.0,
+        line_height_ratio: 1.5,
+        ..TerminalTheme::default()
+    };
+    // 13 * 1.5 = 19.5 rounds to 20, as the element lays rows out.
+    assert_eq!(
+        TerminalView::height_for_rows(&theme, 5),
+        5.0 * 20.0 + 2.0 * TERM_PADDING
+    );
+}
