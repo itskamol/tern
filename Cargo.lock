@@ -7557,7 +7557,6 @@ dependencies = [
  "chrono",
  "gpui-pre",
  "gpui-pre-platform",
- "image",
  "keyring",
  "libmimalloc-sys",
  "mimalloc",

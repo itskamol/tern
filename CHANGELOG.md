@@ -13,6 +13,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 ### Removed
 
 - The SFTP side panel and its Browse files shortcut slot: ⇧⌘O now opens the Files tab, which does what the panel did and more.
+- The wallpaper: the picture behind the window, Settings → Appearance → Wallpaper and its gallery, the effects (scanlines, ASCII, halftone, dither), theme colours taken from the picture, the seven built-in pictures (about 3.8 MB of the app) and the cache of rendered pictures. The window is always macOS's own blur, and opaque under Reduce transparency. The `wallpaper*` keys in `settings.json` are no longer read; a file that still has them loads, and the next save drops them. The `wallpapers/` folder (copies of your pictures and the cache) in tern's data folder is no longer used and can be deleted.
 
 ## [0.2.0] - 2026-11-11
 

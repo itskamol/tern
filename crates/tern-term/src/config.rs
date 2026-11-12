@@ -22,7 +22,7 @@ pub struct TerminalTheme {
     pub foreground: Hsla,
     pub background: Hsla,
     /// Opacity of the view's own background fill; below 1.0 whatever is behind the terminal
-    /// (a wallpaper) shows through. Cells with their own background colour stay opaque.
+    /// shows through. Cells with their own background colour stay opaque.
     pub background_alpha: f32,
     pub cursor: Hsla,
     pub selection: Hsla,

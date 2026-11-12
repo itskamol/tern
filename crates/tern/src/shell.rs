@@ -65,8 +65,6 @@ use pane_ui::{Content, Pane, Tab, TermPane};
 mod forwards_ui;
 pub(crate) use forwards_ui::{ClearTerminal, FillPassword};
 pub(crate) use history_ui::ToggleCommandHistory;
-#[path = "shell_wallpaper_gallery.rs"]
-mod gallery_ui;
 #[path = "shell_history.rs"]
 mod history_ui;
 #[path = "shell_look.rs"]
@@ -93,8 +91,6 @@ mod update_ui;
 mod vault_page_ui;
 #[path = "shell_vault.rs"]
 mod vault_ui;
-#[path = "shell_wallpaper.rs"]
-mod wallpaper_ui;
 
 pub(crate) use toast::CubicBezier;
 
@@ -192,7 +188,6 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 hostlist: hostlist::HostList::new(&theme, recent, cx),
                 snippets: snippets_ui::SnippetsUi::load(),
                 import: None,
-                wp: wallpaper_ui::State::default(),
                 frame: look::FrameState::default(),
                 system_light: false,
                 update_ready: None,
@@ -311,7 +306,6 @@ pub struct Shell {
     hostlist: hostlist::HostList,
     snippets: snippets_ui::SnippetsUi,
     import: Option<import_ui::ImportSheet>,
-    wp: wallpaper_ui::State,
     frame: look::FrameState,
     /// Whether macOS is in its light appearance; what `Appearance: System` follows.
     system_light: bool,
@@ -477,14 +471,8 @@ impl Shell {
             .collect()
     }
 
-    /// The main panel's content: the active tab's panes, or the empty view, which carries the
-    /// wallpaper `hero` (the picture filling the tile) under its text.
-    fn panel_content(
-        &self,
-        hero: Option<AnyElement>,
-        panel_bg: gpui::Hsla,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The main panel's content: the active tab's panes, or the empty view.
+    fn panel_content(&self, cx: &mut Context<Self>) -> AnyElement {
         if let Some(tab) = self.tabs.active_tab() {
             return self.render_panes(tab, cx);
         }
@@ -514,9 +502,6 @@ impl Shell {
             ),
             None => ("No session open".into(), None),
         };
-        // Over the picture the text sits below its upper part, on a plate of the panel colour,
-        // so it never depends on what the picture holds.
-        let on_picture = hero.is_some();
         div()
             .size_full()
             .relative()
@@ -525,14 +510,12 @@ impl Shell {
             .items_center()
             .justify_center()
             .gap(px(16.))
-            .children(hero)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
                     .gap(px(4.))
-                    .when(on_picture, |el| look::plate(el, panel_bg))
                     .child(div().text_size(px(15.)).text_color(t.text).child(title))
                     .when_some(detail, |el, d| {
                         el.child(div().text_sm().text_color(t.muted).child(d))
@@ -565,7 +548,6 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .when(on_picture, |el| look::plate(el, panel_bg))
                     .child(hint(crate::keymap::ShortcutId::HostPicker, "Find a host"))
                     .child(hint(
                         crate::keymap::ShortcutId::NewConnection,
@@ -586,7 +568,6 @@ impl Render for Shell {
             window.focus(&self.focus, cx);
         }
         self.sync_density(window);
-        self.sync_wallpaper(cx);
         self.sync_frame(window);
         let t = self.theme;
         let infos = self.tab_infos(cx);
@@ -613,9 +594,7 @@ impl Render for Shell {
         let snippet_picker = self.render_snippet_picker(window, cx);
         let snippet_form = self.render_snippet_form(window, cx);
         let panel_bg = self.panel_background();
-        let hero = self.empty_view_hero(window);
-        let layers = self.backdrop();
-        let status_line = self.render_status_line(self.veil(panel_bg), cx);
+        let status_line = self.render_status_line(panel_bg, cx);
         let theme_picker = self.render_theme_picker(window, cx);
         let toast = self.render_toast(window, cx);
         let context_menu = self.render_menu(cx);
@@ -642,7 +621,6 @@ impl Render for Shell {
             .flex()
             .flex_col()
             .bg(self.window_base())
-            .children(layers)
             .font_family(UI_FONT)
             .text_color(t.text)
             .on_action(cx.listener(|s, _: &CloseTab, w, cx| s.close_pane_or_tab(w, cx)))
@@ -717,7 +695,6 @@ impl Render for Shell {
                 window.is_fullscreen(),
                 !self.settings.sidebar_collapsed,
                 strip,
-                self.tile_tint(t.shell),
                 cx,
             ))
             .child(match self.settings_page {
@@ -730,12 +707,7 @@ impl Render for Shell {
                     .child(self.side_tile(sidebar_now, sidebar))
                     .child(
                         self.main_tile(panel_bg)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .child(self.panel_content(hero, panel_bg, cx)),
-                            )
+                            .child(div().flex_1().min_h_0().child(self.panel_content(cx)))
                             .when_some(status_line, |el, line| el.child(line)),
                     )
                     .children(handle)

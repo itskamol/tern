@@ -23,7 +23,7 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 | Titlebar | transparent, custom-drawn strip, app owns drag | `crates/ui/src/lib.rs:393` |
 | Traffic lights | at (14, 14), 38px titlebar row | `lib.rs:398` (code wins over inventory's 14,15) |
 | Fullscreen | traffic lights hidden → chrome cluster reflows left | inventory §1.1 |
-| Window background | macOS `Blurred`, frosted shell; opaque elsewhere | `theme.rs:1130`, `lib.rs:423` |
+| Window background | macOS `Blurred` (material `Selection`), frosted shell, no picture; opaque under Reduce transparency and elsewhere | `theme.rs:1130`, `lib.rs:423` |
 | Glass | blur 44, saturate 1.8, brightness 1.18 | inventory §1.12 |
 | Type | Geist (UI), Geist Mono (terminal) | inventory §1.12 |
 | Surfaces | `bg` → `surface` (+1 step) → `surface_raised` → `overlay`; hairline white borders | `theme.rs:610-640` |
