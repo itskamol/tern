@@ -56,11 +56,11 @@ Every shortcut can be rebound in Settings. The full list, with the Windows and L
 
 ## Other platforms and building
 
-Windows and Linux builds are on the [Releases](https://github.com/your-moon/tern/releases) page as a preview: they pass CI but haven't been run on a real desktop yet, so reports are welcome. To build tern yourself on any platform, see [docs/building.md](docs/building.md). To contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md).
+Releases are on the [Releases](https://github.com/itskamol/tern/releases) page; they are built for macOS. tern also builds on Windows and Linux (see [docs/building.md](docs/building.md)), but those builds haven't been run on a real desktop yet, so reports are welcome. To contribute, start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Feedback
 
-tern is young (0.1.3), and I use it every day. If it's missing the one thing that keeps you on Termius, or something breaks, [open an issue](https://github.com/your-moon/tern/issues). I read all of them. Small fixes are very welcome too: the issues labelled [`good first issue`](https://github.com/your-moon/tern/labels/good%20first%20issue) are a good place to start.
+tern is young, and I use it every day. If it's missing the one thing that keeps you on Termius, or something breaks, [open an issue](https://github.com/itskamol/tern/issues). I read all of them. Small fixes are very welcome too.
 
 ## Credits
 
