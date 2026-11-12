@@ -11,6 +11,7 @@
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
+mod cap;
 mod gate;
 pub mod keys;
 pub mod pin;
@@ -43,6 +44,11 @@ pub enum VaultError {
     WrongPassphrase,
     #[error("vault file is not a tern vault: {0}")]
     Corrupt(String),
+    #[error(
+        "this file asks for more work than tern allows (scrypt 2^{required}, at most \
+         2^{WORK_FACTOR}), so it was not opened"
+    )]
+    TooMuchWork { required: u8 },
     #[error("vault file: {0}")]
     Io(#[from] io::Error),
 }
@@ -63,7 +69,8 @@ struct Contents {
 }
 
 const VERSION: u32 = 1;
-/// scrypt cost, log2(N). age's own default targets about a second; 18 is that on current Macs.
+/// scrypt cost, log2(N): about a second on current Macs. It is also the most a read accepts
+/// (`cap.rs`), so a synced-in or tampered file cannot make tern allocate up to 4 GiB.
 const WORK_FACTOR: u8 = 18;
 
 /// A new file only the owner can read (mode 0600; on Windows the file inherits the owner-only
@@ -122,14 +129,16 @@ impl Vault {
     /// # Errors
     /// As [`Vault::unlock`], without the I/O case.
     pub fn unlock_bytes(ciphertext: &[u8], passphrase: SecretString) -> Result<Self, VaultError> {
-        let identity = age::scrypt::Identity::new(passphrase.clone());
+        let identity = cap::identity(passphrase.clone());
         let plaintext = Zeroizing::new(
-            gate::one_at_a_time(|| age::decrypt(&identity, ciphertext)).map_err(|e| match e {
-                age::DecryptError::DecryptionFailed
-                | age::DecryptError::KeyDecryptionFailed
-                | age::DecryptError::NoMatchingKeys
-                | age::DecryptError::InvalidMac => VaultError::WrongPassphrase,
-                other => VaultError::Corrupt(other.to_string()),
+            gate::one_at_a_time(|| age::decrypt(&identity, ciphertext)).map_err(|e| {
+                cap::read_error(e, |e| match e {
+                    age::DecryptError::DecryptionFailed
+                    | age::DecryptError::KeyDecryptionFailed
+                    | age::DecryptError::NoMatchingKeys
+                    | age::DecryptError::InvalidMac => VaultError::WrongPassphrase,
+                    other => VaultError::Corrupt(other.to_string()),
+                })
             })?,
         );
         let mut contents: Contents =
@@ -260,10 +269,10 @@ impl Vault {
     /// # Errors
     /// [`VaultError::WrongPassphrase`] when sealed under another passphrase or altered.
     pub fn open(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
-        let identity = age::scrypt::Identity::new(self.passphrase.clone());
+        let identity = cap::identity(self.passphrase.clone());
         gate::one_at_a_time(|| age::decrypt(&identity, ciphertext))
             .map(Zeroizing::new)
-            .map_err(|_| VaultError::WrongPassphrase)
+            .map_err(|e| cap::read_error(e, |_| VaultError::WrongPassphrase))
     }
 
     pub fn get(&self, key: &Key) -> Option<&SecretString> {
@@ -786,3 +795,6 @@ mod tests {
 #[cfg(test)]
 #[path = "save_tests.rs"]
 mod save_tests;
+
+#[cfg(test)]
+mod work_cap_tests;
