@@ -233,3 +233,24 @@ mimalloc tags the memory it maps with VM tag 100 by default, which macOS names
 `MIMALLOC_OS_TAG=254` the category read 0 MB while the footprint was unchanged; the real GPU
 memory is "IOAccelerator (graphics)", about 4 MB. `alloc.rs` now tags the heap 240
 ("App-Specific Tag 1"), set by an image initializer because the first arena is mapped before `main`.
+
+## 2026-11-13 — Transfer pipelining: under the 10% bar, reverted (#33)
+
+Prototype: the copy loop in `transfer_plan::copy_through` reading the next 64 KiB chunk in one
+half while the other wrote the previous one, through a bounded channel of 3 chunks (`try_join!`,
+so an error on either side stops the other). Measured with `tests/transfer_bench.rs`
+(`TERN_BENCH_MIB=16 TERN_BENCH_DELAY_MS=<10|50> TERN_BENCH_RUNS=5 cargo test -p tern-ssh --release
+--test transfer_bench -- --ignored --nocapture`): two in-process SFTP hosts, each behind a relay
+holding every chunk for a fixed one-way delay, a 16 MiB file copied host to host through the
+queue, five runs, median. Apple silicon, loopback. One before pass, then one after pass.
+
+| Delay each link, one way | Before | With the pipeline |
+| --- | --- | --- |
+| 10 ms | 1.54 s (10.4 MiB/s) | 1.45 s (11.0 MiB/s), 6% faster |
+| 50 ms | 6.30 s (2.5 MiB/s) | 6.16 s (2.6 MiB/s), 2% faster |
+
+Runs within a pass differ by under 0.1 s. A copy takes about 6 ms a chunk at 20 ms round trip
+and 24 ms at 100 ms (256 chunks), well under one round trip per chunk, so requests are already
+overlapping below the copy loop and the loop's own overlap hides little. Only a channel of 3 was
+tried. The seam test `a_write_error_stops_the_read_and_leaves_nothing_behind`
+(`tests/transfer_stop.rs`) stays: it passes on the serial loop too.
