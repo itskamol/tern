@@ -24,7 +24,6 @@ the sync backup cannot be opened.
 | Saved secrets (vault) | `~/Library/Application Support/tern/vault.age` | yes, encrypted |
 | PIN unlock, Keychain unlock | login Keychain items `tern vault pin`, `tern vault` | no, per Mac |
 | Approved password commands | `approved-commands.json` | no, per Mac by design |
-| Own wallpaper images | `wallpapers/` | no (the setting syncs, the file does not) |
 | Signing identity for local builds | login Keychain identity `tern local` | no; rerun `scripts/make-local-identity.sh` |
 
 ## Restore on a fresh Mac

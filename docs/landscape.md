@@ -8,7 +8,7 @@ Stars and release dates are from `gh api` on 2026-10-06. "Paid" means a price wa
 
 | Tool | Platforms | Stack | Price | Open source | Vault / sync | SFTP | Notable |
 |---|---|---|---|---|---|---|---|
-| tern | macOS (Win/Linux WIP) | Rust + GPUI | Free | GPL-3.0 | age vault + PIN/Keychain; encrypted sync to own Git/gist; gopass/op/pass commands | yes (side panel) | sudo fill on request, broadcast, wallpapers |
+| tern | macOS (Win/Linux WIP) | Rust + GPUI | Free | GPL-3.0 | age vault + PIN/Keychain; encrypted sync to own Git/gist; gopass/op/pass commands | yes (side panel) | sudo fill on request, broadcast |
 | Termius | macOS, Win, Linux, iOS, iPadOS, Android | not stated | Free; Pro $10/mo annual; Team $20; Business $30 | no | local vault free; cloud vault + sync paid; E2E | yes | mobile, teams, Mosh, serial |
 | Tabby | Win, macOS, Linux | Electron/TS (repo is TypeScript) | Free | MIT, 74.8k stars, v1.0.237 (2026-09-25) | encrypted container + optional master passphrase; config sync via Tabby Web | yes | plugins, serial, auto-sudo plugin |
 | Royal TSX / Royal TS | macOS (TSX), Win, iOS, Android | not stated | Lite free (10 connections); TSX EUR 49 one-time | no | credentials; 1Password/LastPass/KeePass; file/share sync | yes (FTP/SFTP/SCP) | RDP/VNC/SSH, team docs |

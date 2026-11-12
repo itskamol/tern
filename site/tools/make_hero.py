@@ -1,10 +1,10 @@
 """Hero art for the landing page, in the style of a dithered painting.
 
-The whole picture is drawn as ordered-dither pixel art (the 4x4 Bayer pattern of tern's
-dither effect, crates/tern/src/wallpaper_fx.rs), then dissolves into the page colour:
+The whole picture is drawn as ordered-dither pixel art (the 4x4 Bayer pattern of the dither
+effect tern's wallpaper had), then dissolves into the page colour:
 towards the bottom the dots get sparser and fade toward the background on a fine lattice.
 
-    python3 site/tools/make_hero.py <wallpaper.jpg> <out.jpg> <width> <height> [focus_y]
+    python3 site/tools/make_hero.py <picture.jpg> <out.jpg> <width> <height> [focus_y]
 """
 import sys
 from PIL import Image, ImageEnhance
