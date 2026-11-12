@@ -95,6 +95,8 @@ pub struct TextInput {
     /// How far the text is shifted left so the cursor stays in a field narrower than the text.
     scroll_x: Pixels,
     is_selecting: bool,
+    /// Backspace goes on up as a key-down event (with `is_held`) instead of editing.
+    backspace_to_parent: bool,
 }
 
 impl TextInput {
@@ -117,6 +119,7 @@ impl TextInput {
             last_bounds: None,
             scroll_x: px(0.),
             is_selecting: false,
+            backspace_to_parent: false,
         }
     }
 
@@ -198,6 +201,9 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.backspace_to_parent {
+            return cx.propagate();
+        }
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
             if self.cursor_offset() == prev {

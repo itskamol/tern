@@ -23,7 +23,7 @@ use crate::command_history::{CommandHistory, Entry, Scope};
 use crate::picker;
 use crate::session::Put;
 use crate::settings_widgets as w;
-use crate::text_input::{Backspace, SelectAll, TextInput};
+use crate::text_input::{SelectAll, TextInput};
 
 actions!(tern, [ToggleCommandHistory]);
 
@@ -82,13 +82,14 @@ fn watch_query<T: 'static>(
 enum Key {
     Move(isize),
     Put { run: bool },
+    Delete,
     ToggleAll,
     Close,
     ClearQuery,
     Ignore,
 }
 
-/// The window's own keys; ⌫ is the `Backspace` action, taken before the field sees it.
+/// The window's own keys. The field hands ⌫ up (`backspace_to_parent`), so it arrives here.
 fn classify(event: &KeyDownEvent) -> Key {
     let ks = &event.keystroke;
     let mods = &ks.modifiers;
@@ -101,6 +102,9 @@ fn classify(event: &KeyDownEvent) -> Key {
         "a" if mods.platform => Key::ToggleAll,
         "enter" => Key::Put { run: mods.platform },
         "escape" => Key::Close,
+        // A held key would delete a screenful of lines.
+        "backspace" if event.is_held => Key::Ignore,
+        "backspace" => Key::Delete,
         // Anything else is the field's: text comes through its input handler, not from here.
         _ => Key::Ignore,
     }
@@ -138,7 +142,9 @@ impl Shell {
         let alias = session.read(cx).alias().to_owned();
         self.picker = None;
         let colors = self.theme.input_colors();
-        let input = cx.new(|cx| TextInput::new("Search command history…", false, colors, cx));
+        let input = cx.new(|cx| {
+            TextInput::new("Search command history…", false, colors, cx).backspace_to_parent()
+        });
         window.focus(&input.focus_handle(cx), cx);
         let watch = watch_query(
             &input,
@@ -213,6 +219,7 @@ impl Shell {
                 }
             }
             // The field reports the change, and the matches are found then.
+            Key::Delete => return self.delete_history_line(cx),
             Key::ClearQuery => win.input.update(cx, |input, cx| input.set_text("", cx)),
             Key::ToggleAll => return self.history_toggle_scope(cx),
             Key::Put { run } => return self.put_history_line(active, run, window, cx),
@@ -361,14 +368,10 @@ impl Shell {
             .bg(t.popup)
             .text_color(t.text)
             .on_key_down(cx.listener(Self::on_history_key))
-            // The field would take these first (select all, delete a character); the window is
-            // above it, so it takes them in the capture phase.
+            // The field would take select all first; the window is above it, so it takes it in the
+            // capture phase.
             .capture_action(cx.listener(|s, _: &SelectAll, _, cx| {
                 s.history_toggle_scope(cx);
-                cx.stop_propagation();
-            }))
-            .capture_action(cx.listener(|s, _: &Backspace, _, cx| {
-                s.delete_history_line(cx);
                 cx.stop_propagation();
             }))
             .on_mouse_down_out(
@@ -587,8 +590,9 @@ mod tests {
     use crate::text_input::{InputColors, TextInput};
     use gpui::AppContext as _;
     use gpui::{
-        AnyWindowHandle, Context, Entity, Focusable as _, IntoElement, KeyDownEvent, Keystroke,
-        ParentElement, Render, Subscription, TestAppContext, VisualTestContext, Window, div, hsla,
+        AnyWindowHandle, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+        KeyDownEvent, Keystroke, ParentElement, Render, Subscription, TestAppContext,
+        VisualTestContext, Window, div, hsla,
     };
 
     fn typed(key: &str) -> KeyDownEvent {
@@ -610,29 +614,85 @@ mod tests {
         assert_eq!(classify(&typed("u")), Key::Ignore);
     }
 
+    fn backspace(is_held: bool) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Default::default(),
+                key: "backspace".into(),
+                key_char: None,
+            },
+            is_held,
+            prefer_character_input: false,
+        }
+    }
+
+    #[test]
+    fn backspace_deletes_a_line_but_a_held_one_does_not_repeat() {
+        assert_eq!(classify(&backspace(false)), Key::Delete);
+        assert_eq!(classify(&backspace(true)), Key::Ignore);
+    }
+
+    #[gpui::test]
+    fn the_field_hands_backspace_up_so_the_window_sees_it_with_is_held(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.bind_keys(crate::text_input::bindings()));
+        let handle = cx.add_window(|window, cx| {
+            let input = cx.new(|cx| {
+                let mut input = TextInput::new("Search", false, colors(), cx).backspace_to_parent();
+                input.set_text("ab", cx);
+                input
+            });
+            window.focus(&input.focus_handle(cx), cx);
+            let _watch = watch_query(&input, |_: &mut Host, _, _| {}, cx);
+            Host {
+                input,
+                seen: Vec::new(),
+                keys: Vec::new(),
+                _watch,
+            }
+        });
+        let window: AnyWindowHandle = handle.into();
+        let mut vcx = VisualTestContext::from_window(window, cx);
+        vcx.simulate_keystrokes("backspace");
+        let host = handle.root(&mut vcx).expect("root");
+        host.read_with(&vcx, |host, cx| {
+            // The field left the line alone, and the window's key-down listener ran.
+            assert_eq!(host.input.read(cx).text(), "ab");
+            assert_eq!(host.keys, ["backspace held=false"]);
+        });
+    }
+
+    fn colors() -> InputColors {
+        InputColors {
+            text: hsla(0., 0., 1., 1.),
+            placeholder: hsla(0., 0., 0.5, 1.),
+            cursor: hsla(0., 0., 1., 1.),
+            selection: hsla(0., 0., 0.5, 0.3),
+        }
+    }
+
     /// The window's stand-in for `Shell`: a field and the texts the watcher reported.
     struct Host {
         input: Entity<TextInput>,
         seen: Vec<String>,
+        keys: Vec<String>,
         _watch: Subscription,
     }
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().child(self.input.clone())
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .on_key_down(cx.listener(|host, event: &KeyDownEvent, _, _| {
+                    host.keys
+                        .push(format!("{} held={}", event.keystroke.key, event.is_held));
+                }))
+                .child(self.input.clone())
         }
     }
 
     #[gpui::test]
     fn text_delivered_through_the_input_handler_reaches_the_query(cx: &mut TestAppContext) {
         let handle = cx.add_window(|window, cx| {
-            let colors = InputColors {
-                text: hsla(0., 0., 1., 1.),
-                placeholder: hsla(0., 0., 0.5, 1.),
-                cursor: hsla(0., 0., 1., 1.),
-                selection: hsla(0., 0., 0.5, 0.3),
-            };
-            let input = cx.new(|cx| TextInput::new("Search", false, colors, cx));
+            let input = cx.new(|cx| TextInput::new("Search", false, colors(), cx));
             window.focus(&input.focus_handle(cx), cx);
             let _watch = watch_query(
                 &input,
@@ -642,6 +702,7 @@ mod tests {
             Host {
                 input,
                 seen: Vec::new(),
+                keys: Vec::new(),
                 _watch,
             }
         });
