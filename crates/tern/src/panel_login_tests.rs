@@ -282,3 +282,15 @@ fn a_typed_password_is_offered_for_saving_even_with_no_vault_and_asks_for_a_new_
     s.wait("saved", |l| l.note() == Some("Saved in the vault."));
     s.wait("connected again", |l| matches!(l.step, Step::Connected));
 }
+
+#[test]
+fn a_host_key_accepted_in_the_panel_is_saved_so_a_terminal_does_not_ask_again() {
+    let mut s = scene(false);
+    s.asking("can't be established");
+    s.say_yes();
+    s.asking("password");
+    s.type_in(PASSWORD);
+    s.connected();
+    let saved = std::fs::read_to_string(s._dir.path().join("known_hosts")).unwrap();
+    assert!(saved.contains("127.0.0.1"), "known_hosts: {saved:?}");
+}

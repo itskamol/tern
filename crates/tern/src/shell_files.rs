@@ -15,6 +15,17 @@ use crate::shell::connections_ui::button;
 use crate::statusline;
 use crate::transfers::{self, Finished};
 
+/// The first live connection among `sessions` (label, connection) whose label is `label`: a
+/// second tab to the host still serves the panel when the first one is closed.
+fn connected_to<T>(
+    label: &str,
+    sessions: impl IntoIterator<Item = (String, Option<T>)>,
+) -> Option<T> {
+    sessions
+        .into_iter()
+        .find_map(|(l, handle)| handle.filter(|_| l == label))
+}
+
 /// The Files tab's name in the strip.
 const FILES_ALIAS: &str = "Files";
 
@@ -64,12 +75,13 @@ impl Shell {
         }
         .ok()?;
         let label = statusline::host_label(&spec.user, &spec.host, spec.port);
-        let session = self
-            .tabs
-            .iter()
-            .filter_map(|t| t.session())
-            .find(|s| s.read(cx).label() == label)
-            .and_then(|s| s.read(cx).ssh_handle());
+        let session = connected_to(
+            &label,
+            self.tabs
+                .iter()
+                .filter_map(|t| t.session())
+                .map(|s| (s.read(cx).label(), s.read(cx).ssh_handle())),
+        );
         Some(HostAccess {
             auth: self.auth_for(alias),
             spec,
@@ -299,5 +311,21 @@ impl Shell {
                     )),
             );
         Some(self.sheet(window, card))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connected_to;
+
+    #[test]
+    fn a_panel_uses_the_connection_of_any_open_session_to_its_host() {
+        let tabs = [
+            ("me@web:22".to_owned(), None),
+            ("me@db:22".to_owned(), Some(1)),
+            ("me@web:22".to_owned(), Some(2)),
+        ];
+        assert_eq!(connected_to("me@web:22", tabs.clone()), Some(2));
+        assert_eq!(connected_to("me@cache:22", tabs), None);
     }
 }

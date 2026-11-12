@@ -71,16 +71,42 @@ pub enum HostsMerge {
     Conflict(Vec<String>),
 }
 
-fn connections(text: &str) -> Result<Vec<(String, Value)>, String> {
+/// The newest `hosts.json` version [`merge_hosts`] will merge. A newer file may carry fields or
+/// a shape this build cannot see, so merging it would drop data: it is refused instead.
+pub const HOSTS_VERSION_MERGEABLE: u64 = 2;
+
+/// The version every merge output is at least: the one `tern` writes.
+const HOSTS_VERSION_FLOOR: u64 = 1;
+
+/// One parsed `hosts.json`: its version (0 for an empty file), its connections by name, and any
+/// top-level keys other than those two, which this build does not know.
+struct Hosts {
+    version: u64,
+    connections: Vec<(String, Value)>,
+    extras: Map<String, Value>,
+}
+
+fn read(text: &str) -> Result<Hosts, String> {
     if text.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(Hosts {
+            version: 0,
+            connections: Vec::new(),
+            extras: Map::new(),
+        });
     }
     let v: Value = serde_json::from_str(text).map_err(|e| format!("hosts.json: {e}"))?;
     let list = v
         .get("connections")
         .and_then(Value::as_array)
         .ok_or("hosts.json: no connections list")?;
-    list.iter()
+    let version = match v.get("version") {
+        None => 0,
+        Some(n) => n
+            .as_u64()
+            .ok_or("hosts.json: version is not a whole number")?,
+    };
+    let connections = list
+        .iter()
         .map(|c| {
             let name = c
                 .get("name")
@@ -88,7 +114,15 @@ fn connections(text: &str) -> Result<Vec<(String, Value)>, String> {
                 .ok_or("hosts.json: a connection has no name")?;
             Ok((name.to_owned(), c.clone()))
         })
-        .collect()
+        .collect::<Result<_, String>>()?;
+    let mut extras = v.as_object().cloned().unwrap_or_default();
+    extras.remove("version");
+    extras.remove("connections");
+    Ok(Hosts {
+        version,
+        connections,
+        extras,
+    })
 }
 
 /// Three-way merge of `hosts.json` by connection name. `base` is the text at the last sync.
@@ -97,14 +131,29 @@ fn connections(text: &str) -> Result<Vec<(String, Value)>, String> {
 /// removal); changed the same way on both is that; changed differently on both is a conflict.
 /// Order is this Mac's, then the connections only the remote has.
 ///
+/// The output version is the highest of the three inputs (never below 1), so a file is never
+/// written back older than any copy of it. A file whose version is above
+/// [`HOSTS_VERSION_MERGEABLE`] is refused, not merged: this build cannot see what it added, and
+/// writing the merge would silently drop it. Top-level keys other than `version` and
+/// `connections` are kept too, this Mac's value winning over the remote's.
+///
 /// # Errors
 /// One of the three texts is not a `hosts.json`.
 pub fn merge_hosts(base: &str, local: &str, remote: &str) -> Result<HostsMerge, String> {
-    let (base, local, remote) = (
-        connections(base)?,
-        connections(local)?,
-        connections(remote)?,
-    );
+    let (base, local, remote) = (read(base)?, read(local)?, read(remote)?);
+    let version = [&base, &local, &remote]
+        .iter()
+        .map(|h| h.version)
+        .fold(HOSTS_VERSION_FLOOR, u64::max);
+    if version > HOSTS_VERSION_MERGEABLE {
+        return Err(format!(
+            "hosts.json: version {version} is newer than this build understands \
+             ({HOSTS_VERSION_MERGEABLE}); update tern before syncing"
+        ));
+    }
+    let mut extras = remote.extras.clone();
+    extras.extend(local.extras.clone());
+    let (base, local, remote) = (base.connections, local.connections, remote.connections);
     let find = |list: &[(String, Value)], name: &str| {
         list.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
     };
@@ -131,8 +180,9 @@ pub fn merge_hosts(base: &str, local: &str, remote: &str) -> Result<HostsMerge, 
         return Ok(HostsMerge::Conflict(conflicts));
     }
     let mut file = Map::new();
-    file.insert("version".into(), json!(1));
+    file.insert("version".into(), json!(version));
     file.insert("connections".into(), Value::Array(out));
+    file.extend(extras);
     serde_json::to_string_pretty(&Value::Object(file))
         .map(HostsMerge::Merged)
         .map_err(|e| e.to_string())
@@ -153,6 +203,10 @@ mod tests {
 
     fn merged(base: &[Value], local: &[Value], remote: &[Value]) -> HostsMerge {
         merge_hosts(&file(base), &file(local), &file(remote)).unwrap()
+    }
+
+    fn connections(text: &str) -> Result<Vec<(String, Value)>, String> {
+        read(text).map(|h| h.connections)
     }
 
     fn names(m: HostsMerge) -> Vec<String> {
@@ -424,7 +478,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "blocked on #28: merge_hosts hardcodes version 1"]
     fn merged_output_keeps_the_input_version() {
         let local = file_v(2, &[conn("web", "1.1.1.1")]);
         let remote = file_v(2, &[conn("web", "1.1.1.1"), conn("db", "2.2.2.2")]);
@@ -433,6 +486,79 @@ mod tests {
         };
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["version"], json!(2), "silently downgraded: {out}");
+    }
+
+    fn merged_version(base: &str, local: &str, remote: &str) -> Value {
+        let HostsMerge::Merged(out) = merge_hosts(base, local, remote).unwrap() else {
+            unreachable!("no conflict in these inputs")
+        };
+        serde_json::from_str::<Value>(&out).unwrap()["version"].clone()
+    }
+
+    #[test]
+    fn output_version_is_the_highest_of_the_three_inputs() {
+        let c = [conn("web", "1.1.1.1")];
+        let (v1, v2) = (file_v(1, &c), file_v(2, &c));
+        // Each position can be the one that carries the newest version.
+        assert_eq!(merged_version(&v2, &v1, &v1), json!(2), "base");
+        assert_eq!(merged_version(&v1, &v2, &v1), json!(2), "local");
+        assert_eq!(merged_version(&v1, &v1, &v2), json!(2), "remote");
+        assert_eq!(merged_version(&v1, &v1, &v1), json!(1));
+    }
+
+    #[test]
+    fn a_missing_side_does_not_lower_the_version_and_the_floor_is_one() {
+        let v2 = file_v(2, &[conn("web", "1.1.1.1")]);
+        assert_eq!(merged_version("", &v2, ""), json!(2));
+        assert_eq!(merged_version("", "", ""), json!(1));
+        // A file with no version key counts as the oldest, not as an error.
+        let bare = r#"{"connections": []}"#;
+        assert_eq!(merged_version(bare, bare, bare), json!(1));
+    }
+
+    #[test]
+    fn a_version_this_build_cannot_see_is_refused_wherever_it_sits() {
+        let c = [conn("web", "1.1.1.1")];
+        let (ok, new) = (file_v(1, &c), file_v(HOSTS_VERSION_MERGEABLE + 1, &c));
+        for (b, l, r) in [(&new, &ok, &ok), (&ok, &new, &ok), (&ok, &ok, &new)] {
+            let e = merge_hosts(b, l, r).unwrap_err();
+            assert!(e.contains("newer than this build"), "{e}");
+        }
+        // The newest version it does understand is merged, not refused.
+        let edge = file_v(HOSTS_VERSION_MERGEABLE, &c);
+        assert!(merge_hosts(&edge, &edge, &edge).is_ok());
+    }
+
+    #[test]
+    fn a_version_that_is_not_a_whole_number_is_an_error() {
+        let good = file(&[conn("web", "1.1.1.1")]);
+        for v in [r#""2""#, "1.5", "-1", "null"] {
+            let bad = format!(r#"{{"version": {v}, "connections": []}}"#);
+            assert!(merge_hosts(&bad, &good, &good).is_err(), "{v}");
+        }
+    }
+
+    #[test]
+    fn unknown_top_level_keys_survive_and_this_macs_value_wins() {
+        let text = |extra: Value| {
+            let mut v = json!({"version": 1, "connections": [conn("web", "1.1.1.1")]});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            v.to_string()
+        };
+        let base = text(json!({}));
+        let local = text(json!({"theme": "mine", "shared": "local"}));
+        let remote = text(json!({"groups": [1], "shared": "remote"}));
+        let HostsMerge::Merged(out) = merge_hosts(&base, &local, &remote).unwrap() else {
+            unreachable!("same connections")
+        };
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["theme"], json!("mine"));
+        assert_eq!(v["groups"], json!([1]));
+        assert_eq!(v["shared"], json!("local"));
+        assert_eq!(v["version"], json!(1));
+        assert_eq!(v["connections"].as_array().unwrap().len(), 1);
     }
 
     #[test]
