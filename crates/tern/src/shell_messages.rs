@@ -1,6 +1,6 @@
 //! Activity and Alert on the window (ADR 0002). [`crate::messages`] decides where a message
 //! goes; this file raises messages, wakes the view when an Activity's time is up, and draws the
-//! Activity list the titlebar button opens. The old `toast` calls still work beside these.
+//! Activity list the titlebar button opens.
 
 use std::time::{Instant, SystemTime};
 
@@ -13,7 +13,7 @@ use gpui::{
 
 use super::Shell;
 use super::toast::Toast;
-use crate::messages::{Kind, Messages, Place, SHOWN_FOR};
+use crate::messages::{Kind, Messages, Place, SHOWN_FOR, Work};
 use crate::theme::{SPACE_SM, TITLEBAR_HEIGHT};
 
 /// Whether the Activity list is open. A press outside it closes it before the titlebar button
@@ -80,20 +80,22 @@ impl Shell {
     }
 
     /// Work in progress shown as an Activity ("Downloading\u{2026}"), replaced in place until
-    /// [`Self::end_progress_activity`]; `key` names the work.
+    /// [`Self::end_progress_activity`]. Repaints only when what shows changed.
     pub(crate) fn progress_activity(
         &mut self,
-        key: &'static str,
+        work: Work,
         text: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        self.activity.messages.set_progress(key, text);
-        cx.notify();
+        if self.activity.messages.set_progress(work, text) {
+            cx.notify();
+        }
     }
 
-    pub(crate) fn end_progress_activity(&mut self, key: &'static str, cx: &mut Context<Self>) {
-        self.activity.messages.end_progress(key);
-        cx.notify();
+    pub(crate) fn end_progress_activity(&mut self, work: Work, cx: &mut Context<Self>) {
+        if self.activity.messages.end_progress(work) {
+            cx.notify();
+        }
     }
 
     /// An Alert for something that did not work, with no action.

@@ -10,12 +10,9 @@ use gpui::{AppContext as _, Context};
 use serde::Deserialize;
 
 use super::{Shell, Toast, ToastKind};
-use crate::messages::Kind;
+use crate::messages::{Kind, Work};
 use crate::settings;
 use crate::update_outcome::{Found, Outcome, Trouble, reason, version_row};
-
-/// The update check's work in progress, in the status line or by the titlebar button.
-const UPDATE: &str = "update";
 
 /// Only a page on GitHub is ever opened, whatever the response says.
 const PAGE_PREFIX: &str = "https://github.com/";
@@ -313,7 +310,7 @@ impl Shell {
         }
         if manual {
             let text = Outcome::Checking.message(env!("CARGO_PKG_VERSION"));
-            self.progress_activity(UPDATE, text, cx);
+            self.progress_activity(Work::UpdateCheck, text, cx);
         }
         cx.notify();
         let dir = settings::dir();
@@ -356,7 +353,11 @@ impl Shell {
         }
         let downloading = Outcome::Downloading(found.version.clone());
         if manual {
-            self.progress_activity(UPDATE, downloading.message(env!("CARGO_PKG_VERSION")), cx);
+            self.progress_activity(
+                Work::UpdateCheck,
+                downloading.message(env!("CARGO_PKG_VERSION")),
+                cx,
+            );
         }
         self.update_check.progress(downloading);
         cx.notify();
@@ -384,7 +385,7 @@ impl Shell {
             _ => {}
         }
         self.update_check.finish(outcome.clone());
-        self.end_progress_activity(UPDATE, cx);
+        self.end_progress_activity(Work::UpdateCheck, cx);
         if manual || actionable {
             match outcome.kind() {
                 Kind::Alert => self.alert(outcome_alert(outcome), cx),

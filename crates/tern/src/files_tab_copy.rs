@@ -98,7 +98,7 @@ impl FilesView {
     }
 }
 
-/// What a copy is called in the transfer list and the toast.
+/// What a copy is called in the transfer list and its Activity.
 pub fn copy_label(entries: &[FileEntry], to: &str) -> String {
     match entries {
         [one] => format!("{} to {to}", one.name),

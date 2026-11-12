@@ -292,7 +292,7 @@ impl Shell {
         session.update(cx, |s, cx| s.fill_password(cx));
     }
 
-    /// A pane asked for a password that could be filled: the toast naming the shortcut, and the
+    /// A pane asked for a password that could be filled: the message naming the shortcut, and the
     /// pane's host when it is not the focused one. Only the front tab gets it, and only when
     /// that pane is where the shortcut would fill.
     fn hint_fill(&mut self, session: &Entity<Session>, cx: &mut Context<Self>) {

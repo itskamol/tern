@@ -50,7 +50,7 @@ pub fn is_password_prompt(line: &str) -> bool {
 }
 
 /// Whether anything may be typed for the cursor line `line` (`None`: no cursor to read): only
-/// a password prompt may, and otherwise this is the toast that says why not.
+/// a password prompt may, and otherwise this is the Alert that says why not.
 pub fn guard(line: Option<&str>) -> Result<(), &'static str> {
     match line {
         Some(l) if is_password_prompt(l) => Ok(()),
@@ -222,9 +222,9 @@ pub enum SessionNote {
     },
     /// The remote is asking for a password and one could be filled: show the shortcut.
     PasswordPrompt,
-    /// A line for a toast.
+    /// A line for an Activity.
     Message(String),
-    /// A line for a toast that is an error.
+    /// A line for an Alert: something did not work.
     Problem(String),
 }
 

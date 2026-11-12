@@ -1,7 +1,6 @@
 //! What a person sees for an update check: one place maps the check's result to its message,
 //! the message's kind (ADR 0002) and the Version row in Settings → About, so they cannot drift
-//! apart. Also the rule that only one
-//! check runs at a time.
+//! apart. Also the rule that only one check runs at a time.
 
 /// A newer release: its version text and the page to open.
 #[derive(Debug, Clone, PartialEq, Eq)]

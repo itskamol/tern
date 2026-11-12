@@ -98,7 +98,7 @@ impl Shell {
             cx.notify();
             s.start_logging()
         }) {
-            // The file name, not the full path (it ran past the toast), and a way to find it.
+            // The file name, not the full path (it ran past the Alert), and a way to find it.
             Ok(path) => {
                 let name = path
                     .file_name()

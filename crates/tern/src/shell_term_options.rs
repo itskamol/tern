@@ -271,7 +271,7 @@ impl Shell {
                         &t,
                         false,
                         "Programs can copy to the clipboard",
-                        Some("OSC 52, as tmux and vim copy over SSH; a toast says when".into()),
+                        Some("OSC 52, as tmux and vim copy over SSH; tern says when it happens".into()),
                         toggle(
                             "clipboard-write",
                             "Programs can copy to the clipboard",

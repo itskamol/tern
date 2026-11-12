@@ -22,7 +22,7 @@ pub struct HostHistory {
 }
 
 impl HostHistory {
-    /// Remembers an edit that turned `before` into `after`; `what` names it for the toast
+    /// Remembers an edit that turned `before` into `after`; `what` names it for the Activity
     /// ("Remove web-01"). A new edit ends what could be redone.
     pub fn record(&mut self, before: Vec<Connection>, after: Vec<Connection>, what: String) {
         if before == after {

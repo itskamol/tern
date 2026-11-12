@@ -19,6 +19,13 @@ pub enum Kind {
     Alert,
 }
 
+/// Work whose progress shows as an Activity until it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Work {
+    UpdateCheck,
+    Copies,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
     StatusLine,
@@ -53,7 +60,7 @@ pub struct Messages {
     list: VecDeque<Entry>,
     latest: Option<(String, Instant)>,
     /// Work in progress, oldest first; the newest is the one shown.
-    progress: Vec<(&'static str, String)>,
+    progress: Vec<(Work, String)>,
 }
 
 impl Messages {
@@ -86,18 +93,28 @@ impl Messages {
     }
 
     /// A message that follows work in progress ("Downloading\u{2026} 40%"): shown until
-    /// [`Self::end_progress`], its text replaced in place, never added to the list. `key`
-    /// names the work, so two can run at once.
-    pub fn set_progress(&mut self, key: &'static str, text: impl Into<String>) {
+    /// [`Self::end_progress`], its text replaced in place, never added to the list. Two kinds of
+    /// work can run at once. Returns whether what shows changed.
+    pub fn set_progress(&mut self, work: Work, text: impl Into<String>) -> bool {
         let text = text.into();
-        match self.progress.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, shown)) => *shown = text,
-            None => self.progress.push((key, text)),
+        match self.progress.iter_mut().find(|(w, _)| *w == work) {
+            Some((_, shown)) if *shown == text => false,
+            Some((_, shown)) => {
+                *shown = text;
+                true
+            }
+            None => {
+                self.progress.push((work, text));
+                true
+            }
         }
     }
 
-    pub fn end_progress(&mut self, key: &'static str) {
-        self.progress.retain(|(k, _)| *k != key);
+    /// Returns whether there was such work.
+    pub fn end_progress(&mut self, work: Work) -> bool {
+        let before = self.progress.len();
+        self.progress.retain(|(w, _)| *w != work);
+        self.progress.len() != before
     }
 
     /// The list, oldest first.
@@ -239,15 +256,16 @@ mod tests {
     fn progress_shows_until_it_ends_updates_in_place_and_stays_out_of_the_list() {
         let mut m = Messages::default();
         let t0 = Instant::now();
-        m.set_progress("update", "Downloading tern 0.4.0\u{2026} 10%");
-        m.set_progress("update", "Downloading tern 0.4.0\u{2026} 60%");
+        assert!(m.set_progress(Work::UpdateCheck, "Downloading tern 0.4.0\u{2026} 10%"));
+        assert!(m.set_progress(Work::UpdateCheck, "Downloading tern 0.4.0\u{2026} 60%"));
+        assert!(!m.set_progress(Work::UpdateCheck, "Downloading tern 0.4.0\u{2026} 60%"));
         let later = t0 + SHOWN_FOR * 10;
         assert_eq!(
             m.showing(later, true),
             Some((Place::StatusLine, "Downloading tern 0.4.0\u{2026} 60%"))
         );
         assert_eq!(m.list().len(), 0);
-        m.end_progress("update");
+        assert!(m.end_progress(Work::UpdateCheck));
         assert_eq!(m.showing(later, true), None);
     }
 
@@ -255,7 +273,7 @@ mod tests {
     fn a_new_activity_shows_over_progress_for_its_time_then_progress_is_back() {
         let mut m = Messages::default();
         let t0 = Instant::now();
-        m.set_progress("transfers", "Copying a.txt 40%");
+        m.set_progress(Work::Copies, "Copying a.txt 40%");
         m.raise(
             Kind::Activity,
             "Synced",
@@ -275,19 +293,19 @@ mod tests {
     fn ending_one_progress_leaves_the_other() {
         let mut m = Messages::default();
         let later = Instant::now() + SHOWN_FOR;
-        m.set_progress("update", "Checking for updates\u{2026}");
-        m.set_progress("transfers", "Copying a.txt 40%");
+        m.set_progress(Work::UpdateCheck, "Checking for updates\u{2026}");
+        m.set_progress(Work::Copies, "Copying a.txt 40%");
         assert_eq!(
             m.showing(later, true).map(|s| s.1),
             Some("Copying a.txt 40%")
         );
-        m.end_progress("transfers");
+        assert!(m.end_progress(Work::Copies));
         assert_eq!(
             m.showing(later, true).map(|s| s.1),
             Some("Checking for updates\u{2026}")
         );
-        m.end_progress("nothing");
-        m.end_progress("update");
+        assert!(!m.end_progress(Work::Copies));
+        assert!(m.end_progress(Work::UpdateCheck));
         assert_eq!(m.showing(later, true), None);
     }
 }

@@ -11,12 +11,10 @@ use tern_ssh::{Conflict, ConnectSpec};
 
 use super::{Content, Pane, Shell, Toast, ToastKind};
 use crate::files_tab::{FilesView, HostAccess};
+use crate::messages::Work;
 use crate::shell::connections_ui::button;
 use crate::statusline;
 use crate::transfers::{self, Finished};
-
-/// The copies' work in progress, in the status line or by the titlebar button.
-const TRANSFERS: &str = "transfers";
 
 /// The first live connection among `sessions` (label, connection) whose label is `label`: a
 /// second tab to the host still serves the panel when the first one is closed.
@@ -122,8 +120,8 @@ impl Shell {
     /// Running copies show as one progress Activity, updated in place until the last ends.
     pub(super) fn on_transfers_changed(&mut self, cx: &mut Context<Self>) {
         match crate::transfers::progress_line(self.transfers.read(cx).rows()) {
-            Some(line) => self.progress_activity(TRANSFERS, line, cx),
-            None => self.end_progress_activity(TRANSFERS, cx),
+            Some(line) => self.progress_activity(Work::Copies, line, cx),
+            None => self.end_progress_activity(Work::Copies, cx),
         }
     }
 
