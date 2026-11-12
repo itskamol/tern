@@ -29,8 +29,8 @@ pub enum SftpError {
     /// The session has ended.
     #[error("session closed")]
     Closed,
-    /// The server has no SFTP service.
-    #[error("the server does not offer SFTP")]
+    /// The host has no SFTP service.
+    #[error("the host does not offer SFTP")]
     NotOffered,
     #[error("{0}: no such file or directory")]
     NotFound(String),

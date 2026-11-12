@@ -70,5 +70,6 @@ async fn a_server_without_sftp_is_reported_as_such() {
     let live = start(spec(server.port, &dir)).await.unwrap();
     let err = live.handle.open_sftp().await.unwrap_err();
     assert_eq!(err, SftpError::NotOffered);
+    assert_eq!(err.to_string(), "the host does not offer SFTP");
     live.handle.close();
 }

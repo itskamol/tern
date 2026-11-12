@@ -16,7 +16,7 @@ use tern_ssh::{
 };
 
 use crate::files_model::{Selection, Sort, SortKey, order};
-use crate::panel_login::{LoginEvent, PanelLogin};
+use crate::panel_login::{LoginEvent, PanelLogin, Step};
 use crate::password_command::Auth;
 use crate::shell::Shell;
 use crate::text_input::TextInput;
@@ -252,6 +252,28 @@ impl FilesView {
                 .flatten(),
         };
         self.start(side, access, cx);
+    }
+
+    /// Retry: a session opened since the panel failed serves it; otherwise a failed login of
+    /// its own asks again, and anything else starts over.
+    pub fn retry(&mut self, side: usize, cx: &mut Context<Self>) {
+        let login = self.panels[side].login.clone();
+        let failed = login
+            .as_ref()
+            .is_some_and(|l| matches!(l.read(cx).step(), Step::Failed(_)));
+        let session = match self.panels[side].target.clone() {
+            Target::Host(alias) => self
+                .shell
+                .read_with(cx, |s, cx| s.host_access(&alias, cx))
+                .ok()
+                .flatten()
+                .is_some_and(|a| a.session.is_some()),
+            Target::Mac => false,
+        };
+        match login {
+            Some(login) if failed && !session => login.update(cx, |l, cx| l.retry(cx)),
+            _ => self.connect(side, cx),
+        }
     }
 
     fn start(&mut self, side: usize, access: Option<HostAccess>, cx: &mut Context<Self>) {

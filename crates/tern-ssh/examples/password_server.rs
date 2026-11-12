@@ -492,6 +492,8 @@ struct PasswordServer {
     shell: demo::Shell,
     /// Session channels not yet claimed by a subsystem.
     sessions: HashMap<ChannelId, Channel<Msg>>,
+    /// The channel the shell runs on. Bytes on any other (an SFTP channel) are not typing.
+    shell_channel: Option<ChannelId>,
 }
 
 impl server::Handler for PasswordServer {
@@ -610,6 +612,7 @@ impl server::Handler for PasswordServer {
 
     async fn shell_request(&mut self, ch: ChannelId, s: &mut Session) -> Result<(), Self::Error> {
         s.channel_success(ch)?;
+        self.shell_channel = Some(ch);
         if self.demo {
             let out = self.shell.start(&self.user);
             s.data(ch, out)?;
@@ -628,6 +631,9 @@ impl server::Handler for PasswordServer {
         data: &[u8],
         s: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.shell_channel != Some(ch) {
+            return Ok(());
+        }
         if self.demo {
             let (out, close) = self.shell.feed(&self.user, &self.password, data);
             if !out.is_empty() {
@@ -726,6 +732,7 @@ async fn main() {
             shell: demo::Shell::default(),
             typed: Vec::new(),
             sessions: HashMap::new(),
+            shell_channel: None,
         };
         let config = config.clone();
         tokio::spawn(async move {

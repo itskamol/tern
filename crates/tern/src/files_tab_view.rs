@@ -456,14 +456,7 @@ impl FilesView {
             .child(
                 action(("files-retry", side), label, true, &t).on_click(cx.listener(
                     move |this, _, _, cx| {
-                        let login = this.panels[side].login.clone();
-                        let failed = login
-                            .as_ref()
-                            .is_some_and(|l| matches!(l.read(cx).step(), Step::Failed(_)));
-                        match login {
-                            Some(login) if failed => login.update(cx, |l, cx| l.retry(cx)),
-                            _ => this.connect(side, cx),
-                        }
+                        this.retry(side, cx);
                         cx.notify();
                     },
                 )),
