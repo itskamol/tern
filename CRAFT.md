@@ -5,7 +5,9 @@ tern is held to a higher bar than the projects it copies from. These rules are e
 
 - **No panics in shipped code.** `unwrap`, `expect`, `panic!`, `todo!` are denied outside tests.
   Errors are typed (`thiserror`) in libraries and reported to the user, never swallowed.
-- **No `unsafe`.** Forbidden workspace-wide.
+- **`unsafe` is denied workspace-wide.** The one exception is a module calling a platform API
+  with no safe binding: it opens with `#![allow(unsafe_code)]` and a `//!` naming its single
+  `unsafe` and why it holds (`drawables.rs`).
 - **No god-files.** Every source file stays under 800 lines. Split by responsibility, not by size.
 - **Files: keep related code together.** Add to the closest related file while it stays under 800 lines;
   split only when a file would cross the limit, along a real seam. Tests live in the module's own

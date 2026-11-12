@@ -176,8 +176,8 @@ and 2 when it refused a reading.
 | Start-up peak, no vault | `phys_footprint_peak` of the runs above, pooled | 90 MB | 100 MB |
 | Start-up peak, vault | `phys_footprint_peak`, a throwaway vault opened at start-up | 380 MB | 400 MB |
 
-Refused, never guessed: a locked screen, a copy that is not the front app (compared by pid, at
-every 2 s check and at the reading), a window that is not 1320x880, a tab that did not connect, and
+Refused, never guessed: a locked screen, a copy whose window is less than half visible
+(`measure-window --visible`, at every 2 s check and at the reading), a window that is not 1320x880, a tab that did not connect, and
 a vault scene whose peak is under the 256 MiB scrypt block (the vault did not open).
 
 The vault scene cannot open a vault with a shipped binary and no typing: the Keychain is the

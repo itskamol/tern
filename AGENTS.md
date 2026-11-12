@@ -5,8 +5,9 @@
   `git config core.hooksPath scripts/hooks`.
 - UI changes are checked by eye (`docs/testing.md` § 5): `scripts/dev-check.sh` runs a debug
   build as its own app (bundle id `dev.tern.check`) against a seeded config and a local demo SSH
-  server; its header lists what it sets up. Frame cost limits: `docs/perf.md`.
-- Releases: `RELEASING.md`. Decisions not to re-open: `docs/adr/`.
+  server; its header lists what it sets up.
+- Memory and frame budgets, and how to measure them: `docs/perf.md`.
+- Releases: `RELEASING.md`.
 - Remotes: `fork` (itskamol/tern) is where `main` is pushed; `origin` (your-moon/tern) is upstream.
 
 ## Agent skills
