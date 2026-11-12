@@ -110,18 +110,45 @@ pub fn file_name(path: &str) -> &str {
     trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
+/// Extensions that wrap another: `dump.sql.gz` is still SQL, so the number goes before `.sql`.
+const COMPRESSION: [&str; 5] = ["gz", "bz2", "xz", "zst", "lz4"];
+
 /// `name` made unique the way Finder does it: `a.txt` becomes `a 2.txt`, then `a 3.txt`, and a
-/// folder `docs` becomes `docs 2`. `taken` says whether a name is in use.
+/// folder `docs` becomes `docs 2`. A compression extension stays with the word extension it
+/// wraps, so `dump.sql.gz` becomes `dump 2.sql.gz` but `api.log.1.gz` becomes `api.log.1 2.gz`.
+/// `taken` says whether a name is in use.
 #[must_use]
 pub fn keep_both(name: &str, is_dir: bool, taken: impl Fn(&str) -> bool) -> String {
     let (stem, ext) = match name.rfind('.') {
-        Some(at) if at > 0 && !is_dir => name.split_at(at),
+        Some(at) if at > 0 && !is_dir => split_extension(name, at),
         _ => (name, ""),
     };
     (2u64..)
         .map(|n| format!("{stem} {n}{ext}"))
         .find(|candidate| !taken(candidate))
         .unwrap_or_else(|| name.to_owned())
+}
+
+/// `name` as stem and extension, given the byte index of its last dot. `.sql.gz` is one
+/// extension, `.1.gz` is not: only a word wrapped in compression counts.
+fn split_extension(name: &str, last: usize) -> (&str, &str) {
+    let (stem, ext) = name.split_at(last);
+    if !COMPRESSION
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(&ext[1..]))
+    {
+        return (stem, ext);
+    }
+    match stem.rfind('.') {
+        Some(at)
+            if at > 0
+                && stem.len() > at + 1
+                && stem[at + 1..].bytes().all(|b| b.is_ascii_alphabetic()) =>
+        {
+            name.split_at(at)
+        }
+        _ => (stem, ext),
+    }
 }
 
 /// Folders first, then names, ignoring case.
@@ -151,5 +178,25 @@ mod tests {
         assert_eq!(keep_both("v1.2", true, |_| false), "v1.2 2");
         assert_eq!(keep_both(".env", false, |_| false), ".env 2");
         assert_eq!(keep_both("x", false, |_| false), "x 2");
+    }
+
+    #[test]
+    fn keep_both_keeps_a_compressed_word_extension_with_its_compression() {
+        let free = |_: &str| false;
+        assert_eq!(keep_both("dump.sql.gz", false, free), "dump 2.sql.gz");
+        assert_eq!(keep_both("release.tar.gz", false, free), "release 2.tar.gz");
+        assert_eq!(keep_both("a.tar.bz2", false, free), "a 2.tar.bz2");
+        assert_eq!(keep_both("a.tar.xz", false, free), "a 2.tar.xz");
+        assert_eq!(keep_both("a.tar.zst", false, free), "a 2.tar.zst");
+        assert_eq!(keep_both("a.tar.lz4", false, free), "a 2.tar.lz4");
+        assert_eq!(keep_both("DUMP.SQL.GZ", false, free), "DUMP 2.SQL.GZ");
+        assert_eq!(keep_both("api.log.1.gz", false, free), "api.log.1 2.gz");
+        assert_eq!(keep_both("a..gz", false, free), "a. 2.gz");
+        assert_eq!(keep_both(".env.gz", false, free), ".env 2.gz");
+        assert_eq!(keep_both("notes.gz", false, free), "notes 2.gz");
+        assert_eq!(keep_both("a.sql.zip", false, free), "a.sql 2.zip");
+        assert_eq!(keep_both("x.tar.gz", true, free), "x.tar.gz 2");
+        let taken = |n: &str| n == "dump 2.sql.gz";
+        assert_eq!(keep_both("dump.sql.gz", false, taken), "dump 3.sql.gz");
     }
 }

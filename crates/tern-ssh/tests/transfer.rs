@@ -813,6 +813,104 @@ async fn apply_to_all_answers_the_rest_of_the_batch_without_asking_again() {
     assert_eq!(b.names(""), ["a 2.txt", "a.txt", "b 2.txt", "b.txt"]);
 }
 
+/// The files a keep-both test copies, besides the folder `v1.2`.
+const COPIED: [&str; 5] = [
+    "dump.sql.gz",
+    "api.log.1.gz",
+    "release.tar.gz",
+    ".env",
+    "a.txt",
+];
+
+/// What the destination holds before the copy: every copied name, `a 2.txt` and `v1.2`.
+const ALREADY_THERE: [&str; 7] = [
+    "dump.sql.gz",
+    "api.log.1.gz",
+    "release.tar.gz",
+    ".env",
+    "a.txt",
+    "a 2.txt",
+    "v1.2/inside",
+];
+
+/// Copies `COPIED` and the folder `v1.2` from a Mac onto `to` at `dir`, keeping both each time.
+async fn keep_both_onto(to: &Arc<dyn FileSource>, dir: &str) {
+    let a = mac();
+    for name in COPIED {
+        a.put(name, b"new");
+    }
+    a.put("v1.2/inside", b"new");
+    let run = queue();
+    let mut jobs = Vec::new();
+    for name in COPIED.iter().chain(&["v1.2"]) {
+        jobs.push(job(&a.source, &a.path(name), to, dir, Some(Conflict::KeepBoth)).await);
+    }
+    let batch = run.queue.submit(jobs);
+    assert_eq!(run.done(batch).await.copied, 6);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_both_lands_compressed_files_folders_and_dotfiles_under_new_names_on_the_mac() {
+    let b = mac();
+    for rel in ALREADY_THERE {
+        b.put(rel, b"old");
+    }
+    keep_both_onto(&b.source, &b.path("")).await;
+    assert_eq!(
+        b.names(""),
+        [
+            ".env",
+            ".env 2",
+            "a 2.txt",
+            "a 3.txt",
+            "a.txt",
+            "api.log.1 2.gz",
+            "api.log.1.gz",
+            "dump 2.sql.gz",
+            "dump.sql.gz",
+            "release 2.tar.gz",
+            "release.tar.gz",
+            "v1.2",
+            "v1.2 2",
+        ]
+    );
+    assert_eq!(
+        (b.get("dump.sql.gz"), b.get("dump 2.sql.gz")),
+        (b"old".to_vec(), b"new".to_vec())
+    );
+    assert_eq!(b.get("v1.2 2/inside"), b"new");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_both_lands_compressed_files_folders_and_dotfiles_under_new_names_on_a_host() {
+    let h = host("h").await;
+    for rel in ALREADY_THERE {
+        std::fs::create_dir_all(h.disk(rel).parent().unwrap()).unwrap();
+        std::fs::write(h.disk(rel), b"old").unwrap();
+    }
+    keep_both_onto(&h.source, "/home").await;
+    assert_eq!(
+        names(&h.disk("")),
+        [
+            ".env",
+            ".env 2",
+            "a 2.txt",
+            "a 3.txt",
+            "a.txt",
+            "api.log.1 2.gz",
+            "api.log.1.gz",
+            "dump 2.sql.gz",
+            "dump.sql.gz",
+            "release 2.tar.gz",
+            "release.tar.gz",
+            "v1.2",
+            "v1.2 2",
+        ]
+    );
+    assert_eq!(std::fs::read(h.disk("release 2.tar.gz")).unwrap(), b"new");
+    assert_eq!(std::fs::read(h.disk("v1.2 2/inside")).unwrap(), b"new");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_folder_onto_a_folder_of_the_same_name_follows_the_rule() {
     let (a, b) = (mac(), mac());

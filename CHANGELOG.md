@@ -10,6 +10,7 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- Keep both keeps a compressed file's type: `dump.sql.gz` becomes `dump 2.sql.gz` and `release.tar.gz` becomes `release 2.tar.gz`, not `dump.sql 2.gz`. A rotated log keeps its number: `api.log.1.gz` becomes `api.log.1 2.gz`. The same applies to `.bz2`, `.xz`, `.zst` and `.lz4`.
 - Activity Monitor no longer counts tern's own memory as GPU memory. The allocator labelled its memory "IOAccelerator"; it now shows as "App-Specific Tag 1".
 
 ## [0.3.1] - 2026-11-12
