@@ -69,6 +69,12 @@ pub(super) fn word_at(text: &str, offset: usize) -> Range<usize> {
 }
 
 impl TextInput {
+    /// Leaves Backspace to the parents: the field does not edit on it and the action goes on up.
+    pub fn backspace_to_parent(mut self) -> Self {
+        self.backspace_to_parent = true;
+        self
+    }
+
     pub(super) fn word_actions<E: InteractiveElement>(el: E, cx: &mut Context<Self>) -> E {
         el.on_action(cx.listener(Self::word_left))
             .on_action(cx.listener(Self::word_right))
