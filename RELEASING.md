@@ -6,7 +6,7 @@ Releases are cut from `main` by pushing a `vX.Y.Z` tag. The [release workflow](.
 2. Pick the version per [SemVer](https://semver.org/): before 1.0, bump the minor for anything breaking or notable, the patch for fixes.
 3. Set `version` under `[workspace.package]` in `Cargo.toml`, and the same version on the four `tern-*` entries under `[workspace.dependencies]`, then run `cargo check --workspace` so `Cargo.lock` follows.
 4. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above it, and update the compare links at the bottom.
-5. Record the release's idle memory in `docs/perf.md` from `scripts/measure-idle.sh` (the median of three runs, with the range); a regression of more than 10% blocks the release. Compare against the previous release measured the same way on the same Mac.
+5. Check the release's memory: `scripts/bundle-app.sh`, then `scripts/measure-memory.sh` with the screen unlocked and awake and nothing in front of the copy it opens (it refuses to read otherwise, and says why). It measures the no-tab, one-connected-tab and start-up peak scenes, each the median of three runs, and exits non-zero when a median is over its ceiling (80, 85, 100 and 400 MB; the targets are 70, 75, 90 and 380). A failing check blocks the release. Add the row it prints to `docs/perf.md`; compare with the previous release's row, taken the same way on the same Mac.
 6. Commit as `Release vX.Y.Z`, then tag and push:
 
    ```sh

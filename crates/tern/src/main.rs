@@ -5,7 +5,7 @@ mod alloc;
 mod chrome;
 mod command_history;
 mod connections;
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "dev-keys"))]
 mod devkeys;
 mod drawables;
 mod empty_state;
@@ -170,7 +170,7 @@ fn main() {
             lock_on_sleep::start(cx, move |cause, cx| {
                 let _ = window.update(cx, |shell, _, cx| shell.lock_vault_for(cause, cx));
             });
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "dev-keys"))]
             devkeys::replay(window, cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {

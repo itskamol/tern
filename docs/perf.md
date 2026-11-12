@@ -160,3 +160,36 @@ IOSurface at 36 MB in 4 of 4 idle runs, against 54 MB in 3 of 8 for stock.
 Still to record here, with the window in front (`footprint -p`): IOSurface during the flood demo
 and a window resize never above 2 x the window size, and frame stats during a flood, a resize and
 a divider drag inside the limits above.
+
+## 2026-11-12 — memory budget check at release (#22)
+
+`scripts/measure-memory.sh` replaces `scripts/measure-idle.sh` as the release step
+(`RELEASING.md`, step 5). It copies the bundle for each run, opens the copy over its own
+`TERN_CONFIG_DIR`, waits 30 s, reads `footprint -p`, and prints the median and range of 3 runs per
+scene against the target and the ceiling from #12. It exits 1 when a median is over its ceiling
+and 2 when it refused a reading.
+
+| Scene | How | Target | Ceiling |
+| --- | --- | --- | --- |
+| No tab | nothing restored, no wallpaper | 70 MB | 80 MB |
+| One connected tab | `tern demo-cmd`: local demo server, approved password command, pre-seeded known hosts | 75 MB | 85 MB |
+| Start-up peak, no vault | `phys_footprint_peak` of the runs above, pooled | 90 MB | 100 MB |
+| Start-up peak, vault | `phys_footprint_peak`, a throwaway vault opened at start-up | 380 MB | 400 MB |
+
+Refused, never guessed: a locked screen, a copy that is not the front app (compared by pid, at
+every 2 s check and at the reading), a window that is not 1320x880, a tab that did not connect, and
+a vault scene whose peak is under the 256 MiB scrypt block (the vault did not open).
+
+The vault scene cannot open a vault with a shipped binary and no typing: the Keychain is the
+person's and typed input needs an Accessibility grant a script does not have. That scene runs a copy
+whose binary is built from the same tree with `--features dev-keys`, which compiles in the
+`TERN_DEV_KEYS` replay (`devkeys.rs`) that types the passphrase of a vault written by
+`crates/tern/examples/throwaway_vault.rs` into the prompt of a host with a vault key. The feature is
+off by default and the script refuses a bundle whose binary carries the replay, so the other scenes
+and every shipped build are as shipped.
+
+Readings on the build with the wallpaper removed and drawables capped at 2: not recorded yet. The
+check was run on the machine where it was written, but another app kept taking focus from the copy
+and the script refused every reading (a dry run with the front check removed showed the scenes
+connect and the vault opens, and is not a measurement). Run it from an idle, unlocked Mac and paste
+the row it prints under this heading.
