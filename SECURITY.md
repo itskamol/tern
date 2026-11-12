@@ -4,7 +4,7 @@ tern handles SSH credentials and host keys, so security reports get priority.
 
 ## Reporting a vulnerability
 
-Report privately through GitHub: **Security → Report a vulnerability** on this repository, or open a [new advisory](https://github.com/your-moon/tern/security/advisories/new). Do not open a public issue.
+Report privately through GitHub: **Security → Report a vulnerability** on this repository, or open a [new advisory](https://github.com/itskamol/tern/security/advisories/new). Do not open a public issue.
 
 Include what an attacker can do, the steps or code to reproduce it, and the commit you tested. You will get an acknowledgement within 7 days and a fix or a plan within 30.
 

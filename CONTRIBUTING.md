@@ -4,13 +4,12 @@ Thanks for helping. This file is short on purpose; the rules that matter are enf
 
 ## Your first contribution
 
-- Pick an issue labelled [`good first issue`](https://github.com/your-moon/tern/labels/good%20first%20issue). Each one names the files to change and, where it can, a failing test to start from.
+- Pick an [open issue](https://github.com/itskamol/tern/issues) labelled `ready-for-agent` or `ready-for-human` (the labels are described in [docs/agents/triage-labels.md](docs/agents/triage-labels.md)).
 - Comment that you are taking it, so two people don't do the same work.
 - Your first pull request waits for a maintainer to approve its CI run. That is a GitHub rule for new contributors, not a judgement on the change.
 
 ## Before you start
 
-- For larger work, look at the [1.0 plan](https://github.com/your-moon/tern/issues/35) and pick an issue labelled `triage::ready`.
 - For anything not on the plan, open an issue first. Bugs need a runnable reproduction; features use the two-question template.
 - A change that copies code from another project must keep a `// Adapted from <repo> <path> (<license>).` header and add the source to [NOTICE.md](NOTICE.md). The license must be compatible with GPL-3.0.
 
