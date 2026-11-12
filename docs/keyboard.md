@@ -14,7 +14,7 @@ The defaults, from `crates/tern/src/keymap.rs`. Every shortcut can be rebound in
 | Split right / down | ⌘D / ⌘⇧D | Ctrl+Shift+D / Ctrl+Alt+D |
 | Move between panes | ⌥⌘ + arrows | Ctrl+Alt + arrows |
 | Zoom the focused pane / bring the split back | ⇧⌘↩ | Ctrl+Shift+Enter |
-| Focus pane 1–9; hold to see each pane's number and host | ⌥⌘1 … ⌥⌘9 | Ctrl+Alt+1 … Ctrl+Alt+9 |
+| Focus pane 1–9; hold to see each pane's number and host | ⌥⌘1 … ⌥⌘9 | Ctrl+Shift+1 … Ctrl+Shift+9 |
 | Find in scrollback | ⌘F | Ctrl+Shift+F |
 | Clear scrollback | ⌘K | Ctrl+Shift+K |
 | Fill password | ⌘\\ | Ctrl+Shift+\\ |

@@ -586,6 +586,8 @@ impl Render for Shell {
             window.focus(&self.focus, cx);
         }
         self.sync_density(window);
+        // ⌥⌘ released in another app never reaches this window: no labels while it is behind.
+        self.pane_numbers &= window.is_window_active();
         self.sync_frame(window);
         let t = self.theme;
         let infos = self.tab_infos(cx);

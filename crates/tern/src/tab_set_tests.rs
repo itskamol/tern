@@ -630,7 +630,7 @@ fn zoom_is_not_saved() {
 }
 
 #[test]
-fn a_pane_number_is_its_place_in_reading_order_and_focuses_that_pane() {
+fn a_pane_number_is_its_place_in_reading_order_both_ways() {
     let (mut tabs, _) = set(&["a"]);
     let below = tabs.new_pane_id();
     tabs.split(1, Direction::Down, pane(below), floor())
@@ -644,17 +644,16 @@ fn a_pane_number_is_its_place_in_reading_order_and_focuses_that_pane() {
         [Some(1), Some(2), Some(3)]
     );
     assert_eq!(tab.number_of(99), None);
-    assert!(tabs.focus_number(3));
-    assert_eq!(tabs.active_tab().unwrap().focused(), below);
-    assert!(tabs.focus_number(1));
-    assert_eq!(tabs.active_tab().unwrap().focused(), 1);
+    assert_eq!(
+        [1, 2, 3].map(|n| tab.pane_numbered(n)),
+        [Some(1), Some(right), Some(below)]
+    );
 }
 
 #[test]
-fn a_number_with_no_pane_does_nothing() {
-    let mut tabs = side_by_side();
-    let focused = tabs.active_tab().unwrap().focused();
-    assert!(!tabs.focus_number(3));
-    assert!(!tabs.focus_number(0));
-    assert_eq!(tabs.active_tab().unwrap().focused(), focused);
+fn a_number_with_no_pane_names_none() {
+    let tabs = side_by_side();
+    let tab = tabs.active_tab().unwrap();
+    assert_eq!(tab.pane_numbered(3), None);
+    assert_eq!(tab.pane_numbered(0), None);
 }

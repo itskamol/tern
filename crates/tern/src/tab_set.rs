@@ -120,6 +120,12 @@ impl<P: Paned> Tab<P> {
             .map(|at| at + 1)
     }
 
+    /// The pane numbered `n` (⌥⌘ and the digit), if there is one.
+    pub fn pane_numbered(&self, n: usize) -> Option<PaneId> {
+        let leaves = self.tree.leaves();
+        n.checked_sub(1).and_then(|at| leaves.get(at).copied())
+    }
+
     /// Where the focused pane falls in [`Self::in_reading_order`].
     pub fn focus_in_reading_order(&self) -> usize {
         self.tree
@@ -394,18 +400,6 @@ impl<P: Paned> TabSet<P> {
         tab.focused = next;
         tab.zoomed = None;
         Some(tab.panes.remove(ix))
-    }
-
-    /// Gives the front tab's pane number `n` (⌥⌘ and a digit) the keyboard. False when there is
-    /// no such pane or it has the keyboard already.
-    pub fn focus_number(&mut self, n: usize) -> bool {
-        let Some(id) = self.active_tab().and_then(|tab| {
-            let leaves = tab.tree.leaves();
-            n.checked_sub(1).and_then(|at| leaves.get(at).copied())
-        }) else {
-            return false;
-        };
-        self.focus_pane(id)
     }
 
     /// Gives pane `id` of the front tab the keyboard. False when it already has it or is not

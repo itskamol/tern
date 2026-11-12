@@ -268,10 +268,11 @@ const RESERVED: &[&str] = if cfg!(target_os = "macos") {
 
 /// ⌥⌘ and a digit on macOS, Ctrl+Alt and a digit elsewhere: focus pane `n` (1–9).
 pub fn pane_slot(n: usize) -> String {
+    // Ctrl+Alt is AltGr on many layouts, where Ctrl+Alt+2 types "@": not taken off macOS.
     let held = if cfg!(target_os = "macos") {
         "alt-cmd"
     } else {
-        "ctrl-alt"
+        "ctrl-shift"
     };
     format!("{held}-{n}")
 }
@@ -309,13 +310,16 @@ impl Keymap {
 
     /// Missing file → defaults; a broken one is logged and ignored.
     pub fn load(dir: &Path) -> Self {
-        match std::fs::read_to_string(dir.join(FILE_NAME)) {
+        let mut keymap: Self = match std::fs::read_to_string(dir.join(FILE_NAME)) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "keymap_corrupt_using_defaults");
                 Self::default()
             }),
             Err(_) => Self::default(),
-        }
+        };
+        // A file from before a chord became fixed may give it to a shortcut; the fixed one wins.
+        keymap.0.retain(|_, combo| !reserved(combo));
+        keymap
     }
 
     /// Temp file + rename.
@@ -536,6 +540,18 @@ mod tests {
         assert!(k.refusal(ShortcutId::Settings, quit).is_some());
         k.set(ShortcutId::HostPicker, picker);
         assert!(k.0.is_empty());
+    }
+
+    #[test]
+    fn a_keymap_file_that_gave_a_pane_chord_away_loads_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut old = Keymap::default();
+        old.0.insert(ShortcutId::Snippets, pane_slot(2));
+        old.0.insert(ShortcutId::HostPicker, "cmd-alt-p".into());
+        old.save(dir.path()).unwrap();
+        let loaded = Keymap::load(dir.path());
+        assert!(loaded.is_default(ShortcutId::Snippets));
+        assert_eq!(loaded.combo(ShortcutId::HostPicker), "cmd-alt-p");
     }
 
     #[test]

@@ -445,7 +445,7 @@ impl Shell {
                         div().text_sm().text_color(t.muted).child(if cfg!(target_os = "macos") {
                             "⌥⌘1 … ⌥⌘9"
                         } else {
-                            "Ctrl+Alt+1 … Ctrl+Alt+9"
+                            "Ctrl+Shift+1 … Ctrl+Shift+9"
                         }),
                     ))
                     .child(w::row(

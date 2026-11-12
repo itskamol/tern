@@ -250,22 +250,18 @@ impl Shell {
     /// ⌥⌘ and a digit: the pane with that number takes the keyboard. A number with no pane
     /// does nothing.
     fn focus_pane_number(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.tabs.active_tab().and_then(|tab| {
-            tab.in_reading_order()
-                .get(n.wrapping_sub(1))
-                .map(|p| p.pane_id())
-        });
+        let id = self.tabs.active_tab().and_then(|tab| tab.pane_numbered(n));
         if let Some(id) = id {
             self.focus_pane(id, window, cx);
         }
     }
 
-    /// Shows the pane numbers while ⌥⌘ (Ctrl+Alt off macOS), and nothing else, is held.
+    /// Shows the pane numbers while ⌥⌘ (Ctrl+Shift off macOS), and nothing else, is held.
     pub(super) fn hold_pane_numbers(&mut self, m: gpui::Modifiers, cx: &mut Context<Self>) {
         let held = if cfg!(target_os = "macos") {
             m.alt && m.platform && !m.control && !m.shift
         } else {
-            m.alt && m.control && !m.platform && !m.shift
+            m.control && m.shift && !m.alt && !m.platform
         };
         if held != self.pane_numbers {
             self.pane_numbers = held;
