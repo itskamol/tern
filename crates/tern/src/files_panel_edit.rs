@@ -6,11 +6,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{AppContext as _, Context, Focusable as _, Window};
-use tern_ssh::{Call, CopyJob, FileEntry, FileSource, LocalFs};
+use tern_ssh::{Call, FileEntry, FileSource, LocalFs};
 
 use crate::files_panel::FilesPanel;
 use crate::files_panel_model::Edit;
-use crate::files_tab_copy::{copy_label, local_entry};
+use crate::files_panel_send::SendTo;
+use crate::files_tab_copy::local_entry;
 use crate::files_tab_edit::plain_name;
 use crate::text_input::TextInput;
 use crate::transfers::Finished;
@@ -97,18 +98,9 @@ impl FilesPanel {
     /// which asks about a name that is taken.
     pub fn upload(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let entries: Vec<FileEntry> = paths.iter().filter_map(|p| local_entry(p)).collect();
-        // Not before the folder is listed: until then there is no folder to put them in.
-        let dir = self
-            .listing
-            .as_ref()
-            .filter(|l| l.load == crate::files_panel::Load::Ready && !l.cwd.is_empty())
-            .map(|l| l.cwd.clone());
-        let (Some(to), Some(dir), false) = (self.source(), dir, entries.is_empty()) else {
-            return;
-        };
-        let label = copy_label(&entries, &self.name());
-        let jobs = upload_jobs(entries, &to, &dir);
-        self.transfers.update(cx, |t, cx| t.submit(jobs, label, cx));
+        // Into the folder shown, which waits until it is listed: before that there is none.
+        let mac: Arc<dyn FileSource> = Arc::new(LocalFs::new());
+        self.send_entries(mac, entries, SendTo::Here, false, cx);
     }
 
     /// A copy into the folder shown, or a move out of it, lists it again, so an upload's
@@ -158,23 +150,6 @@ impl FilesPanel {
     }
 }
 
-/// The copies an upload hands to the queue: each dropped item from this Mac into `dir` on the
-/// pane's host. A name already there is asked about (`rule: None`), not replaced.
-pub fn upload_jobs(items: Vec<FileEntry>, to: &Arc<dyn FileSource>, dir: &str) -> Vec<CopyJob> {
-    let mac: Arc<dyn FileSource> = Arc::new(LocalFs::new());
-    items
-        .into_iter()
-        .map(|item| CopyJob {
-            from: mac.clone(),
-            item,
-            to: to.clone(),
-            dir: dir.to_owned(),
-            rule: None,
-            moving: false,
-        })
-        .collect()
-}
-
 /// What a key does to the panel's rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditKey {
@@ -182,10 +157,15 @@ pub enum EditKey {
     Delete,
     Confirm,
     Cancel,
+    /// ⌘C: the picked rows go on tern's clipboard.
+    Copy,
+    /// ⌘V: tern's clipboard is pasted into the folder shown.
+    Paste,
 }
 
 /// F2 renames; ⌘⌫ (Delete off macOS, as in Explorer and Nautilus) asks to delete; Enter and
-/// Escape answer an edit that waits. Anything else is not the panel's.
+/// Escape answer an edit that waits; ⌘C and ⌘V (Ctrl off macOS) copy and paste rows, but not
+/// while an edit waits, when they are the rename field's. Anything else is not the panel's.
 pub fn edit_key(ks: &gpui::Keystroke, editing: bool) -> Option<EditKey> {
     let m = &ks.modifiers;
     let bare = !m.platform && !m.control && !m.alt && !m.shift;
@@ -194,7 +174,16 @@ pub fn edit_key(ks: &gpui::Keystroke, editing: bool) -> Option<EditKey> {
     } else {
         ks.key == "delete" && bare
     };
+    // The platform's own modifier alone: ⌘ on a Mac, Ctrl elsewhere.
+    let command = if cfg!(target_os = "macos") {
+        m.platform && !m.control
+    } else {
+        m.control && !m.platform
+    } && !m.alt
+        && !m.shift;
     match ks.key.as_str() {
+        "c" if command && !editing => Some(EditKey::Copy),
+        "v" if command && !editing => Some(EditKey::Paste),
         "f2" if bare => Some(EditKey::Rename),
         _ if delete => Some(EditKey::Delete),
         "enter" if bare && editing => Some(EditKey::Confirm),
@@ -230,28 +219,31 @@ mod tests {
     }
 
     #[test]
+    fn the_platform_copy_and_paste_keys_carry_rows_unless_a_rename_has_them() {
+        let (copy, paste) = if cfg!(target_os = "macos") {
+            ("cmd-c", "cmd-v")
+        } else {
+            ("ctrl-c", "ctrl-v")
+        };
+        assert_eq!(key(copy, false), Some(EditKey::Copy));
+        assert_eq!(key(paste, false), Some(EditKey::Paste));
+        assert_eq!(key(copy, true), None, "the rename field copies its text");
+        assert_eq!(key(paste, true), None);
+        assert_eq!(key("c", false), None);
+        assert_eq!(key("shift-cmd-c", false), None);
+        assert_eq!(key("alt-cmd-v", false), None);
+        assert_eq!(
+            key("ctrl-cmd-c", false),
+            None,
+            "both ⌘ and Ctrl is another chord"
+        );
+    }
+
+    #[test]
     fn enter_and_escape_answer_only_an_edit_that_waits() {
         assert_eq!(key("enter", true), Some(EditKey::Confirm));
         assert_eq!(key("escape", true), Some(EditKey::Cancel));
         assert_eq!(key("enter", false), None);
         assert_eq!(key("escape", false), None);
-    }
-
-    #[test]
-    fn an_upload_asks_about_taken_names_and_lands_in_the_folder_shown() {
-        let to: Arc<dyn FileSource> = Arc::new(LocalFs::new());
-        let item = FileEntry {
-            name: "a.txt".into(),
-            path: "/tmp/a.txt".into(),
-            is_dir: false,
-            is_symlink: false,
-            size: 1,
-            modified: None,
-        };
-        let jobs = upload_jobs(vec![item], &to, "/srv/app");
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].dir, "/srv/app");
-        assert_eq!(jobs[0].rule, None);
-        assert_eq!(jobs[0].item.name, "a.txt");
     }
 }

@@ -1,5 +1,6 @@
-//! Send to…: the picked rows go to another connected pane's Shell folder (else its home), or to
-//! this Mac's Downloads, copied or moved. Each copy runs through the shell's transfer queue,
+//! Send to…: the picked rows go to another connected pane's Shell folder (else its home), to
+//! this Mac's Downloads, or (pasted) into the folder in view, copied or moved. A drop on a pane
+//! or tab and ⌘V come through the same call, [`FilesPanel::send_entries`]. Each copy runs through the shell's transfer queue,
 //! which reads from one connection and writes to the other, so nothing lands on the Mac's disk
 //! on the way. A target pane's SFTP channel is opened on demand, on that pane's own connection.
 
@@ -27,6 +28,8 @@ pub enum SendTo {
     Pane(PaneId),
     /// This Mac's Downloads folder.
     Mac,
+    /// The folder the panel shows: where ⌘V pastes.
+    Here,
 }
 
 /// The open menu: where it was asked for, and whether choosing a place moves.
@@ -65,19 +68,61 @@ impl FilesPanel {
         }
     }
 
-    /// Sends the picked rows to `to`. A move removes each one from the pane in view once its
-    /// copy landed whole.
+    /// Sends the picked rows of the pane in view to `to`.
     pub fn send(&mut self, to: SendTo, moving: bool, cx: &mut Context<Self>) {
         self.send_menu = None;
         let entries = self.picked_entries();
-        let (Some(from), false) = (self.source(), entries.is_empty()) else {
+        if let Some(from) = self.source() {
+            self.send_entries(from, entries, to, moving, cx);
+        }
+        cx.notify();
+    }
+
+    /// The one copy call: Send to…, a drop on a pane or tab, and ⌘V all come here with the
+    /// entries and the source they are read from. A move removes each from `from` once its
+    /// copy landed whole.
+    pub fn send_entries(
+        &mut self,
+        from: Arc<dyn FileSource>,
+        entries: Vec<FileEntry>,
+        to: SendTo,
+        moving: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if entries.is_empty() {
             return;
-        };
+        }
         match to {
             SendTo::Mac => self.send_to_mac(from, entries, moving, cx),
             SendTo::Pane(pane) => self.send_to_pane(pane, from, entries, moving, cx),
+            SendTo::Here => self.send_here(&from, entries, moving, cx),
         }
-        cx.notify();
+    }
+
+    /// Into the folder shown, over the pane in view's own channel. Not where the entries
+    /// already are: that would only ask about each name.
+    fn send_here(
+        &mut self,
+        from: &Arc<dyn FileSource>,
+        entries: Vec<FileEntry>,
+        moving: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.folder_shown() else {
+            return;
+        };
+        let Some(to) = self.source() else { return };
+        if already_in(from.id(), &entries, to.id(), &dir) {
+            return;
+        }
+        let label = copy_label(&entries, &self.name());
+        let jobs = send_jobs(from, entries, &to, &dir, moving);
+        self.transfers.update(cx, |t, cx| t.submit(jobs, label, cx));
+    }
+
+    /// The folder listed for the pane in view, once it is listed.
+    pub(crate) fn folder_shown(&self) -> Option<String> {
+        self.listing.as_ref()?.folder().map(str::to_owned)
     }
 
     fn send_to_mac(
@@ -123,13 +168,12 @@ impl FilesPanel {
         cx: &mut Context<Self>,
     ) {
         let here = self.listing.as_ref().map(|l| l.cwd.as_str());
-        let Some(place) = self
-            .model
-            .send_targets(here)
-            .into_iter()
-            .find_map(|(id, place)| (id == pane).then_some(place))
-        else {
-            return self.alert("That pane is no longer connected", cx);
+        let Some(place) = self.model.target_for(pane, here) else {
+            // Dropped where the rows already are: nothing to do.
+            if !self.model.connected(pane) {
+                self.alert("That pane is not connected", cx);
+            }
+            return;
         };
         let Some(target) = self.panes.get(&pane) else {
             return;
@@ -380,6 +424,12 @@ pub(crate) fn send_button(
         )
 }
 
+/// The entries, read from the source named `from`, already sit in `dir` on the source named
+/// `to`: a paste there would only clash with itself.
+pub fn already_in(from: &str, entries: &[FileEntry], to: &str, dir: &str) -> bool {
+    from == to && entries.iter().all(|e| tern_ssh::parent(&e.path) == dir)
+}
+
 /// The copies Send to… hands to the queue: each item from `from` into `dir` on `to`. A name
 /// already there is asked about (`rule: None`), not replaced.
 pub fn send_jobs(
@@ -434,5 +484,27 @@ mod tests {
         assert_eq!(jobs[1].item.name, "logs");
         let copies = send_jobs(&host, vec![entry("a", false)], &mac, "/", false);
         assert!(!copies[0].moving);
+    }
+
+    #[test]
+    fn a_paste_where_the_entries_already_are_is_nothing_to_do() {
+        let rows = [entry("a.log", false), entry("logs", true)];
+        assert!(already_in("web", &rows, "web", "/srv"));
+        assert!(
+            !already_in("web", &rows, "web", "/srv/logs"),
+            "another folder"
+        );
+        assert!(!already_in("web", &rows, "db", "/srv"), "another host");
+        let mixed = [
+            entry("a.log", false),
+            FileEntry {
+                path: "/tmp/b".into(),
+                ..entry("b", false)
+            },
+        ];
+        assert!(
+            !already_in("web", &mixed, "web", "/srv"),
+            "only some are here"
+        );
     }
 }

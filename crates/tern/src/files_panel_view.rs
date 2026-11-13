@@ -5,6 +5,7 @@
 
 use std::time::SystemTime;
 
+use gpui::AppContext as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, ClickEvent, Context, ExternalPaths, InteractiveElement, IntoElement, KeyDownEvent,
@@ -333,6 +334,7 @@ impl FilesPanel {
                     .then(|| self.rename_input.clone())
                     .flatten();
                 let renaming_none = renaming.is_none();
+                let dragged = renaming_none.then(|| self.dragged_rows(ix)).flatten();
                 let doomed = deleting.contains(&e.path);
                 let asks = (asks_on == Some(ix)).then_some(deleting.len());
                 let modified = e
@@ -375,6 +377,13 @@ impl FilesPanel {
                                 this.open_send_menu(ix, ev.position, cx);
                             }),
                         )
+                    })
+                    .when_some(dragged, |el, rows| {
+                        el.on_drag(rows, |rows, _, window, cx| {
+                            // The panes lay their drop layers out only while a drag is on.
+                            window.refresh();
+                            cx.new(|_| rows.clone())
+                        })
                     })
                     .child(
                         icon(if e.is_dir {
@@ -549,6 +558,7 @@ impl Render for FilesPanel {
                 let mode = self.mode_line(folder, cx);
                 let silent = (!reports).then(|| self.silent_notice(cx));
                 let path_bar = self.path_bar(hidden, cx);
+                let clip = self.render_clip_banner(cx);
                 let columns = self.columns();
                 let rows = self.body(cx);
                 let footer = self.footer(cx);
@@ -560,6 +570,7 @@ impl Render for FilesPanel {
                     .children(silent)
                     .children(mode)
                     .child(path_bar)
+                    .children(clip)
                     .child(columns)
                     .child(div().flex_1().min_h_0().flex().flex_col().child(rows))
                     .child(footer)
@@ -586,6 +597,8 @@ impl Render for FilesPanel {
                     EditKey::Delete => this.start_delete(cx),
                     EditKey::Confirm => this.confirm_edit(w, cx),
                     EditKey::Cancel => this.cancel_edit(w, cx),
+                    EditKey::Copy => this.copy_rows(cx),
+                    EditKey::Paste => this.paste(cx),
                 }
                 cx.stop_propagation();
             }))

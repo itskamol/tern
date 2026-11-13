@@ -16,6 +16,7 @@ use gpui::{ClipboardItem, Context, Entity, FocusHandle, Subscription, WeakEntity
 use tern_ssh::{FileEntry, FileError, FileSource, SftpFiles};
 
 use crate::files_model::{Sort, order};
+use crate::files_panel_clip::Carried;
 use crate::files_panel_model::{FilesPanelModel, Link, Place, SNIPPET, Shown};
 use crate::files_panel_send::{SendMenu, SendTo};
 use crate::session::Session;
@@ -86,6 +87,11 @@ impl Listing {
             .collect();
     }
 
+    /// The folder listed, once it is: nothing goes into a folder still loading or that failed.
+    pub(crate) fn folder(&self) -> Option<&str> {
+        (self.load == Load::Ready && !self.cwd.is_empty()).then_some(self.cwd.as_str())
+    }
+
     /// The entry on row `ix` of what is shown.
     pub(crate) fn row(&self, ix: usize) -> Option<&FileEntry> {
         self.entries.get(*self.visible.get(ix)?)
@@ -119,6 +125,8 @@ pub struct FilesPanel {
     pub(crate) rename_input: Option<Entity<TextInput>>,
     /// The Send to… menu, while it is open.
     pub(crate) send_menu: Option<SendMenu>,
+    /// tern's clipboard: rows taken with ⌘C, for ⌘V in another pane's panel.
+    pub(crate) clip: Option<Arc<Carried>>,
     /// A copy that ends in the folder shown lists it again.
     _finished: Subscription,
 }
@@ -148,6 +156,7 @@ impl FilesPanel {
             focus: cx.focus_handle(),
             rename_input: None,
             send_menu: None,
+            clip: None,
             _finished: finished,
         }
     }
@@ -172,6 +181,7 @@ impl FilesPanel {
         }
         let live: Vec<PaneId> = panes.iter().map(|p| p.id).collect();
         self.model.keep_only(&live);
+        self.keep_clip();
         self.sources.retain(|id, _| live.contains(id));
         self.panes = panes
             .into_iter()
@@ -484,6 +494,11 @@ impl FilesPanel {
             .map(|(_, s)| s.clone())
     }
 
+    /// A quiet message (ADR 0002) in the shell's status line.
+    pub(crate) fn activity(&self, text: String, cx: &mut Context<Self>) {
+        let _ = self.shell.update(cx, |s, cx| s.activity(text, cx));
+    }
+
     pub(crate) fn alert(&self, text: &str, cx: &mut Context<Self>) {
         let text = text.to_owned();
         let _ = self.shell.update(cx, |s, cx| s.alert_failed(text, cx));
@@ -503,6 +518,20 @@ mod tests {
             size: 1,
             modified: None,
         }
+    }
+
+    #[test]
+    fn a_folder_takes_files_only_once_it_is_listed() {
+        let mut l = Listing::new(1);
+        l.cwd = "/srv".into();
+        assert_eq!(l.folder(), None, "still loading");
+        l.load = Load::Ready;
+        assert_eq!(l.folder(), Some("/srv"));
+        l.load = Load::Failed("gone".into());
+        assert_eq!(l.folder(), None);
+        l.load = Load::Ready;
+        l.cwd.clear();
+        assert_eq!(l.folder(), None, "no folder yet");
     }
 
     #[test]

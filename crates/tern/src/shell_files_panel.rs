@@ -4,13 +4,15 @@
 
 use gpui::{
     AnyElement, AppContext, Context, DragMoveEvent, InteractiveElement, IntoElement, MouseButton,
-    MouseUpEvent, ParentElement, StatefulInteractiveElement, Styled, div, px,
+    MouseUpEvent, ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use super::{Shell, look};
 use crate::chrome::{self, DragGhost};
 use crate::files_panel::{FilesPanel, PaneInfo};
+use crate::files_panel_clip::DraggedRows;
 use crate::settings::SIDEBAR_DEFAULT;
+use crate::split::PaneId;
 
 /// Drag payload for the panel's width handle.
 pub(crate) struct FilesPanelResize;
@@ -29,6 +31,39 @@ impl Shell {
         let width = self.settings.files_panel_width;
         self.panels.files = Some(cx.new(|cx| FilesPanel::new(transfers, shell, theme, width, cx)));
         cx.notify();
+    }
+
+    /// Panel rows dropped on pane `target`: sent to its Shell folder, else its home; held ⌥
+    /// moves them.
+    pub(super) fn drop_rows(
+        &mut self,
+        target: PaneId,
+        rows: &DraggedRows,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let moving = window.modifiers().alt;
+        if let Some(panel) = self.panels.files.clone() {
+            panel.update(cx, |p, cx| p.drop_rows(rows, target, moving, cx));
+        }
+    }
+
+    /// Panel rows dropped on tab `ix`: to the pane focused in it. A Files tab takes none.
+    pub(crate) fn drop_rows_on_tab(
+        &mut self,
+        ix: usize,
+        rows: &DraggedRows,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self
+            .tabs
+            .get(ix)
+            .filter(|t| t.is_session())
+            .map(|t| t.focused());
+        if let Some(target) = target {
+            self.drop_rows(target, rows, window, cx);
+        }
     }
 
     fn files_panel_width(&self) -> f32 {

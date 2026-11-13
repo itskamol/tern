@@ -12,6 +12,7 @@ use gpui::{
 use tern_ssh::{ConnectSpec, HostEntry};
 
 use super::*;
+use crate::files_panel_clip::DraggedRows;
 use crate::keymap::{self, Keymap, ShortcutId};
 use crate::sidebar::DraggedHost;
 use crate::split::{Axis, Direction, Floor, Node, PaneId, drop_side};
@@ -452,6 +453,7 @@ impl Shell {
             .on_drop(
                 cx.listener(move |s, from: &DraggedHost, w, cx| s.drop_host(id, from.ix, w, cx)),
             )
+            .on_drop(cx.listener(move |s, rows: &DraggedRows, w, cx| s.drop_rows(id, rows, w, cx)))
             .child(match &pane.content {
                 Content::Session(term) => {
                     tern_term::TerminalView::cached_child(&term.session.read(cx).view)
@@ -460,6 +462,11 @@ impl Shell {
                 Content::Files(files) => files.clone().into_any_element(),
             })
             .when_some(hint, |el, side| el.child(drop_zone(side, &t)))
+            // Only during a drag, so the layer is never over the terminal's mouse otherwise.
+            .when(
+                cx.has_active_drag() && matches!(pane.content, Content::Session(_)),
+                |el| el.child(rows_drop_zone(&t)),
+            )
             .when(asking, |el| el.child(password_badge(combo, &t)))
             .when_some(
                 (self.pane_numbers && split)
@@ -469,6 +476,16 @@ impl Shell {
             )
             .into_any_element()
     }
+}
+
+/// Over a session pane, clear until Files panel rows are dragged over it, then the host drop
+/// zone's tint and edge: the pane's own frame cannot change, or the terminal would reflow.
+fn rows_drop_zone(t: &Theme) -> gpui::Div {
+    let (fill, edge) = (t.accent.opacity(0.22), t.accent);
+    div()
+        .absolute()
+        .inset_0()
+        .drag_over::<DraggedRows>(move |s, _, _, _| s.bg(fill).border_1().border_color(edge))
 }
 
 /// "Password asked", in a corner of a pane that is waiting at a prompt; with the Fill shortcut

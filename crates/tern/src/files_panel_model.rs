@@ -326,23 +326,39 @@ impl FilesPanelModel {
         self.focused = id.filter(|id| self.panes.contains_key(id));
     }
 
-    /// Where Send to… can put files: each connected pane at its Shell folder, else home. A host
-    /// and folder is listed once, and the folder in view (`here`) not at all.
+    /// Pane `id` is connected, so files can be sent to it.
+    pub fn connected(&self, id: PaneId) -> bool {
+        self.panes
+            .get(&id)
+            .is_some_and(|p| p.link == Link::Connected)
+    }
+
+    /// Where files sent to pane `id` land: its Shell folder, else home. `None` when it is not
+    /// connected, or when that is the folder in view (`here`), where they already are.
+    pub fn target_for(&self, id: PaneId, here: Option<&str>) -> Option<Place> {
+        let p = self.panes.get(&id).filter(|p| p.link == Link::Connected)?;
+        let place = p.shell.clone().map_or(Place::Home, Place::Path);
+        let in_view = self.focused.and_then(|f| self.panes.get(&f));
+        // The pane in view shows its own target unless it is browsing elsewhere.
+        let own = Some(id) == self.focused && p.browsing.is_none();
+        let same_folder = in_view.is_some_and(|v| v.dialled.eq_ignore_ascii_case(&p.dialled))
+            && matches!((&place, here), (Place::Path(a), Some(h)) if a == h);
+        (!own && !same_folder).then_some(place)
+    }
+
+    /// Where Send to… can put files: each pane's [`Self::target_for`], a host and folder listed
+    /// once.
     pub fn send_targets(&self, here: Option<&str>) -> Vec<(PaneId, Place)> {
-        let in_view = self.focused.and_then(|id| self.panes.get(&id));
         let mut out: Vec<(PaneId, Place)> = Vec::new();
         let mut seen: Vec<(&str, Place)> = Vec::new();
         for (id, p) in &self.panes {
-            if p.link != Link::Connected {
+            let Some(place) = self.target_for(*id, here) else {
                 continue;
-            }
-            let place = p.shell.clone().map_or(Place::Home, Place::Path);
-            let same_host = |a: &str| a.eq_ignore_ascii_case(&p.dialled);
-            // The pane in view shows its own target unless it is browsing elsewhere.
-            let is_here = (Some(*id) == self.focused && p.browsing.is_none())
-                || (in_view.is_some_and(|v| same_host(&v.dialled))
-                    && matches!((&place, here), (Place::Path(a), Some(h)) if a == h));
-            if is_here || seen.iter().any(|(h, at)| same_host(h) && *at == place) {
+            };
+            if seen
+                .iter()
+                .any(|(h, at)| h.eq_ignore_ascii_case(&p.dialled) && *at == place)
+            {
                 continue;
             }
             seen.push((&p.dialled, place.clone()));

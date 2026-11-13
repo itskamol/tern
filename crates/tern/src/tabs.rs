@@ -15,6 +15,7 @@ use gpui::{
     actions, div, pulsating_between, px,
 };
 
+use crate::files_panel_clip::DraggedRows;
 use crate::icons::{self, icon};
 use crate::indicator::Dot;
 use crate::shell::Shell;
@@ -324,6 +325,11 @@ fn tab_pill(
         .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(accent.opacity(0.25)))
         .on_drop(cx.listener(move |shell, from: &DraggedTab, window, cx| {
             shell.move_tab(from.ix, ix, window, cx)
+        }))
+        // Files panel rows dropped on a tab go to the pane focused in it.
+        .drag_over::<DraggedRows>(move |style, _, _, _| style.bg(accent.opacity(0.25)))
+        .on_drop(cx.listener(move |shell, rows: &DraggedRows, window, cx| {
+            shell.drop_rows_on_tab(ix, rows, window, cx)
         }))
         .on_mouse_down(
             MouseButton::Right,

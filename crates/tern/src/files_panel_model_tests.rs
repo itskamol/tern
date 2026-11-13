@@ -503,3 +503,33 @@ fn the_pane_in_view_is_no_target_for_the_folder_it_shows_even_at_home() {
         "browsing elsewhere, its home is somewhere else"
     );
 }
+
+#[test]
+fn a_dropped_row_goes_to_the_pane_s_folder_unless_that_is_the_folder_it_came_from() {
+    let mut m = one_pane();
+    m.pane(1, "web", Link::Connected, Some(&folder("web", "/srv/app")));
+    m.pane(2, "db", Link::Connected, None);
+    m.pane(3, "web", Link::Connected, Some(&folder("web", "/srv/app")));
+    m.pane(4, "old", Link::Dropped, Some(&folder("old", "/tmp")));
+    m.pane(5, "web", Link::Connected, Some(&folder("web", "/srv/app")));
+    assert_eq!(m.target_for(2, Some("/srv/app")), Some(Place::Home));
+    assert_eq!(m.target_for(1, Some("/srv/app")), None, "onto itself");
+    assert_eq!(
+        m.target_for(3, Some("/srv/app")),
+        None,
+        "another pane on the same host and folder is the same place"
+    );
+    assert_eq!(m.target_for(4, Some("/srv/app")), None, "not connected");
+    assert!(m.connected(2) && !m.connected(4) && !m.connected(9));
+    assert_eq!(m.target_for(9, Some("/srv/app")), None, "no such pane");
+    m.open_folder("/srv/app/logs");
+    assert_eq!(
+        m.target_for(1, Some("/srv/app/logs")),
+        Some(Place::Path("/srv/app".into()))
+    );
+    assert_eq!(
+        m.send_targets(Some("/srv/app/logs")),
+        [(1, Place::Path("/srv/app".into())), (2, Place::Home)],
+        "the menu lists a place once"
+    );
+}

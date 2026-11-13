@@ -18,15 +18,20 @@ impl Render for Dragged {
             [one] => one.name.clone(),
             many => format!("{} items", many.len()),
         };
-        div()
-            .px(px(10.))
-            .py(px(4.))
-            .rounded(px(8.))
-            .bg(gpui::hsla(0., 0., 0.15, 0.92))
-            .text_color(gpui::white())
-            .text_size(px(12.))
-            .child(SharedString::from(label))
+        drag_ghost(label)
     }
+}
+
+/// The dark pill that follows the pointer in a drag of files, here and from the Files panel.
+pub(crate) fn drag_ghost(text: String) -> gpui::Div {
+    div()
+        .px(px(10.))
+        .py(px(4.))
+        .rounded(px(8.))
+        .bg(gpui::hsla(0., 0., 0.15, 0.92))
+        .text_color(gpui::white())
+        .text_size(px(12.))
+        .child(SharedString::from(text))
 }
 
 /// A small text button; unavailable ones are dimmed and ignore clicks.
