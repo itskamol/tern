@@ -40,6 +40,15 @@ impl FilesPanel {
         }
     }
 
+    /// The rename field goes once no rename waits (it ended by a click elsewhere, a new folder,
+    /// another pane, a reconnect), and the keyboard comes back to the panel with it.
+    pub(crate) fn settle_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let renaming = matches!(self.model.edit(), Some(Edit::Rename(_)));
+        if !renaming && self.rename_input.take().is_some() {
+            window.focus(&self.focus, cx);
+        }
+    }
+
     /// Escape or Cancel: nothing changes on the host.
     pub fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model.cancel_edit();
@@ -88,7 +97,12 @@ impl FilesPanel {
     /// which asks about a name that is taken.
     pub fn upload(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let entries: Vec<FileEntry> = paths.iter().filter_map(|p| local_entry(p)).collect();
-        let dir = self.listing.as_ref().map(|l| l.cwd.clone());
+        // Not before the folder is listed: until then there is no folder to put them in.
+        let dir = self
+            .listing
+            .as_ref()
+            .filter(|l| l.load == crate::files_panel::Load::Ready && !l.cwd.is_empty())
+            .map(|l| l.cwd.clone());
         let (Some(to), Some(dir), false) = (self.source(), dir, entries.is_empty()) else {
             return;
         };
@@ -98,8 +112,11 @@ impl FilesPanel {
     }
 
     /// A copy into the folder shown lists it again, so an upload's files appear.
+    /// Not while a rename or delete waits: listing again would end it mid-answer, and its own
+    /// confirm lists the folder anyway.
     pub(crate) fn copy_finished(&mut self, done: &Finished, cx: &mut Context<Self>) {
-        let here = self.source().is_some_and(|s| s.id() == done.summary.dest)
+        let here = self.model.edit().is_none()
+            && self.source().is_some_and(|s| s.id() == done.summary.dest)
             && self
                 .listing
                 .as_ref()

@@ -468,7 +468,8 @@ impl FilesPanel {
 }
 
 impl Render for FilesPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_rename(window, cx);
         let t = self.theme;
         let shown = self.model.shown();
         let header = div()
