@@ -707,7 +707,7 @@ impl Render for FilesView {
         let t = self.theme;
         let left = self.panel(0, window, cx);
         let right = self.panel(1, window, cx);
-        let transfers = self.transfer_list(cx);
+        let transfers = crate::transfer_rows::transfer_list(&self.transfers, self.theme, cx);
         let dialog = self.dialog_view(cx);
         div()
             .id("files-tab")

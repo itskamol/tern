@@ -128,6 +128,7 @@ async fn host_to_host_copy_time_over_slow_links() {
             to: b.source.clone(),
             dir: "/home".to_owned(),
             rule: None,
+            moving: false,
         }]);
         loop {
             if let Event::Finished(s) = events.recv().await.unwrap() {

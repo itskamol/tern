@@ -14,6 +14,7 @@ mod files_model;
 mod files_panel;
 mod files_panel_edit;
 mod files_panel_model;
+mod files_panel_send;
 mod files_panel_view;
 mod files_tab;
 mod files_tab_copy;
@@ -53,6 +54,7 @@ mod tabs;
 mod tabs_store;
 mod text_input;
 mod theme;
+mod transfer_rows;
 mod transfers;
 mod update_outcome;
 #[cfg(target_os = "macos")]

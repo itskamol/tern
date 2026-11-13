@@ -111,16 +111,17 @@ impl FilesPanel {
         self.transfers.update(cx, |t, cx| t.submit(jobs, label, cx));
     }
 
-    /// A copy into the folder shown lists it again, so an upload's files appear.
+    /// A copy into the folder shown, or a move out of it, lists it again, so an upload's
+    /// files appear and a moved one goes.
     /// Not while a rename or delete waits: listing again would end it mid-answer, and its own
     /// confirm lists the folder anyway.
     pub(crate) fn copy_finished(&mut self, done: &Finished, cx: &mut Context<Self>) {
         let here = self.model.edit().is_none()
-            && self.source().is_some_and(|s| s.id() == done.summary.dest)
-            && self
-                .listing
-                .as_ref()
-                .is_some_and(|l| l.cwd == done.summary.dir);
+            && self.source().is_some_and(|s| {
+                self.listing
+                    .as_ref()
+                    .is_some_and(|l| done.touched(s.id(), &l.cwd))
+            });
         if here {
             self.refresh(cx);
         }
@@ -169,6 +170,7 @@ pub fn upload_jobs(items: Vec<FileEntry>, to: &Arc<dyn FileSource>, dir: &str) -
             to: to.clone(),
             dir: dir.to_owned(),
             rule: None,
+            moving: false,
         })
         .collect()
 }

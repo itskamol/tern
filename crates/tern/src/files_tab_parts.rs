@@ -8,10 +8,8 @@ use gpui::{
 };
 
 use crate::files_tab::{Dialog, Dragged, FilesView, Target};
-use crate::files_text;
 use crate::icons::icon;
 use crate::theme::Theme;
-use crate::transfers;
 
 /// What follows the pointer while items are dragged between panels.
 impl Render for Dragged {
@@ -54,6 +52,17 @@ pub(crate) fn action(
         .child(label.into())
 }
 
+/// A tick box `size` square, filled with the accent when `on`.
+pub(crate) fn tick_box(on: bool, size: f32, t: &Theme) -> gpui::Div {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded(px(if size > 12.0 { 4. } else { 3. }))
+        .border_1()
+        .border_color(if on { t.accent } else { t.border })
+        .when(on, |el| el.bg(t.accent))
+}
+
 pub(crate) fn icon_button(id: String, glyph: &'static str, t: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(id))
@@ -69,103 +78,6 @@ pub(crate) fn icon_button(id: String, glyph: &'static str, t: &Theme) -> gpui::S
 }
 
 impl FilesView {
-    /// The copies in progress, under the panels.
-    pub(crate) fn transfer_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = self.theme;
-        let transfers = self.transfers.read(cx);
-        let rows = transfers.rows();
-        if rows.is_empty() {
-            return None;
-        }
-        let mut list = div()
-            .flex_none()
-            .max_h(px(180.))
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .border_t_1()
-            .border_color(t.hairline)
-            .child(
-                div()
-                    .px(px(12.))
-                    .h(px(26.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(11.))
-                    .text_color(t.faint)
-                    .child("Copying")
-                    .child(
-                        div()
-                            .id("files-cancel-all")
-                            .cursor_pointer()
-                            .text_color(t.muted)
-                            .hover(|s| s.text_color(t.text))
-                            .child("Cancel all")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.transfers.update(cx, |t, _| t.cancel_all());
-                            })),
-                    ),
-            );
-        for row in rows {
-            let batch = row.batch;
-            let pct = row
-                .progress
-                .as_ref()
-                .map_or(0, |p| files_text::percent(p.done, p.total));
-            let detail = row
-                .progress
-                .as_ref()
-                .map_or_else(|| "Waiting…".to_owned(), transfers::detail);
-            list = list.child(
-                div()
-                    .px(px(12.))
-                    .py(px(4.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .text_size(px(12.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .child(SharedString::from(row.label.clone())),
-                            )
-                            .child(
-                                div().h(px(3.)).rounded(px(2.)).bg(t.row_active).child(
-                                    div()
-                                        .h_full()
-                                        .rounded(px(2.))
-                                        .bg(t.accent)
-                                        .w(gpui::relative(pct as f32 / 100.0)),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(11.))
-                                    .text_color(t.faint)
-                                    .child(SharedString::from(detail)),
-                            ),
-                    )
-                    .child(
-                        action(("files-cancel", batch as usize), "Cancel", false, &t).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.transfers.update(cx, |t, _| t.cancel(batch));
-                            }),
-                        ),
-                    ),
-            );
-        }
-        Some(list.into_any_element())
-    }
-
     pub(crate) fn dialog_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.theme;
         let dialog = self.dialog.as_ref()?;

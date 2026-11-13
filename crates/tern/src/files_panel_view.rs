@@ -8,14 +8,15 @@ use std::time::SystemTime;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, ClickEvent, Context, ExternalPaths, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
-    uniform_list,
+    MouseButton, MouseDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Window, div, px, uniform_list,
 };
 
 use crate::empty_state;
 use crate::files_panel::{FilesPanel, Load};
 use crate::files_panel_edit::{EditKey, edit_key};
 use crate::files_panel_model::{Edit, Mode, SNIPPET, Shown, crumbs};
+use crate::files_panel_send::send_button;
 use crate::files_tab_parts::{action, icon_button};
 use crate::files_text;
 use crate::icons::{self, icon};
@@ -331,14 +332,18 @@ impl FilesPanel {
                 let renaming = matches!(&edit, Some(Edit::Rename(p)) if *p == e.path)
                     .then(|| self.rename_input.clone())
                     .flatten();
+                let renaming_none = renaming.is_none();
                 let doomed = deleting.contains(&e.path);
                 let asks = (asks_on == Some(ix)).then_some(deleting.len());
                 let modified = e
                     .modified
                     .map(|m| files_text::modified(m, now))
                     .unwrap_or_default();
+                let group: SharedString = format!("files-panel-row-{ix}").into();
                 div()
                     .id(("files-panel-row", ix))
+                    .group(group.clone())
+                    .relative()
                     // A uniform_list lays each row out on its own; without a width it shrinks to
                     // its name and Size and Modified drift off their column titles.
                     .w_full()
@@ -363,6 +368,13 @@ impl FilesPanel {
                                 this.click_row(ix, m.platform || m.control, m.shift, cx);
                             }
                         }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, ev: &MouseDownEvent, w, cx| {
+                                w.focus(&this.focus, cx);
+                                this.open_send_menu(ix, ev.position, cx);
+                            }),
+                        )
                     })
                     .child(
                         icon(if e.is_dir {
@@ -403,6 +415,12 @@ impl FilesPanel {
                             .into_any_element(),
                     })
                     .when_some(asks, |el, n| el.child(self.delete_question(n, cx)))
+                    // Send to…, at the row's end while it is hovered or picked.
+                    .when(asks.is_none() && renaming_none, |el| {
+                        el.child(send_button(ix, selected, &t, cx).when(!selected, |b| {
+                            b.invisible().group_hover(group.clone(), |s| s.visible())
+                        }))
+                    })
                     .when(asks.is_none(), |el| {
                         el.child(
                             div()
@@ -556,6 +574,10 @@ impl Render for FilesPanel {
             .flex_col()
             .text_color(t.text)
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| {
+                if this.send_menu.is_some() && e.keystroke.key == "escape" {
+                    this.close_send_menu(cx);
+                    return cx.stop_propagation();
+                }
                 let Some(key) = edit_key(&e.keystroke, this.model.edit().is_some()) else {
                     return;
                 };
@@ -574,5 +596,7 @@ impl Render for FilesPanel {
             }))
             .child(header)
             .child(body)
+            .children(crate::transfer_rows::transfer_list(&self.transfers, t, cx))
+            .children(self.render_send_menu(cx))
     }
 }

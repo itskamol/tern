@@ -171,7 +171,6 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                     crate::transfers::Transfers::new(crate::platform::SshRuntime::handle(cx), cx)
                 }),
                 quit_ask: false,
-                conflict_all: false,
                 _transfers_subs: Vec::new(),
                 error: None,
                 picker: None,
@@ -300,8 +299,6 @@ pub struct Shell {
     transfers: Entity<crate::transfers::Transfers>,
     /// Quitting with copies running is being asked about.
     quit_ask: bool,
-    /// The conflict sheet's "apply to all" box.
-    conflict_all: bool,
     _transfers_subs: Vec<Subscription>,
     error: Option<String>,
     picker: Option<Picker>,

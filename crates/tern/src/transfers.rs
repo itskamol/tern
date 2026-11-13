@@ -1,6 +1,6 @@
 //! The shell's copies: the one transfer queue and what the window shows of it. The queue lives
-//! here, not in a Files tab, so closing the tab does not stop a copy; the tab only reads the
-//! rows. A name clash is a question the person answers wherever they are, so it waits here too.
+//! here, not in a Files tab or the Files panel, so closing either does not stop a copy; they
+//! only read the rows. A name clash waits here, on its batch's row, until it is answered.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -14,14 +14,32 @@ pub struct Row {
     pub batch: u64,
     /// What was copied and where: "3 items to web-01".
     pub label: String,
+    /// Where from and where to: `web-01:/srv/app.log → Mac:~/Downloads`.
+    pub route: String,
+    /// The sources go once the copies landed.
+    pub moving: bool,
+    /// More than one name could clash, so an answer can be for the rest of the batch.
+    pub many: bool,
+    /// The next answer is for the rest of the batch too.
+    pub rest: bool,
     pub progress: Option<Progress>,
 }
 
-/// A batch ended; the shell tells the person, and a Files tab refreshes what it shows.
+/// A batch ended; the shell tells the person, and a Files tab or panel refreshes what it shows.
 #[derive(Debug, Clone)]
 pub struct Finished {
     pub label: String,
+    pub moving: bool,
     pub summary: Summary,
+}
+
+impl Finished {
+    /// The batch changed folder `dir` of the file source `id`: it landed there, or a moved
+    /// source left it.
+    pub fn touched(&self, id: &str, dir: &str) -> bool {
+        let s = &self.summary;
+        (s.dest == id && s.dir == dir) || s.removed_from.iter().any(|(i, d)| i == id && d == dir)
+    }
 }
 
 pub struct Transfers {
@@ -53,10 +71,17 @@ impl Transfers {
 
     /// Queues the jobs as one batch named `label`.
     pub fn submit(&mut self, jobs: Vec<CopyJob>, label: String, cx: &mut Context<Self>) {
+        let route = route(&jobs, std::env::home_dir().as_deref());
+        let moving = jobs.iter().any(|j| j.moving);
+        let many = jobs.len() > 1 || jobs.iter().any(|j| j.item.is_dir);
         let batch = self.queue.submit(jobs);
         self.rows.push(Row {
             batch,
             label,
+            route,
+            moving,
+            many,
+            rest: false,
             progress: None,
         });
         cx.notify();
@@ -66,20 +91,39 @@ impl Transfers {
         &self.rows
     }
 
-    /// The name clash waiting for an answer, if any.
-    pub fn question(&self) -> Option<(&Question, &str)> {
+    /// The first name clash waiting for an answer, with its row.
+    pub fn question(&self) -> Option<(&Question, &Row)> {
         let q = self.questions.front()?;
-        let label = self
-            .rows
-            .iter()
-            .find(|r| r.batch == q.batch)
-            .map_or("", |r| r.label.as_str());
-        Some((q, label))
+        Some((q, self.rows.iter().find(|r| r.batch == q.batch)?))
     }
 
-    pub fn answer(&mut self, choice: tern_ssh::Conflict, all: bool, cx: &mut Context<Self>) {
-        if let Some(q) = self.questions.pop_front() {
-            self.queue.answer(q.id, choice, all);
+    /// The clash batch `batch` waits on. A batch plans one name at a time, so it has at most
+    /// one.
+    pub fn question_for(&self, batch: u64) -> Option<&Question> {
+        self.questions.iter().find(|q| q.batch == batch)
+    }
+
+    /// Answers batch `batch`'s clash; with the row's "for the rest" on, the rest of the batch
+    /// gets the same answer.
+    pub fn answer(&mut self, batch: u64, choice: tern_ssh::Conflict, cx: &mut Context<Self>) {
+        let Some(at) = self.questions.iter().position(|q| q.batch == batch) else {
+            return;
+        };
+        let rest = self
+            .rows
+            .iter()
+            .find(|r| r.batch == batch)
+            .is_some_and(|r| r.rest);
+        if let Some(q) = self.questions.remove(at) {
+            self.queue.answer(q.id, choice, rest);
+        }
+        cx.notify();
+    }
+
+    /// Turns the row's "for the rest" on or off.
+    pub fn toggle_rest(&mut self, batch: u64, cx: &mut Context<Self>) {
+        if let Some(row) = self.rows.iter_mut().find(|r| r.batch == batch) {
+            row.rest = !row.rest;
             cx.notify();
         }
     }
@@ -111,6 +155,7 @@ impl Transfers {
                     let row = self.rows.remove(at);
                     cx.emit(Finished {
                         label: row.label,
+                        moving: row.moving,
                         summary,
                     });
                 }
@@ -165,8 +210,49 @@ pub fn progress_line(rows: &[Row]) -> Option<String> {
     Some(line)
 }
 
+/// One end of a route: `host:path`, the Mac as `Mac` with its home as `~`. A host's file
+/// source is named `user@host:port`; the host alone is what the person knows it by.
+pub fn place(id: &str, path: &str, home: Option<&std::path::Path>) -> String {
+    if id == tern_ssh::FileSource::id(&tern_ssh::LocalFs::new()) {
+        let home = home.and_then(|h| h.to_str()).filter(|h| !h.is_empty());
+        let path = match home.and_then(|h| path.strip_prefix(h)) {
+            Some("") => "~".to_owned(),
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => path.to_owned(),
+        };
+        return format!("Mac:{path}");
+    }
+    let host = id.rsplit_once('@').map_or(id, |(_, h)| h);
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if !h.is_empty() && port.parse::<u16>().is_ok() => h,
+        _ => host,
+    };
+    format!("{host}:{path}")
+}
+
+/// Where a batch goes from and to. One item names itself; several name the folder they are in.
+pub fn route(jobs: &[CopyJob], home: Option<&std::path::Path>) -> String {
+    let Some(first) = jobs.first() else {
+        return String::new();
+    };
+    let from = match jobs {
+        [one] => one.item.path.clone(),
+        _ => tern_ssh::parent(&first.item.path),
+    };
+    format!(
+        "{} \u{2192} {}",
+        place(first.from.id(), &from, home),
+        place(first.to.id(), &first.dir, home)
+    )
+}
+
 /// How the end of a batch reads: `true` when it went well.
-pub fn outcome(label: &str, s: &Summary) -> (bool, String) {
+pub fn outcome(label: &str, moving: bool, s: &Summary) -> (bool, String) {
+    let (verb, done) = if moving {
+        ("move", "Moved")
+    } else {
+        ("copy", "Copied")
+    };
     if s.cancelled {
         return (false, format!("Cancelled: {label}"));
     }
@@ -175,7 +261,7 @@ pub fn outcome(label: &str, s: &Summary) -> (bool, String) {
             1 => String::new(),
             n => format!(" (and {} more)", n - 1),
         };
-        return (false, format!("Could not copy {label}: {first}{more}"));
+        return (false, format!("Could not {verb} {label}: {first}{more}"));
     }
     let mut notes = String::new();
     if s.skipped > 0 {
@@ -186,7 +272,7 @@ pub fn outcome(label: &str, s: &Summary) -> (bool, String) {
         1 => notes += ", 1 folder not copied because it is a link",
         n => notes += &format!(", {n} folders not copied because they are links"),
     }
-    (true, format!("Copied {label}{notes}"))
+    (true, format!("{done} {label}{notes}"))
 }
 
 #[cfg(test)]
@@ -203,6 +289,7 @@ mod tests {
             links: 0,
             failed: failed.iter().map(|s| (*s).to_owned()).collect(),
             cancelled,
+            removed_from: Vec::new(),
         }
     }
 
@@ -236,6 +323,10 @@ mod tests {
         Row {
             batch: 1,
             label: label.into(),
+            route: String::new(),
+            moving: false,
+            many: false,
+            rest: false,
             progress,
         }
     }
@@ -267,25 +358,109 @@ mod tests {
     #[test]
     fn the_end_says_what_happened_and_the_first_failure() {
         assert_eq!(
-            outcome("3 items to web", &summary(3, 0, &[], false)),
+            outcome("3 items to web", false, &summary(3, 0, &[], false)),
             (true, "Copied 3 items to web".into())
         );
         assert_eq!(
-            outcome("a", &summary(1, 2, &[], false)).1,
+            outcome("a", false, &summary(1, 2, &[], false)).1,
             "Copied a, 2 skipped"
         );
         let mut linked = summary(1, 0, &[], false);
         linked.links = 2;
         assert_eq!(
-            outcome("a", &linked).1,
+            outcome("a", false, &linked).1,
             "Copied a, 2 folders not copied because they are links"
         );
-        let (ok, text) = outcome("a", &summary(0, 0, &["x: denied", "y: gone"], false));
+        let (ok, text) = outcome("a", false, &summary(0, 0, &["x: denied", "y: gone"], false));
         assert!(!ok);
         assert_eq!(text, "Could not copy a: x: denied (and 1 more)");
         assert_eq!(
-            outcome("a", &summary(0, 0, &[], true)),
+            outcome("a", false, &summary(0, 0, &[], true)),
             (false, "Cancelled: a".into())
         );
+    }
+
+    #[test]
+    fn a_move_says_moved_and_a_failed_one_says_it_could_not_move() {
+        assert_eq!(
+            outcome("a.log to web-02", true, &summary(1, 0, &[], false)).1,
+            "Moved a.log to web-02"
+        );
+        assert_eq!(
+            outcome("a", true, &summary(0, 0, &["x: denied"], false)).1,
+            "Could not move a: x: denied"
+        );
+    }
+
+    #[test]
+    fn a_place_is_the_host_and_its_path_and_the_mac_s_home_is_a_tilde() {
+        let home = std::path::Path::new("/Users/me");
+        assert_eq!(
+            place("deploy@web-01:22", "/srv/a.log", Some(home)),
+            "web-01:/srv/a.log"
+        );
+        assert_eq!(place("[::1]:2299", "/tmp", None), "[::1]:/tmp");
+        assert_eq!(
+            place("mac", "/Users/me/Downloads", Some(home)),
+            "Mac:~/Downloads"
+        );
+        assert_eq!(place("mac", "/Users/me", Some(home)), "Mac:~");
+        assert_eq!(
+            place("mac", "/Users/meg/x", Some(home)),
+            "Mac:/Users/meg/x",
+            "a home that is only a prefix of the name is not home"
+        );
+    }
+
+    fn job(path: &str, to: &std::sync::Arc<dyn tern_ssh::FileSource>) -> CopyJob {
+        let mac: std::sync::Arc<dyn tern_ssh::FileSource> =
+            std::sync::Arc::new(tern_ssh::LocalFs::new());
+        CopyJob {
+            from: mac,
+            item: tern_ssh::FileEntry {
+                name: tern_ssh::file_name(path).to_owned(),
+                path: path.into(),
+                is_dir: false,
+                is_symlink: false,
+                size: 1,
+                modified: None,
+            },
+            to: to.clone(),
+            dir: "/Users/me/Downloads".into(),
+            rule: None,
+            moving: false,
+        }
+    }
+
+    #[test]
+    fn a_route_names_one_item_or_the_folder_several_are_in() {
+        let home = std::path::Path::new("/Users/me");
+        let mac: std::sync::Arc<dyn tern_ssh::FileSource> =
+            std::sync::Arc::new(tern_ssh::LocalFs::new());
+        let one = [job("/Users/me/a.txt", &mac)];
+        assert_eq!(
+            route(&one, Some(home)),
+            "Mac:~/a.txt \u{2192} Mac:~/Downloads"
+        );
+        let two = [job("/Users/me/x/a", &mac), job("/Users/me/x/b", &mac)];
+        assert_eq!(route(&two, Some(home)), "Mac:~/x \u{2192} Mac:~/Downloads");
+        assert_eq!(route(&[], Some(home)), "");
+    }
+
+    #[test]
+    fn a_finished_batch_touches_where_it_landed_and_where_a_move_left() {
+        let mut s = summary(1, 0, &[], false);
+        s.dest = "web".into();
+        s.dir = "/srv".into();
+        s.removed_from = vec![("db".into(), "/tmp".into())];
+        let done = Finished {
+            label: String::new(),
+            moving: true,
+            summary: s,
+        };
+        assert!(done.touched("web", "/srv"));
+        assert!(done.touched("db", "/tmp"));
+        assert!(!done.touched("db", "/srv"));
+        assert!(!done.touched("web", "/tmp"));
     }
 }

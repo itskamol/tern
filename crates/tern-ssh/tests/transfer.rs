@@ -116,6 +116,7 @@ async fn job(
         to: to.clone(),
         dir: dir.to_owned(),
         rule,
+        moving: false,
     }
 }
 

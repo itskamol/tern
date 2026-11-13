@@ -79,6 +79,11 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 | Modified column | 72px, 11px text; left out below 256px of panel | the Files tab's 92px less 20px; 256 − 16 − 15 − 52 − 72 − 3×6 = 83px of name, and below that the name would have under 70px |
 | Breadcrumb | 22px parts, 12px text, the front clips | worked out from the row height less 4px |
 | Footer | 11px text, Download button 26px | the Files tab's footer |
+| Send to… button | 20px, 13px arrow, over the row's end 4 from the edge and 3 from the top, on the row's own colour; shown while the row is hovered or picked | the row's 26px less 3 above and below; Solar's arrow-up turned right (the set's arrow-right) |
+| Send to… menu | the shell's context menu: 216 wide, 4 inset, 2 gap, 12 radius, at most 480 high; items 8×6 padding, 7 radius, 16px icon, 13px name over an 11px folder; a 1px hairline above Move | `shell_menu.rs` (`render_menu`) |
+| Move and "for the rest" boxes | 12px, 3 radius, accent when on | the clash sheet's 14px box, less 2 to sit beside 11–12px text |
+| Transfer list | the Files tab's: 26px header with Cancel all, rows 12×4 padding, a 3px bar, 11px detail and route; at most 180 high, then it scrolls; under the panel's footer | the Files tab's transfer list (moved to `transfer_rows.rs`, shared by both) |
+| Clash in a row | 8 inset, 7 radius, warning at 0.08 behind it; Skip, Keep both, Replace as the footer's 26px buttons, wrapping when narrow | the panel's Finder drop tint (accent at 0.08); the footer's buttons |
 
 ## Messages (ADR 0002)
 
@@ -94,6 +99,7 @@ Every message is one of three kinds, and the code shows none without its kind: `
 | Work in progress (update download, copies) | an Activity replaced in place until the work ends; never added to the list | — |
 | Alert | seed-design snackbar: 464 wide (16 less than the window when narrower), at least 44 high, 10 inset, 8 radius, 4 s (paused while held), enter 150 ms / exit 100 ms, at most one action; top right under the titlebar, 8 from the edge | seed-design `snackbar.css` (`shell_toast.rs` header) |
 | Decision | a card that stays until answered: 340 wide, 12 radius, 13 pt, inset and gap 8, the connection form's 28 pt buttons; above any snackbar | the Activity list's card; `SPACE_SM` |
+| A name already taken by a copy | asked in the copy's row in the Files tab or the Files panel; a sheet over the window only while neither is on screen | issue #23, story 30 |
 
 ## Keyboard
 

@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
 use crate::files::{self, FileEntry, FileSource, PART_SUFFIX, keep_both};
-use crate::transfer::{Conflict, CopyJob, FileJob, Inner, Stopped};
+use crate::transfer::{Conflict, CopyJob, FileJob, Inner, Moved, Stopped};
 
 /// Bytes moved per read and write, and so how often progress is noted.
 const CHUNK: usize = 64 * 1024;
@@ -29,9 +29,15 @@ pub(crate) async fn plan(
     stop: watch::Receiver<bool>,
 ) {
     for job in jobs {
+        let origin = if job.moving {
+            inner.moving(batch, &job.from, &job.item.path)
+        } else {
+            None
+        };
         let mut planner = Planner {
             inner: inner.clone(),
             batch,
+            origin,
             from: job.from,
             to: job.to,
             stop: stop.clone(),
@@ -45,6 +51,8 @@ pub(crate) async fn plan(
 struct Planner {
     inner: Arc<Inner>,
     batch: u64,
+    /// The moved item being planned, when the job is a move.
+    origin: Option<usize>,
     from: Arc<dyn FileSource>,
     to: Arc<dyn FileSource>,
     stop: watch::Receiver<bool>,
@@ -59,7 +67,7 @@ impl Planner {
     }
 
     fn fail(&self, line: String) {
-        self.inner.note(self.batch, Some(line));
+        self.inner.note(self.batch, self.origin, Some(line));
     }
 
     fn same_place(&self) -> bool {
@@ -83,17 +91,31 @@ impl Planner {
         Ok(self.listed.entry(dir.to_owned()).or_default())
     }
 
+    /// The free name Keep both gives `item` in `dir`: the number goes before a compound
+    /// extension (`dump 2.sql.gz`).
+    async fn keep_both_name(&mut self, item: &FileEntry, dir: &str) -> String {
+        match self.names_in(dir).await {
+            Ok(names) => keep_both(&item.name, item.is_dir, |n| names.contains_key(n)),
+            Err(_) => keep_both(&item.name, item.is_dir, |_| false),
+        }
+    }
+
     /// The rule for a clash: the job's, then the batch's, else the person's answer.
     async fn settle(
         &mut self,
         rule: Option<Conflict>,
-        name: &str,
-        is_dir: bool,
+        item: &FileEntry,
+        dir: &str,
+        taken_is_dir: bool,
     ) -> Option<Conflict> {
         if let Some(rule) = rule.or_else(|| self.inner.rule(self.batch)) {
             return Some(rule);
         }
-        let answer = self.inner.ask(self.batch, name.to_owned(), is_dir).await;
+        let keep_both = self.keep_both_name(item, dir).await;
+        let answer = self
+            .inner
+            .ask(self.batch, item.name.clone(), taken_is_dir, keep_both)
+            .await;
         tokio::select! {
             choice = answer => choice.ok(),
             () = stopped(&mut self.stop) => None,
@@ -114,7 +136,7 @@ impl Planner {
             if item.is_symlink && item.is_dir && depth > 0 {
                 // A link to a folder inside a folder could lead back to it; copying it as a
                 // folder could never end.
-                return self.inner.note_link(self.batch);
+                return self.inner.note_link(self.batch, self.origin);
             }
             if item.is_dir
                 && self.same_place()
@@ -134,19 +156,13 @@ impl Planner {
             let mut replace = false;
             let mut inner_rule = rule;
             if let Some(is_dir) = taken {
-                let Some(choice) = self.settle(rule, &item.name, is_dir).await else {
+                // No answer only when the batch was cancelled, which removes nothing.
+                let Some(choice) = self.settle(rule, &item, &dir, is_dir).await else {
                     return;
                 };
                 match choice {
-                    Conflict::Skip => return self.inner.note(self.batch, None),
-                    Conflict::KeepBoth => {
-                        let names = self
-                            .names_in(&dir)
-                            .await
-                            .map(|m| m.clone())
-                            .unwrap_or_default();
-                        name = keep_both(&item.name, item.is_dir, |n| names.contains_key(n));
-                    }
+                    Conflict::Skip => return self.inner.note(self.batch, self.origin, None),
+                    Conflict::KeepBoth => name = self.keep_both_name(&item, &dir).await,
                     Conflict::Replace if is_dir != item.is_dir => {
                         let what = if is_dir { "a folder" } else { "a file" };
                         return self.fail(format!(
@@ -155,12 +171,12 @@ impl Planner {
                         ));
                     }
                     Conflict::Replace => {
-                        if !item.is_dir
-                            && self.same_place()
-                            && files::join(&dir, &name) == item.path
-                        {
+                        // A folder merged into itself would copy nothing, and a move would
+                        // then remove it.
+                        if self.same_place() && files::join(&dir, &name) == item.path {
+                            let what = if item.is_dir { "folder" } else { "file" };
                             return self.fail(format!(
-                                "{}: the source and the destination are the same file",
+                                "{}: the source and the destination are the same {what}",
                                 item.path
                             ));
                         }
@@ -184,6 +200,7 @@ impl Planner {
                     name,
                     size: item.size,
                     replace,
+                    origin: self.origin,
                 });
             }
             if !merge {
@@ -192,6 +209,7 @@ impl Planner {
                 }
                 self.listed.insert(dest.clone(), HashMap::new());
             }
+            self.inner.walked(self.batch, self.origin, &item.path);
             let children = match self.from.list(&item.path).await {
                 Ok(children) => children,
                 Err(e) => return self.fail(e.to_string()),
@@ -201,6 +219,50 @@ impl Planner {
             }
         })
     }
+}
+
+/// Removes each moved item whose copy landed whole, then lets the batch end. Only what was
+/// copied goes: its files, then its folders innermost first, each only if empty by then, so a
+/// file that arrived during the copy stays with its folder. What cannot go is a failure line:
+/// the copy is there, and so is the original.
+pub(crate) async fn remove_moved(inner: Arc<Inner>, batch: u64, moved: Vec<Moved>) {
+    let mut failed = Vec::new();
+    let mut left: Vec<(String, String)> = Vec::new();
+    for m in moved {
+        let mut kept = false;
+        for file in &m.files {
+            if let Err(e) = m.from.delete(file).await {
+                failed.push(format!("{file}: copied, but not removed: {e}"));
+                kept = true;
+            }
+        }
+        for dir in m.dirs.iter().rev() {
+            match m.from.list(dir).await {
+                Ok(inside) if inside.is_empty() => {
+                    if let Err(e) = m.from.delete(dir).await {
+                        failed.push(format!("{dir}: copied, but not removed: {e}"));
+                        kept = true;
+                    }
+                }
+                Ok(_) if !kept => {
+                    failed.push(format!(
+                        "{dir}: left in place, it holds files that were not moved"
+                    ));
+                    kept = true;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    failed.push(format!("{dir}: copied, but not removed: {e}"));
+                    kept = true;
+                }
+            }
+        }
+        let place = (m.from.id().to_owned(), files::parent(&m.path));
+        if !left.contains(&place) {
+            left.push(place);
+        }
+    }
+    inner.removed(batch, failed, left).await;
 }
 
 /// Copies one file and reports how it went to the queue.

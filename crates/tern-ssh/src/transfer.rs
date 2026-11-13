@@ -45,6 +45,9 @@ pub struct CopyJob {
     pub dir: String,
     /// What to do about a name already there; `None` asks the person.
     pub rule: Option<Conflict>,
+    /// Move instead of copy: the source goes once everything in it landed, and stays if any
+    /// part was skipped, failed or cancelled.
+    pub moving: bool,
 }
 
 /// A name is taken: the person picks a [`Conflict`] and answers with [`TransferQueue::answer`].
@@ -55,6 +58,8 @@ pub struct Question {
     /// The name at the destination.
     pub name: String,
     pub is_dir: bool,
+    /// The name Keep both would give the copy, so the person sees it before choosing.
+    pub keep_both: String,
 }
 
 /// How far a batch has got.
@@ -87,6 +92,9 @@ pub struct Summary {
     /// One line for each file or folder that could not be copied.
     pub failed: Vec<String>,
     pub cancelled: bool,
+    /// Each moved source's [`FileSource::id`] and the folder it left, once: a panel showing one
+    /// lists it again.
+    pub removed_from: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +116,20 @@ pub(crate) struct FileJob {
     pub(crate) size: u64,
     /// A file already has the destination name and is replaced when this one is whole.
     pub(crate) replace: bool,
+    /// The moved item this file is part of, by its place in [`Batch::moves`].
+    pub(crate) origin: Option<usize>,
+}
+
+/// An item being moved: when the batch's copies are over, and if all of it landed, the files
+/// copied go and then each folder walked, if nothing new arrived in it meanwhile.
+pub(crate) struct Moved {
+    pub(crate) from: Arc<dyn FileSource>,
+    pub(crate) path: String,
+    landed: bool,
+    /// The source files queued to copy.
+    pub(crate) files: Vec<String>,
+    /// The source folders walked, outermost first.
+    pub(crate) dirs: Vec<String>,
 }
 
 struct Ask {
@@ -156,6 +178,10 @@ pub(crate) struct Batch {
     links: usize,
     failed: Vec<String>,
     cancelled: bool,
+    moves: Vec<Moved>,
+    /// The copies are over and the moved sources are being removed.
+    removing: bool,
+    removed_from: Vec<(String, String)>,
     stop: watch::Sender<bool>,
     rate: Rate,
     last_progress: Option<Instant>,
@@ -179,7 +205,14 @@ impl Batch {
     }
 
     fn is_over(&self) -> bool {
-        !self.planning && self.outstanding == 0
+        !self.planning && self.outstanding == 0 && !self.removing
+    }
+
+    /// A part of a moved item did not land: its source stays.
+    fn spoil(&mut self, origin: Option<usize>) {
+        if let Some(m) = origin.and_then(|ix| self.moves.get_mut(ix)) {
+            m.landed = false;
+        }
     }
 }
 
@@ -251,6 +284,9 @@ impl TransferQueue {
                     links: 0,
                     failed: Vec::new(),
                     cancelled: false,
+                    moves: Vec::new(),
+                    removing: false,
+                    removed_from: Vec::new(),
                     stop,
                     rate: Rate::default(),
                     last_progress: None,
@@ -322,18 +358,30 @@ impl State {
             batch.outstanding -= dropped;
         }
         self.questions.retain(|_, ask| ask.batch != id);
-        self.end_if_over(id)
+        // Cancelled, so there is nothing to remove: only the closing events.
+        self.end_if_over(id).events
     }
 
-    /// The batch's closing events, once nothing of it is left.
-    fn end_if_over(&mut self, id: u64) -> Vec<Event> {
-        if !self.batches.get(&id).is_some_and(Batch::is_over) {
-            return Vec::new();
+    /// The batch's closing events, once nothing of it is left. A cancelled batch never
+    /// removes a source: what is left of its copies is not the whole item.
+    fn end_if_over(&mut self, id: u64) -> Ending {
+        let Some(batch) = self.batches.get_mut(&id).filter(|b| b.is_over()) else {
+            return Ending::default();
+        };
+        if !batch.cancelled {
+            let remove: Vec<Moved> = batch.moves.drain(..).filter(|m| m.landed).collect();
+            if !remove.is_empty() {
+                batch.removing = true;
+                return Ending {
+                    events: Vec::new(),
+                    remove,
+                };
+            }
         }
         let Some(batch) = self.batches.remove(&id) else {
-            return Vec::new();
+            return Ending::default();
         };
-        vec![
+        let events = vec![
             Event::Progress(batch.progress(id)),
             Event::Finished(Summary {
                 batch: id,
@@ -344,8 +392,13 @@ impl State {
                 links: batch.links,
                 failed: batch.failed,
                 cancelled: batch.cancelled,
+                removed_from: batch.removed_from,
             }),
-        ]
+        ];
+        Ending {
+            events,
+            remove: Vec::new(),
+        }
     }
 
     /// Moves waiting files into the running set while there is room, one per destination.
@@ -392,6 +445,69 @@ impl Inner {
         }
     }
 
+    /// The events to send now; moved sources are removed first, then the batch ends.
+    fn ended(self: &Arc<Self>, batch: u64, ending: Ending) -> Vec<Event> {
+        if !ending.remove.is_empty() {
+            self.rt.spawn(crate::transfer_plan::remove_moved(
+                self.clone(),
+                batch,
+                ending.remove,
+            ));
+        }
+        ending.events
+    }
+
+    /// An item of the batch is moved; returns its place in [`Batch::moves`].
+    pub(crate) fn moving(
+        &self,
+        batch: u64,
+        from: &Arc<dyn FileSource>,
+        path: &str,
+    ) -> Option<usize> {
+        let mut st = self.lock();
+        let b = st.batches.get_mut(&batch)?;
+        b.moves.push(Moved {
+            from: from.clone(),
+            path: path.to_owned(),
+            landed: true,
+            files: Vec::new(),
+            dirs: Vec::new(),
+        });
+        Some(b.moves.len() - 1)
+    }
+
+    /// A folder of a moved item is being walked: it goes after its files, if it is empty then.
+    pub(crate) fn walked(&self, batch: u64, origin: Option<usize>, dir: &str) {
+        let mut st = self.lock();
+        let moved = st
+            .batches
+            .get_mut(&batch)
+            .and_then(|b| b.moves.get_mut(origin?));
+        if let Some(m) = moved {
+            m.dirs.push(dir.to_owned());
+        }
+    }
+
+    /// The moved sources are removed (or `failed` says why not); the batch can end.
+    pub(crate) async fn removed(
+        self: &Arc<Self>,
+        batch: u64,
+        failed: Vec<String>,
+        left: Vec<(String, String)>,
+    ) {
+        let ending = {
+            let mut st = self.lock();
+            if let Some(b) = st.batches.get_mut(&batch) {
+                b.removing = false;
+                b.failed.extend(failed);
+                b.removed_from = left;
+            }
+            st.end_if_over(batch)
+        };
+        let events = self.ended(batch, ending);
+        self.emit(events).await;
+    }
+
     fn spawn_started(self: &Arc<Self>, started: Vec<(FileJob, watch::Receiver<bool>)>) {
         for (job, stop) in started {
             self.rt
@@ -409,6 +525,9 @@ impl Inner {
             batch.outstanding += 1;
             batch.files_total += 1;
             batch.bytes_total += job.size;
+            if let Some(m) = job.origin.and_then(|ix| batch.moves.get_mut(ix)) {
+                m.files.push(job.src.clone());
+            }
             st.waiting.push_back(job);
             st.start()
         };
@@ -421,6 +540,7 @@ impl Inner {
         batch: u64,
         name: String,
         is_dir: bool,
+        keep_both: String,
     ) -> oneshot::Receiver<Conflict> {
         let (reply, answer) = oneshot::channel();
         let question = {
@@ -437,15 +557,18 @@ impl Inner {
                 batch,
                 name,
                 is_dir,
+                keep_both,
             }
         };
         self.emit(vec![Event::Question(question)]).await;
         answer
     }
 
-    /// Notes a failure or a skip of something that never became a file job.
-    pub(crate) fn note(&self, batch: u64, failure: Option<String>) {
+    /// Notes a failure or a skip of something that never became a file job; the moved item
+    /// it is part of keeps its source.
+    pub(crate) fn note(&self, batch: u64, origin: Option<usize>, failure: Option<String>) {
         if let Some(b) = self.lock().batches.get_mut(&batch) {
+            b.spoil(origin);
             match failure {
                 Some(line) => b.failed.push(line),
                 None => b.skipped += 1,
@@ -453,22 +576,24 @@ impl Inner {
         }
     }
 
-    /// Notes a folder link that was not followed.
-    pub(crate) fn note_link(&self, batch: u64) {
+    /// Notes a folder link that was not followed: what it leads to was not copied.
+    pub(crate) fn note_link(&self, batch: u64, origin: Option<usize>) {
         if let Some(b) = self.lock().batches.get_mut(&batch) {
+            b.spoil(origin);
             b.links += 1;
         }
     }
 
     /// Planning is over; the batch ends when its files do.
-    pub(crate) async fn planned(&self, batch: u64) {
-        let events = {
+    pub(crate) async fn planned(self: &Arc<Self>, batch: u64) {
+        let ending = {
             let mut st = self.lock();
             if let Some(b) = st.batches.get_mut(&batch) {
                 b.planning = false;
             }
             st.end_if_over(batch)
         };
+        let events = self.ended(batch, ending);
         self.emit(events).await;
     }
 
@@ -498,7 +623,7 @@ impl Inner {
 
     /// A running file ended; the next waiting one may start.
     pub(crate) async fn finished(self: &Arc<Self>, job: FileJob, result: Result<(), Stopped>) {
-        let (events, started) = {
+        let (ending, started) = {
             let mut st = self.lock();
             if let Some(at) = st
                 .running
@@ -514,20 +639,32 @@ impl Inner {
                         b.copied += 1;
                         b.files_done += 1;
                     }
-                    Err(Stopped::Cancelled) => {}
-                    Err(Stopped::Failed(why)) => b.failed.push(why),
+                    Err(Stopped::Cancelled) => b.spoil(job.origin),
+                    Err(Stopped::Failed(why)) => {
+                        b.spoil(job.origin);
+                        b.failed.push(why);
+                    }
                 }
             }
-            let events = st.end_if_over(job.batch);
-            (events, st.start())
+            let ending = st.end_if_over(job.batch);
+            (ending, st.start())
         };
         self.spawn_started(started);
+        let events = self.ended(job.batch, ending);
         self.emit(events).await;
     }
 
     pub(crate) fn rule(&self, batch: u64) -> Option<Conflict> {
         self.lock().batches.get(&batch).and_then(|b| b.rule)
     }
+}
+
+/// What follows the end of a batch's copies.
+#[derive(Default)]
+pub(crate) struct Ending {
+    events: Vec<Event>,
+    /// Moved sources to remove before the closing events.
+    remove: Vec<Moved>,
 }
 
 /// Why a file's copy did not complete.

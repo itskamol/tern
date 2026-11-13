@@ -13,10 +13,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::{ClipboardItem, Context, Entity, FocusHandle, Subscription, WeakEntity};
-use tern_ssh::{CopyJob, FileEntry, FileError, FileSource, LocalFs, SftpFiles};
+use tern_ssh::{FileEntry, FileError, FileSource, SftpFiles};
 
 use crate::files_model::{Sort, order};
-use crate::files_panel_model::{FilesPanelModel, Link, Place, SNIPPET, Shown, downloads_in};
+use crate::files_panel_model::{FilesPanelModel, Link, Place, SNIPPET, Shown};
+use crate::files_panel_send::{SendMenu, SendTo};
 use crate::session::Session;
 use crate::shell::Shell;
 use crate::split::PaneId;
@@ -32,9 +33,9 @@ pub struct PaneInfo {
     pub session: Entity<Session>,
 }
 
-struct Pane {
-    session: WeakEntity<Session>,
-    name: String,
+pub(crate) struct Pane {
+    pub(crate) session: WeakEntity<Session>,
+    pub(crate) name: String,
 }
 
 /// How far the listing of the pane in view has got.
@@ -101,9 +102,9 @@ impl Listing {
 
 pub struct FilesPanel {
     pub(crate) model: FilesPanelModel,
-    panes: BTreeMap<PaneId, Pane>,
+    pub(crate) panes: BTreeMap<PaneId, Pane>,
     /// The SFTP channel of each pane's connection, tagged with the connection it belongs to.
-    sources: BTreeMap<PaneId, (u64, Arc<dyn FileSource>)>,
+    pub(crate) sources: BTreeMap<PaneId, (u64, Arc<dyn FileSource>)>,
     opening: Option<(PaneId, u64)>,
     pub(crate) listing: Option<Listing>,
     pub(crate) theme: Theme,
@@ -116,6 +117,8 @@ pub struct FilesPanel {
     pub(crate) focus: FocusHandle,
     /// The name being typed while a row is renamed.
     pub(crate) rename_input: Option<Entity<TextInput>>,
+    /// The Send to… menu, while it is open.
+    pub(crate) send_menu: Option<SendMenu>,
     /// A copy that ends in the folder shown lists it again.
     _finished: Subscription,
 }
@@ -144,6 +147,7 @@ impl FilesPanel {
             rt: crate::platform::SshRuntime::handle(cx),
             focus: cx.focus_handle(),
             rename_input: None,
+            send_menu: None,
             _finished: finished,
         }
     }
@@ -181,6 +185,10 @@ impl FilesPanel {
                 )
             })
             .collect();
+        // The menu is about the rows of the pane it was opened on.
+        if self.model.focused() != focused {
+            self.send_menu = None;
+        }
         self.model.focus(focused);
         self.update_listing(cx);
     }
@@ -465,37 +473,7 @@ impl FilesPanel {
     /// Download: the picked items go to `~/Downloads` through the shell's transfer queue, which
     /// shows the progress as Activity and asks about a name that is taken.
     pub fn download(&mut self, cx: &mut Context<Self>) {
-        let entries = self.picked_entries();
-        let source = self
-            .model
-            .focused()
-            .and_then(|id| self.sources.get(&id))
-            .map(|(_, s)| s.clone());
-        let (Some(source), false) = (source, entries.is_empty()) else {
-            return;
-        };
-        let Some(dir) = std::env::home_dir().map(|h| downloads_in(&h)) else {
-            return self.alert("tern cannot find your home folder", cx);
-        };
-        let Some(dir_text) = dir.to_str().map(str::to_owned) else {
-            return self.alert("The Downloads folder's name is not text", cx);
-        };
-        let label = crate::files_tab_copy::copy_label(&entries, "~/Downloads");
-        let rt = self.rt.clone();
-        cx.spawn(async move |this, cx| {
-            let made = rt
-                .spawn_blocking(move || std::fs::create_dir_all(&dir))
-                .await;
-            let _ = this.update(cx, |this, cx| match made {
-                Ok(Ok(())) => {
-                    let jobs = download_jobs(&source, entries, &dir_text);
-                    this.transfers.update(cx, |t, cx| t.submit(jobs, label, cx));
-                }
-                Ok(Err(e)) => this.alert(&format!("Could not open ~/Downloads: {e}"), cx),
-                Err(_) => this.alert("Could not open ~/Downloads", cx),
-            });
-        })
-        .detach();
+        self.send(SendTo::Mac, false, cx);
     }
 
     /// The pane in view's file source, when it has one open.
@@ -512,22 +490,6 @@ impl FilesPanel {
     }
 }
 
-/// The copies a Download hands to the queue: each item into `dir` on this Mac. A name already
-/// there is asked about (`rule: None`), not replaced.
-pub fn download_jobs(from: &Arc<dyn FileSource>, items: Vec<FileEntry>, dir: &str) -> Vec<CopyJob> {
-    let mac: Arc<dyn FileSource> = Arc::new(LocalFs::new());
-    items
-        .into_iter()
-        .map(|item| CopyJob {
-            from: from.clone(),
-            item,
-            to: mac.clone(),
-            dir: dir.to_owned(),
-            rule: None,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,27 +503,6 @@ mod tests {
             size: 1,
             modified: None,
         }
-    }
-
-    #[test]
-    fn a_download_copies_each_item_from_the_pane_to_the_mac_and_asks_about_clashes() {
-        let host: Arc<dyn FileSource> = Arc::new(LocalFs::new());
-        let jobs = download_jobs(
-            &host,
-            vec![entry("a.log", false), entry("logs", true)],
-            "/Users/me/Downloads",
-        );
-        assert_eq!(jobs.len(), 2);
-        for job in &jobs {
-            assert!(
-                Arc::ptr_eq(&job.from, &host),
-                "read over the pane's own source"
-            );
-            assert_eq!(job.to.id(), LocalFs::new().id(), "written on this Mac");
-            assert_eq!(job.dir, "/Users/me/Downloads");
-            assert!(job.rule.is_none(), "a taken name is asked, not replaced");
-        }
-        assert_eq!(jobs[1].item.name, "logs");
     }
 
     #[test]

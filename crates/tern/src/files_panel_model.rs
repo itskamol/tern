@@ -326,6 +326,31 @@ impl FilesPanelModel {
         self.focused = id.filter(|id| self.panes.contains_key(id));
     }
 
+    /// Where Send to… can put files: each connected pane at its Shell folder, else home. A host
+    /// and folder is listed once, and the folder in view (`here`) not at all.
+    pub fn send_targets(&self, here: Option<&str>) -> Vec<(PaneId, Place)> {
+        let in_view = self.focused.and_then(|id| self.panes.get(&id));
+        let mut out: Vec<(PaneId, Place)> = Vec::new();
+        let mut seen: Vec<(&str, Place)> = Vec::new();
+        for (id, p) in &self.panes {
+            if p.link != Link::Connected {
+                continue;
+            }
+            let place = p.shell.clone().map_or(Place::Home, Place::Path);
+            let same_host = |a: &str| a.eq_ignore_ascii_case(&p.dialled);
+            // The pane in view shows its own target unless it is browsing elsewhere.
+            let is_here = (Some(*id) == self.focused && p.browsing.is_none())
+                || (in_view.is_some_and(|v| same_host(&v.dialled))
+                    && matches!((&place, here), (Place::Path(a), Some(h)) if a == h));
+            if is_here || seen.iter().any(|(h, at)| same_host(h) && *at == place) {
+                continue;
+            }
+            seen.push((&p.dialled, place.clone()));
+            out.push((*id, place));
+        }
+        out
+    }
+
     pub fn focused(&self) -> Option<PaneId> {
         self.focused
     }

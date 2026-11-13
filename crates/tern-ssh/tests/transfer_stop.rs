@@ -145,6 +145,7 @@ async fn a_write_error_stops_the_read_and_leaves_nothing_behind() {
         to,
         dir: dst_dir.path().to_str().unwrap().to_owned(),
         rule: None,
+        moving: false,
     }]);
     let summary = loop {
         let ev = tokio::time::timeout(Duration::from_secs(20), events.recv())

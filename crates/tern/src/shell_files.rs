@@ -11,6 +11,7 @@ use tern_ssh::{Conflict, ConnectSpec};
 
 use super::{Alert, Content, Pane, Shell};
 use crate::files_tab::{FilesView, HostAccess};
+use crate::hover::Accessible as _;
 use crate::messages::Work;
 use crate::shell::connections_ui::button;
 use crate::statusline;
@@ -103,7 +104,7 @@ impl Shell {
 
     /// A batch ended, in view or not.
     pub(super) fn on_transfer_finished(&mut self, done: &Finished, cx: &mut Context<Self>) {
-        let (ok, text) = transfers::outcome(&done.label, &done.summary);
+        let (ok, text) = transfers::outcome(&done.label, done.moving, &done.summary);
         tracing::info!(
             copied = done.summary.copied,
             failed = done.summary.failed.len(),
@@ -191,33 +192,46 @@ impl Shell {
         .into_any_element()
     }
 
-    /// A name that is taken, asked wherever the person is.
+    /// A transfer list is on screen (the Files tab, or the Files panel beside a session), so a
+    /// name that is taken is asked in its row.
+    fn transfer_rows_in_view(&self) -> bool {
+        self.settings_page.is_none()
+            && self
+                .tabs
+                .active_tab()
+                .is_some_and(|t| !t.is_session() || self.panels.files.is_some())
+    }
+
+    /// A name that is taken while no transfer list is on screen: asked here instead, so a copy
+    /// never waits on a question nobody can see.
     pub(super) fn render_conflict_sheet(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if self.transfer_rows_in_view() {
+            return None;
+        }
         let t = self.theme;
         let transfers = self.transfers.read(cx);
-        let (question, label) = transfers.question()?;
+        let (question, row) = transfers.question()?;
         let what = if question.is_dir {
             "A folder"
         } else {
             "A file"
         };
-        let name = question.name.clone();
-        let label = label.to_owned();
-        let all = self.conflict_all;
+        let (name, batch) = (question.name.clone(), question.batch);
+        let keep_both = question.keep_both.clone();
+        let (label, many, all) = (row.label.clone(), row.many, row.rest);
         let choose = |id: &'static str, text: &'static str, choice: Conflict, primary: bool| {
             button(id, text, primary, &t).on_click(cx.listener(move |s, _, _, cx| {
-                let all = s.conflict_all;
-                s.conflict_all = false;
-                s.transfers.update(cx, |t, cx| t.answer(choice, all, cx));
+                s.transfers.update(cx, |t, cx| t.answer(batch, choice, cx));
                 cx.notify();
             }))
         };
         let skip = choose("conflict-skip", "Skip", Conflict::Skip, false);
-        let both = choose("conflict-both", "Keep both", Conflict::KeepBoth, false);
+        let both = choose("conflict-both", "Keep both", Conflict::KeepBoth, false)
+            .hint(format!("Saves the copy as \u{201c}{keep_both}\u{201d}"), &t);
         let replace = choose("conflict-replace", "Replace", Conflict::Replace, true);
         let card = div()
             .id("conflict-sheet")
@@ -238,30 +252,24 @@ impl Shell {
                 div()
                     .text_size(px(12.))
                     .text_color(t.muted)
-                    .child(SharedString::from(format!("Copying {label}"))),
+                    .child(SharedString::from(label)),
             )
-            .child(
-                div()
-                    .id("conflict-all")
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .on_click(cx.listener(|s, _, _, cx| {
-                        s.conflict_all = !s.conflict_all;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .size(px(14.))
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(if all { t.accent } else { t.border })
-                            .when(all, |el| el.bg(t.accent)),
-                    )
-                    .child("Apply to all the rest of this copy"),
-            )
+            .when(many, |el| {
+                el.child(
+                    div()
+                        .id("conflict-all")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .cursor_pointer()
+                        .text_size(px(12.))
+                        .on_click(cx.listener(move |s, _, _, cx| {
+                            s.transfers.update(cx, |t, cx| t.toggle_rest(batch, cx));
+                        }))
+                        .child(crate::files_tab_parts::tick_box(all, 14., &t))
+                        .child("Apply to all the rest of this copy"),
+                )
+            })
             .child(
                 div()
                     .flex()

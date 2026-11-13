@@ -50,6 +50,7 @@ impl FilesView {
                 to: dst.clone(),
                 dir: dir.clone(),
                 rule: None,
+                moving: false,
             })
             .collect();
         self.transfers.update(cx, |t, cx| t.submit(jobs, label, cx));
@@ -78,20 +79,21 @@ impl FilesView {
                 to: dst.clone(),
                 dir: dir.clone(),
                 rule: None,
+                moving: false,
             })
             .collect();
         self.transfers.update(cx, |t, cx| t.submit(jobs, label, cx));
     }
 
-    /// A batch ended: panels showing its destination read it again.
+    /// A batch ended: panels showing a folder it changed (where it landed, or where a moved item
+    /// left) read it again.
     pub(crate) fn transfer_finished(&mut self, done: &Finished, cx: &mut Context<Self>) {
         for side in 0..2 {
             let p = &self.panels[side];
-            let same_place = p
-                .source
+            if p.source
                 .as_ref()
-                .is_some_and(|s| s.id() == done.summary.dest);
-            if same_place && p.cwd == done.summary.dir {
+                .is_some_and(|s| done.touched(s.id(), &p.cwd))
+            {
                 self.refresh(side, cx);
             }
         }

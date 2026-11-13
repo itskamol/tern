@@ -449,3 +449,57 @@ fn each_pane_keeps_its_own_edit_when_focus_moves() {
     m.focus(Some(1));
     assert_eq!(m.edit(), Some(&Edit::Rename("/srv/a".into())));
 }
+
+#[test]
+fn send_targets_are_every_connected_pane_at_its_shell_folder_else_home() {
+    let mut m = one_pane();
+    m.pane(1, "web", Link::Connected, Some(&folder("web", "/srv/app")));
+    m.pane(
+        2,
+        "db",
+        Link::Connected,
+        Some(&folder("db", "/var/backups")),
+    );
+    m.pane(3, "cache", Link::Connected, None);
+    m.pane(4, "old", Link::Dropped, Some(&folder("old", "/tmp")));
+    m.pane(5, "new", Link::Waiting, None);
+    assert_eq!(
+        m.send_targets(Some("/srv/app")),
+        [(2, Place::Path("/var/backups".into())), (3, Place::Home),],
+        "not the folder in view, nor a pane that is not connected"
+    );
+}
+
+#[test]
+fn the_pane_in_view_is_a_target_when_its_shell_is_elsewhere_and_a_place_is_listed_once() {
+    let mut m = one_pane();
+    m.pane(1, "web", Link::Connected, Some(&folder("web", "/srv/app")));
+    m.open_folder("/srv/app/logs");
+    m.pane(2, "web", Link::Connected, Some(&folder("web", "/srv/app")));
+    m.pane(3, "WEB", Link::Connected, Some(&folder("web", "/srv/app")));
+    m.pane(4, "db", Link::Connected, Some(&folder("db", "/srv/app")));
+    assert_eq!(
+        m.send_targets(Some("/srv/app/logs")),
+        [
+            (1, Place::Path("/srv/app".into())),
+            (4, Place::Path("/srv/app".into())),
+        ]
+    );
+}
+
+#[test]
+fn the_pane_in_view_is_no_target_for_the_folder_it_shows_even_at_home() {
+    let mut m = one_pane();
+    m.pane(2, "db", Link::Connected, None);
+    assert_eq!(
+        m.send_targets(Some("/home/test")),
+        [(2, Place::Home)],
+        "its home is the folder on screen"
+    );
+    m.open_folder("/srv");
+    assert_eq!(
+        m.send_targets(Some("/srv")),
+        [(1, Place::Home), (2, Place::Home)],
+        "browsing elsewhere, its home is somewhere else"
+    );
+}
