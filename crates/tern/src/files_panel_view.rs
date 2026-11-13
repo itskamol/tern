@@ -7,13 +7,15 @@ use std::time::SystemTime;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px, uniform_list,
+    AnyElement, ClickEvent, Context, ExternalPaths, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    uniform_list,
 };
 
 use crate::empty_state;
 use crate::files_panel::{FilesPanel, Load};
-use crate::files_panel_model::{Mode, SNIPPET, Shown, crumbs};
+use crate::files_panel_edit::{EditKey, edit_key};
+use crate::files_panel_model::{Edit, Mode, SNIPPET, Shown, crumbs};
 use crate::files_tab_parts::{action, icon_button};
 use crate::files_text;
 use crate::icons::{self, icon};
@@ -235,11 +237,22 @@ impl FilesPanel {
                     .truncate()
                     .text_size(px(11.))
                     .text_color(t.faint)
+                    // Nothing picked says nothing: the actions need the room at the panel's width.
                     .child(SharedString::from(match picked {
-                        0 => "Pick files to download".to_owned(),
+                        0 => String::new(),
                         1 => "1 selected".to_owned(),
                         n => format!("{n} selected"),
                     })),
+            )
+            .child(
+                action("files-panel-rename", "Rename", picked == 1, &t).when(picked == 1, |el| {
+                    el.on_click(cx.listener(|this, _, w, cx| this.start_rename(w, cx)))
+                }),
+            )
+            .child(
+                action("files-panel-delete", "Delete", picked > 0, &t).when(picked > 0, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| this.start_delete(cx)))
+                }),
             )
             .child(
                 action("files-panel-download", "Download", picked > 0, &t).when(picked > 0, |el| {
@@ -303,10 +316,23 @@ impl FilesPanel {
         let Some(listing) = self.listing.as_ref() else {
             return Vec::new();
         };
+        let edit = self.model.edit().cloned();
+        let deleting = match &edit {
+            Some(Edit::Delete(paths)) => paths.clone(),
+            _ => Vec::new(),
+        };
+        // The question goes in the first row it is about, in the order shown.
+        let asks_on = (0..listing.visible.len())
+            .find(|ix| listing.row(*ix).is_some_and(|e| deleting.contains(&e.path)));
         range
             .filter_map(|ix| listing.row(ix).map(|e| (ix, e)))
             .map(|(ix, e)| {
                 let selected = self.model.is_picked(&e.path);
+                let renaming = matches!(&edit, Some(Edit::Rename(p)) if *p == e.path)
+                    .then(|| self.rename_input.clone())
+                    .flatten();
+                let doomed = deleting.contains(&e.path);
+                let asks = (asks_on == Some(ix)).then_some(deleting.len());
                 let modified = e
                     .modified
                     .map(|m| files_text::modified(m, now))
@@ -326,14 +352,18 @@ impl FilesPanel {
                     .text_size(px(12.))
                     .when(selected, |el| el.bg(t.row_active))
                     .when(!selected, |el| el.hover(|s| s.bg(t.row_hover)))
-                    .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
-                        if ev.click_count() >= 2 {
-                            this.open_row(ix, cx);
-                        } else {
-                            let m = ev.modifiers();
-                            this.click_row(ix, m.platform || m.control, m.shift, cx);
-                        }
-                    }))
+                    // A row being renamed keeps its clicks for the field.
+                    .when(renaming.is_none(), |el| {
+                        el.on_click(cx.listener(move |this, ev: &ClickEvent, w, cx| {
+                            w.focus(&this.focus, cx);
+                            if ev.click_count() >= 2 {
+                                this.open_row(ix, cx);
+                            } else {
+                                let m = ev.modifiers();
+                                this.click_row(ix, m.platform || m.control, m.shift, cx);
+                            }
+                        }))
+                    })
                     .child(
                         icon(if e.is_dir {
                             icons::FOLDER
@@ -348,41 +378,92 @@ impl FilesPanel {
                             t.muted
                         }),
                     )
-                    .child(
-                        div()
+                    .child(match renaming {
+                        // The field in the name's place, on the Files tab's input frame.
+                        Some(input) => div()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(ROW_HEIGHT - 6.))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(t.accent)
+                            .bg(t.row_hover)
+                            .overflow_hidden()
+                            .child(input)
+                            .into_any_element(),
+                        None => div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(SharedString::from(e.name.clone())),
-                    )
-                    .child(
-                        div()
-                            .w(px(SIZE_WIDTH))
-                            .flex_none()
-                            .flex()
-                            .justify_end()
-                            .text_size(px(11.))
-                            .text_color(t.muted)
-                            .child(SharedString::from(if e.is_dir {
-                                String::new()
-                            } else {
-                                files_text::human_size(e.size)
-                            })),
-                    )
-                    .when(with_modified, |el| {
+                            .when(doomed, |el| el.text_color(t.danger))
+                            .child(SharedString::from(e.name.clone()))
+                            .into_any_element(),
+                    })
+                    .when_some(asks, |el, n| el.child(self.delete_question(n, cx)))
+                    .when(asks.is_none(), |el| {
                         el.child(
                             div()
-                                .w(px(MODIFIED_WIDTH))
+                                .w(px(SIZE_WIDTH))
                                 .flex_none()
-                                .truncate()
+                                .flex()
+                                .justify_end()
                                 .text_size(px(11.))
                                 .text_color(t.muted)
-                                .child(SharedString::from(modified)),
+                                .child(SharedString::from(if e.is_dir {
+                                    String::new()
+                                } else {
+                                    files_text::human_size(e.size)
+                                })),
                         )
+                        .when(with_modified, |el| {
+                            el.child(
+                                div()
+                                    .w(px(MODIFIED_WIDTH))
+                                    .flex_none()
+                                    .truncate()
+                                    .text_size(px(11.))
+                                    .text_color(t.muted)
+                                    .child(SharedString::from(modified)),
+                            )
+                        })
                     })
                     .into_any_element()
             })
             .collect()
+    }
+}
+
+impl FilesPanel {
+    /// The delete's question, in the row of the first item it would remove: what goes, and the
+    /// two answers. Nothing is deleted until Delete is pressed.
+    fn delete_question(&self, n: usize, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme;
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(t.danger)
+                    .child(SharedString::from(match n {
+                        1 => "Delete?".to_owned(),
+                        n => format!("Delete {n} items?"),
+                    })),
+            )
+            .child(
+                action("files-panel-delete-yes", "Delete", true, &t)
+                    .on_click(cx.listener(|this, _, w, cx| this.confirm_edit(w, cx))),
+            )
+            .child(
+                action("files-panel-delete-no", "Cancel", false, &t)
+                    .on_click(cx.listener(|this, _, w, cx| this.cancel_edit(w, cx))),
+            )
+            .into_any_element()
     }
 }
 
@@ -468,10 +549,28 @@ impl Render for FilesPanel {
         };
         div()
             .id("files-panel")
+            .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
             .text_color(t.text)
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| {
+                let Some(key) = edit_key(&e.keystroke, this.model.edit().is_some()) else {
+                    return;
+                };
+                match key {
+                    EditKey::Rename => this.start_rename(w, cx),
+                    EditKey::Delete => this.start_delete(cx),
+                    EditKey::Confirm => this.confirm_edit(w, cx),
+                    EditKey::Cancel => this.cancel_edit(w, cx),
+                }
+                cx.stop_propagation();
+            }))
+            // Files dropped from Finder upload into the folder shown.
+            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(t.accent.opacity(0.08)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.upload(paths.paths(), cx);
+            }))
             .child(header)
             .child(body)
     }

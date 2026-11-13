@@ -107,7 +107,7 @@ pub fn copy_label(entries: &[FileEntry], to: &str) -> String {
 }
 
 /// An item from Finder as a file source entry; `None` when it cannot be read.
-fn local_entry(path: &std::path::Path) -> Option<FileEntry> {
+pub(crate) fn local_entry(path: &std::path::Path) -> Option<FileEntry> {
     let meta = std::fs::metadata(path).ok()?;
     let name = path.file_name()?.to_str()?.to_owned();
     Some(FileEntry {

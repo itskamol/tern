@@ -140,7 +140,7 @@ impl FilesView {
 }
 
 /// A name for something in a folder: no empty names, no paths.
-fn plain_name(name: &str) -> Option<&str> {
+pub(crate) fn plain_name(name: &str) -> Option<&str> {
     (!matches!(name, "" | "." | "..") && !name.contains(['/', '\0'])).then_some(name)
 }
 

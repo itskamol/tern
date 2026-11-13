@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use gpui::{ClipboardItem, Context, Entity, WeakEntity};
+use gpui::{ClipboardItem, Context, Entity, FocusHandle, Subscription, WeakEntity};
 use tern_ssh::{CopyJob, FileEntry, FileError, FileSource, LocalFs, SftpFiles};
 
 use crate::files_model::{Sort, order};
@@ -20,8 +20,9 @@ use crate::files_panel_model::{FilesPanelModel, Link, Place, SNIPPET, Shown, dow
 use crate::session::Session;
 use crate::shell::Shell;
 use crate::split::PaneId;
+use crate::text_input::TextInput;
 use crate::theme::Theme;
-use crate::transfers::Transfers;
+use crate::transfers::{Finished, Transfers};
 
 /// One pane of the tab group, as the shell tells the panel about it.
 pub struct PaneInfo {
@@ -108,9 +109,15 @@ pub struct FilesPanel {
     pub(crate) theme: Theme,
     /// The panel's width, which decides how many columns fit.
     pub(crate) width: f32,
-    transfers: Entity<Transfers>,
+    pub(crate) transfers: Entity<Transfers>,
     shell: WeakEntity<Shell>,
-    rt: tokio::runtime::Handle,
+    pub(crate) rt: tokio::runtime::Handle,
+    /// Where F2, ⌘⌫, Enter and Escape go once a row has been clicked.
+    pub(crate) focus: FocusHandle,
+    /// The name being typed while a row is renamed.
+    pub(crate) rename_input: Option<Entity<TextInput>>,
+    /// A copy that ends in the folder shown lists it again.
+    _finished: Subscription,
 }
 
 impl FilesPanel {
@@ -121,6 +128,9 @@ impl FilesPanel {
         width: f32,
         cx: &mut Context<Self>,
     ) -> Self {
+        let finished = cx.subscribe(&transfers, |this: &mut Self, _, done: &Finished, cx| {
+            this.copy_finished(done, cx)
+        });
         Self {
             model: FilesPanelModel::default(),
             panes: BTreeMap::new(),
@@ -132,6 +142,9 @@ impl FilesPanel {
             transfers,
             shell,
             rt: crate::platform::SshRuntime::handle(cx),
+            focus: cx.focus_handle(),
+            rename_input: None,
+            _finished: finished,
         }
     }
 
@@ -485,7 +498,15 @@ impl FilesPanel {
         .detach();
     }
 
-    fn alert(&self, text: &str, cx: &mut Context<Self>) {
+    /// The pane in view's file source, when it has one open.
+    pub(crate) fn source(&self) -> Option<Arc<dyn FileSource>> {
+        self.model
+            .focused()
+            .and_then(|id| self.sources.get(&id))
+            .map(|(_, s)| s.clone())
+    }
+
+    pub(crate) fn alert(&self, text: &str, cx: &mut Context<Self>) {
         let text = text.to_owned();
         let _ = self.shell.update(cx, |s, cx| s.alert_failed(text, cx));
     }

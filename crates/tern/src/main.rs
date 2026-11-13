@@ -12,6 +12,7 @@ mod drawables;
 mod empty_state;
 mod files_model;
 mod files_panel;
+mod files_panel_edit;
 mod files_panel_model;
 mod files_panel_view;
 mod files_tab;
