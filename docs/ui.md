@@ -79,6 +79,7 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 | Modified column | 72px, 11px text; left out below 256px of panel | the Files tab's 92px less 20px; 256 − 16 − 15 − 52 − 72 − 3×6 = 83px of name, and below that the name would have under 70px |
 | Breadcrumb | 22px parts, 12px text, the front clips | worked out from the row height less 4px |
 | Footer | 11px text, Download button 26px | the Files tab's footer |
+| Picked count | in the Name column's title ("3 selected") while rows are picked, 11px; the footer keeps its row for Rename, Delete and Download | at the default 256 (`SIDEBAR_DEFAULT`) the footer's three buttons leave no room for it: "1 selected" was cut to "1 s…" |
 | Send to… button | 20px, 13px arrow, over the row's end 4 from the edge and 3 from the top, on the row's own colour; shown while the row is hovered or picked | the row's 26px less 3 above and below; Solar's arrow-up turned right (the set's arrow-right) |
 | Send to… menu | the shell's context menu: 216 wide, 4 inset, 2 gap, 12 radius, at most 480 high; items 8×6 padding, 7 radius, 16px icon, 13px name over an 11px folder; a 1px hairline above Move | `shell_menu.rs` (`render_menu`) |
 | Dragged rows | the Files tab's drag ghost ("Copy notes.txt", "Move 3 items" while ⌥ is held); over a session pane, the host drop zone's 0.22 accent tint and 1px accent edge on a clear layer over the whole pane, so the terminal never reflows; over a tab, the tab drag's 0.25 accent tint | the Files tab's `Dragged`; `drop_zone` in `shell_split.rs`; the tab strip's drag-over |

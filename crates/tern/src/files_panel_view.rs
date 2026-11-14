@@ -205,7 +205,13 @@ impl FilesPanel {
             .text_size(px(11.))
             .text_color(t.faint)
             .child(div().w(px(ICON_WIDTH)).flex_none())
-            .child(div().flex_1().min_w_0().child("Name"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(name_title(self.model.picked().len()))),
+            )
             .child(
                 div()
                     .w(px(SIZE_WIDTH))
@@ -232,20 +238,8 @@ impl FilesPanel {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.))
-                    .text_color(t.faint)
-                    // Nothing picked says nothing: the actions need the room at the panel's width.
-                    .child(SharedString::from(match picked {
-                        0 => String::new(),
-                        1 => "1 selected".to_owned(),
-                        n => format!("{n} selected"),
-                    })),
-            )
+            // The count is in the Name column's title: the actions need this row's room.
+            .child(div().flex_1().min_w_0())
             .child(
                 action("files-panel-rename", "Rename", picked == 1, &t).when(picked == 1, |el| {
                     el.on_click(cx.listener(|this, _, w, cx| this.start_rename(w, cx)))
@@ -611,5 +605,27 @@ impl Render for FilesPanel {
             .child(body)
             .children(crate::transfer_rows::transfer_list(&self.transfers, t, cx))
             .children(self.render_send_menu(cx))
+    }
+}
+
+/// The Name column's title: how many rows are picked while any are, where there is room to say
+/// so in full.
+fn name_title(picked: usize) -> String {
+    match picked {
+        0 => "Name".to_owned(),
+        1 => "1 selected".to_owned(),
+        n => format!("{n} selected"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_title;
+
+    #[test]
+    fn the_name_title_counts_the_picked_rows_and_is_name_with_none() {
+        assert_eq!(name_title(0), "Name");
+        assert_eq!(name_title(1), "1 selected");
+        assert_eq!(name_title(12), "12 selected");
     }
 }
