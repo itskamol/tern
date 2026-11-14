@@ -15,7 +15,8 @@ use tern_ssh::{
 };
 use tern_vault::{Key, Vault};
 
-use crate::keeper::{Ask as VaultAsk, Keeper, Tried, Typed};
+use crate::keeper::{Ask as VaultAsk, Keeper, Opening, Pending, Tried, Typed};
+use crate::login_ladder::{Facts, InVault, Ladder, Next};
 use crate::password_command::{self as pc, Approvals, Auth, Purpose};
 use crate::platform::SshRuntime;
 use crate::text_input::{InputColors, TextInput};
@@ -84,19 +85,13 @@ pub struct PanelLogin {
     vault_keys: Vec<String>,
     proxy_command: Option<String>,
     password_command: Option<String>,
-    /// The password command gets one turn per connection, whatever came of it.
-    command_tried: bool,
     approvals: Approvals,
     /// The connection is up, so a question asked now returns to [`Step::Connected`].
     up: bool,
     colors: InputColors,
     step: Step,
     handle: Option<SessionHandle>,
-    /// Entries already answered from the vault on this connection.
-    tried: Vec<Key>,
-    asked: Vec<Key>,
-    /// What the person typed for the password question, offered for saving once connected.
-    typed: Option<(Key, SecretString)>,
+    ladder: Ladder,
     /// The offer to save it, once connected.
     offer: Option<(Key, SecretString)>,
     skipped_vault: bool,
@@ -131,15 +126,12 @@ impl PanelLogin {
             vault_keys: auth.vault_keys,
             proxy_command: auth.proxy_command,
             password_command: auth.password_command,
-            command_tried: false,
             approvals,
             up: false,
             colors,
             step: Step::Connecting,
             handle: None,
-            tried: Vec::new(),
-            asked: Vec::new(),
-            typed: None,
+            ladder: Ladder::default(),
             offer: None,
             skipped_vault: false,
             note: None,
@@ -173,10 +165,7 @@ impl PanelLogin {
     fn begin(&mut self, cx: &mut Context<Self>) {
         self.step = Step::Connecting;
         self.up = false;
-        self.command_tried = false;
-        self.tried.clear();
-        self.asked.clear();
-        self.typed = None;
+        self.ladder.reset();
         self.offer = None;
         self.note = None;
         if let Some(command) = self.proxy_command.clone()
@@ -235,7 +224,7 @@ impl PanelLogin {
             }
             (Then::Login(prompt), Some(command)) => self.run_command(command, prompt, cx),
             (Then::Login(prompt), None) => {
-                self.command_tried = true;
+                self.ladder.command_refused();
                 self.on_prompt(prompt, cx);
             }
             _ => {}
@@ -243,35 +232,7 @@ impl PanelLogin {
         cx.notify();
     }
 
-    /// The password command, when it has a turn, answers a password question: asked about first
-    /// if this Mac never approved it. Gives the prompt back when it does not apply.
-    fn try_command(&mut self, prompt: Prompt, cx: &mut Context<Self>) -> Option<Prompt> {
-        if !matches!(prompt, Prompt::Password { .. }) {
-            return Some(prompt);
-        }
-        let command = self.password_command.clone();
-        let question = command
-            .as_deref()
-            .and_then(|c| self.approvals.ask(Purpose::Login, c));
-        match (
-            pc::plan(command.as_deref(), self.command_tried, question.is_none()),
-            question,
-            command,
-        ) {
-            (pc::Step::Approve, Some(question), _) => {
-                self.ask_approval(question, Then::Login(prompt), cx);
-                None
-            }
-            (pc::Step::Run, _, Some(command)) => {
-                self.run_command(command, prompt, cx);
-                None
-            }
-            _ => Some(prompt),
-        }
-    }
-
     fn run_command(&mut self, command: String, prompt: Prompt, cx: &mut Context<Self>) {
-        self.command_tried = true;
         self.step = self.between();
         self.note = None;
         let work = cx.background_spawn(async move { pc::run(&command, pc::TIMEOUT) });
@@ -344,7 +305,7 @@ impl PanelLogin {
             SessionEvent::Connected => {
                 self.step = Step::Connected;
                 self.up = true;
-                self.offer = self.typed.take();
+                self.offer = self.ladder.take_typed();
                 cx.emit(LoginEvent::Connected);
                 cx.notify();
             }
@@ -368,28 +329,37 @@ impl PanelLogin {
     }
 
     fn on_prompt(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
-        if let Some(prompt) = self.try_command(prompt, cx) {
-            self.after_command(prompt, cx);
-        }
-    }
-
-    fn after_command(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
-        let key = crate::login::key_for(&prompt, &self.spec.host, self.spec.port);
-        // Each secret is tried from the vault once per connection, so a stale one falls through
-        // to asking instead of failing in a loop.
-        if let Some(key) = key.filter(|k| !self.tried.contains(k)) {
-            if let Some(secret) = Keeper::lookup(&key, cx) {
-                self.tried.push(key);
+        let command = self.password_command.as_deref();
+        let facts = Facts {
+            host: &self.spec.host,
+            port: self.spec.port,
+            command,
+            approval: command.and_then(|c| self.approvals.ask(Purpose::Login, c)),
+            vault_skipped: self.skipped_vault,
+        };
+        let next = self
+            .ladder
+            .next(&prompt, facts, |key| match Keeper::lookup(key, cx) {
+                Some(secret) => InVault::Secret(secret),
+                None if Keeper::locked(cx) => InVault::Locked,
+                None => InVault::Nothing,
+            });
+        match next {
+            Next::ApproveCommand(question) => self.ask_approval(question, Then::Login(prompt), cx),
+            Next::RunCommand(command) => self.run_command(command, prompt, cx),
+            Next::FromVault(key, secret) => {
+                self.note = Some(format!(
+                    "Used {} from the vault.",
+                    crate::login::describe(&key)
+                ));
+                cx.notify();
                 if let Some(other) = crate::login::answer(prompt, secret) {
                     self.ask_user(other, cx);
                 }
-                return;
             }
-            if Keeper::locked(cx) && !self.skipped_vault {
-                return self.need_vault(Then::Prompt(prompt), cx);
-            }
+            Next::OpenVault => self.need_vault(Then::Prompt(prompt), cx),
+            Next::Ask { refused } => self.put_question(prompt, refused, cx),
         }
-        self.ask_user(prompt, cx);
     }
 
     fn field(&self, masked: bool, cx: &mut Context<Self>) -> Entity<TextInput> {
@@ -399,16 +369,17 @@ impl PanelLogin {
         input
     }
 
+    /// The server's question, put to the person without going down the ladder again.
     fn ask_user(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
+        let refused = self.ladder.ask(&prompt, &self.spec.host, self.spec.port);
+        self.put_question(prompt, refused, cx);
+    }
+
+    fn put_question(&mut self, prompt: Prompt, refused: bool, cx: &mut Context<Self>) {
         let key = crate::login::key_for(&prompt, &self.spec.host, self.spec.port);
         let mut lines = Vec::new();
-        if let Some(key) = &key {
-            // Asked again for the same secret means the last answer was refused.
-            if self.asked.contains(key) {
-                lines.push("Permission denied, please try again.".to_owned());
-            } else {
-                self.asked.push(key.clone());
-            }
+        if refused {
+            lines.push("Permission denied, please try again.".to_owned());
         }
         let question = match prompt {
             Prompt::Password { user, host, reply } => {
@@ -498,7 +469,7 @@ impl PanelLogin {
             Kind::Secret(reply, key) => {
                 let secret = SecretString::from(typed);
                 if let (Some(key), false) = (key.take(), secret.expose_secret().is_empty()) {
-                    self.typed = Some((key, secret.clone()));
+                    self.ladder.record_typed(key, secret.clone());
                 }
                 let reply = reply.take();
                 self.step = Step::Connecting;
@@ -704,6 +675,84 @@ impl PanelLogin {
     }
 }
 
+impl PanelLogin {
+    /// The vault is needed for `then` (a server question, a save), or to dial.
+    fn need_vault(&mut self, then: Then, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        let need = Keeper::need_vault(cx, then, move |then, cx| {
+            let _ = this.update(cx, |s, cx| s.vault_resolved(then, cx));
+        });
+        match need {
+            Pending::Waiting => {
+                self.step = self.between();
+                self.note = Some("Asking the Keychain…".into());
+                cx.notify();
+            }
+            Pending::Now(Opening::Open, then) => self.vault_resolved(then, cx),
+            Pending::Now(Opening::Ask(ask), then) => self.ask_vault(ask, then, cx),
+        }
+    }
+
+    /// The Keychain attempt is over: the vault is open, or the usual question follows.
+    fn vault_resolved(&mut self, then: Then, cx: &mut Context<Self>) {
+        self.note = None;
+        if Keeper::locked(cx) {
+            return self.need_vault(then, cx);
+        }
+        self.resume(then, true, cx);
+    }
+
+    fn ask_vault(&mut self, ask: VaultAsk, then: Then, cx: &mut Context<Self>) {
+        let (title, skippable) = match (&then, ask) {
+            (_, VaultAsk::Pin) => ("Vault PIN (Enter to use the passphrase)", true),
+            (Then::Save(..), _) => ("Vault passphrase", false),
+            _ => ("Vault passphrase (Enter to skip)", true),
+        };
+        self.step = Step::Asking(Question {
+            lines: vec![title.to_owned()],
+            input: Some(self.field(true, cx)),
+            yes_no: false,
+            skippable,
+            kind: Kind::Vault(ask, then),
+        });
+        cx.notify();
+    }
+
+    /// What waited for the vault goes on, with the keys if it opened.
+    fn resume(&mut self, then: Then, opened: bool, cx: &mut Context<Self>) {
+        match then {
+            Then::Dial | Then::Proxy => self.dial(cx),
+            Then::Login(prompt) => self.on_prompt(prompt, cx),
+            Then::Prompt(prompt) if opened => self.on_prompt(prompt, cx),
+            Then::Prompt(prompt) => self.ask_user(prompt, cx),
+            Then::Save(key, secret) => {
+                if opened {
+                    self.store(key, secret, cx);
+                }
+            }
+        }
+    }
+
+    fn store(&mut self, key: Key, secret: SecretString, cx: &mut Context<Self>) {
+        let Some(task) = Keeper::store(key, secret, cx) else {
+            self.note = Some("Not saved: the vault is locked.".into());
+            return cx.notify();
+        };
+        self.offer = None;
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.note = Some(match result {
+                    Ok(()) => "Saved in the vault.".to_owned(),
+                    Err(e) => format!("Could not save the vault: {e}"),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
 /// Why a login ended, in the panel's words. A changed host key says how to forget the old
 /// one and leaves that to the person.
 fn closed_reason(
@@ -734,9 +783,6 @@ fn closed_reason(
         _ => base,
     }
 }
-
-#[path = "panel_login_vault.rs"]
-mod vault;
 
 #[cfg(test)]
 #[path = "panel_login_tests.rs"]
