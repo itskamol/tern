@@ -9,7 +9,7 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 - **Every number names its source, never eyeballing.** In order: zeron's source; then another named
   design system, adapted with an attribution header (the snackbar is from seed-design); then a value
   worked out from tern's own tokens, written as the sum (the Files panel width is the sidebar's,
-  208–400, default 256). A number picked in a prototype is not a source. Each value below names
+  224–400, default 256). A number picked in a prototype is not a source. Each value below names
   where it came from. When the inventory (written for the old Electron app) and the native code
   disagree, the native code wins.
 - **Nothing generic.** No stock gradients, no emoji in chrome, no default gpui-component look left
@@ -36,7 +36,7 @@ Reference screenshot: `apps/landing/public/assets/app-screenshot.jpg`.
 
 | Feature | Value | Source |
 | --- | --- | --- |
-| Width | drag-resize 208–400px, default 256, persisted | inventory §1.3 |
+| Width | drag-resize 224–400px, default 256, persisted (inventory §1.3 says 208; native code wins) | `settings.rs` `SIDEBAR_MIN`/`MAX`/`DEFAULT` |
 | Collapse | width → 0 over 200ms ease-out; main area goes full-bleed (radius/border melt) | inventory §1.3 |
 | Separator | double-click resets width; arrow keys nudge ±16px | inventory §1.3 |
 | Rows | host alias, `user@host`, live status dot (connected / connecting / error) | §1.6, adapted |
