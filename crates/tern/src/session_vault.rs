@@ -14,7 +14,8 @@ use tern_vault::{Key, Vault};
 use super::Session;
 use crate::keeper::{Ask, Keeper, Opening, Pending, Tried, Typed};
 use crate::login::Login;
-use crate::password_command::{self as pc, Purpose, Question, Step};
+use crate::login_ladder::{Facts, InVault, Next};
+use crate::password_command::{self as pc, Purpose, Question};
 
 const QUIET: Duration = Duration::from_millis(500);
 const QUIET_MAX: Duration = Duration::from_secs(3);
@@ -59,16 +60,26 @@ pub(super) enum Then {
 
 impl Session {
     pub(super) fn on_prompt(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
-        // The password command goes first, then the vault, then the user.
-        let Some(prompt) = self.try_command(prompt, cx) else {
-            return;
+        let command = self.link.password_command.as_deref();
+        let facts = Facts {
+            host: &self.link.spec.host,
+            port: self.link.spec.port,
+            command,
+            approval: command.and_then(|c| self.link.approvals.ask(Purpose::Login, c)),
+            vault_skipped: self.vault_skipped,
         };
-        let key = crate::login::key_for(&prompt, self.host(), self.port());
-        // Each secret is tried from the vault once per connection, so a stale one falls
-        // through to asking instead of failing in a loop.
-        if let Some(key) = key.filter(|k| !self.attempt.tried.contains(k)) {
-            if let Some(secret) = Keeper::lookup(&key, cx) {
-                self.attempt.tried.push(key.clone());
+        let next = self
+            .attempt
+            .ladder
+            .next(&prompt, facts, |key| match Keeper::lookup(key, cx) {
+                Some(secret) => InVault::Secret(secret),
+                None if Keeper::locked(cx) => InVault::Locked,
+                None => InVault::Nothing,
+            });
+        match next {
+            Next::ApproveCommand(question) => self.ask_approval(question, Then::Login(prompt), cx),
+            Next::RunCommand(command) => self.run_command(command, prompt, cx),
+            Next::FromVault(key, secret) => {
                 self.show(
                     format!(
                         "\x1b[2m[{} from the vault]\x1b[0m\r\n",
@@ -80,17 +91,16 @@ impl Session {
                 if let Some(other) = crate::login::answer(prompt, secret) {
                     self.ask_user(other, cx);
                 }
-                return;
             }
-            if Keeper::locked(cx) && !self.vault_skipped {
+            Next::OpenVault => {
                 let after = After {
                     prompt: Some(prompt),
                     ..After::default()
                 };
-                return self.ask_unlock(after, cx);
+                self.ask_unlock(after, cx);
             }
+            Next::Ask { refused } => self.put_question(prompt, refused, cx),
         }
-        self.ask_user(prompt, cx);
     }
 
     /// Asks for the vault passphrase before the connection dials (see [`Flow::Unlock`]).
@@ -181,18 +191,20 @@ impl Session {
         }
     }
 
-    /// The server's question, asked in the terminal; a typed password is remembered so it can
-    /// be offered for saving once the login succeeds.
+    /// The server's question, asked in the terminal without going down the ladder again.
     fn ask_user(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
-        self.attempt.asking = crate::login::key_for(&prompt, self.host(), self.port());
+        let refused = self
+            .attempt
+            .ladder
+            .ask(&prompt, &self.link.spec.host, self.link.spec.port);
+        self.put_question(prompt, refused, cx);
+    }
+
+    fn put_question(&mut self, prompt: Prompt, refused: bool, cx: &mut Context<Self>) {
         // Asked again for the same secret means the last answer was refused; say so as
         // OpenSSH does, or a retry looks like the same prompt shown twice.
-        if let Some(key) = &self.attempt.asking {
-            if self.attempt.asked.contains(key) {
-                self.show(b"Permission denied, please try again.\r\n", cx);
-            } else {
-                self.attempt.asked.push(key.clone());
-            }
+        if refused {
+            self.show(b"Permission denied, please try again.\r\n", cx);
         }
         let (login, question) = Login::start(prompt);
         self.attempt.login = Some(login);
@@ -213,7 +225,7 @@ impl Session {
     /// Asks to save a typed secret once the remote has been quiet for [`QUIET`] (at most
     /// [`QUIET_MAX`] after login), so the question does not land inside the login banner.
     pub(super) fn offer_save(&mut self, cx: &mut Context<Self>) {
-        if self.attempt.typed.is_none() {
+        if !self.attempt.ladder.has_typed() {
             return;
         }
         let started = Instant::now();
@@ -231,7 +243,7 @@ impl Session {
                 if s.attempt.login.is_some() || s.life.status() != super::Status::Connected {
                     return;
                 }
-                if let Some((key, secret)) = s.attempt.typed.take() {
+                if let Some((key, secret)) = s.attempt.ladder.take_typed() {
                     let lead = if s.ends_line { "" } else { "\r\n" };
                     let text = format!(
                         "{lead}Save {} in tern's vault? (yes/no) ",
@@ -247,9 +259,7 @@ impl Session {
     /// A question finished; `answer` is what was typed, `None` after Ctrl-C.
     pub(super) fn answered(&mut self, answer: Option<SecretString>, cx: &mut Context<Self>) {
         let Some(flow) = self.attempt.flow.take() else {
-            if let (Some(key), Some(secret)) = (self.attempt.asking.take(), answer) {
-                self.attempt.typed = Some((key, secret));
-            }
+            self.attempt.ladder.answered(answer);
             return;
         };
         let typed = answer.filter(|a| !a.expose_secret().is_empty());
@@ -403,38 +413,6 @@ fn lead(after: &After) -> &'static str {
 }
 
 impl Session {
-    /// Runs the connection's password command for `prompt` when it has a turn. Returns the
-    /// prompt back when the command does not apply (no command, not a password prompt, already
-    /// tried); `None` when it is being run or asked about now.
-    pub(super) fn try_command(&mut self, prompt: Prompt, cx: &mut Context<Self>) -> Option<Prompt> {
-        if !matches!(prompt, Prompt::Password { .. }) {
-            return Some(prompt);
-        }
-        let command = self.link.password_command.clone();
-        let question = command
-            .as_deref()
-            .and_then(|c| self.link.approvals.ask(Purpose::Login, c));
-        match (
-            pc::plan(
-                command.as_deref(),
-                self.attempt.command_tried,
-                question.is_none(),
-            ),
-            question,
-            command,
-        ) {
-            (Step::Approve, Some(question), _) => {
-                self.ask_approval(question, Then::Login(prompt), cx);
-                None
-            }
-            (Step::Run, _, Some(command)) => {
-                self.run_command(command, prompt, cx);
-                None
-            }
-            _ => Some(prompt),
-        }
-    }
-
     /// Asks before a command first runs on this Mac: it came from `hosts.json`, which sync and
     /// imports also write.
     pub(super) fn ask_approval(&mut self, question: Question, then: Then, cx: &mut Context<Self>) {
@@ -454,7 +432,7 @@ impl Session {
         match (then, self.link.approvals.answer(question, yes)) {
             (Then::Login(prompt), Some(command)) => self.run_command(command, prompt, cx),
             (Then::Login(prompt), None) => {
-                self.attempt.command_tried = true;
+                self.attempt.ladder.command_refused();
                 self.on_prompt(prompt, cx);
             }
             (Then::Proxy, Some(_)) => self.dial(cx),
@@ -472,7 +450,6 @@ impl Session {
     }
 
     fn run_command(&mut self, command: String, prompt: Prompt, cx: &mut Context<Self>) {
-        self.attempt.command_tried = true;
         let work = cx.background_spawn(async move { pc::run(&command, pc::TIMEOUT) });
         cx.spawn(async move |this, cx| {
             let result = work.await;
