@@ -165,7 +165,7 @@ impl FilesView {
     /// Shows `target` in panel `side`, starting from its home folder.
     pub fn set_target(&mut self, side: usize, target: Target, cx: &mut Context<Self>) {
         self.menu = None;
-        self.panels[side].model.target = target;
+        self.panels[side].model.switch_to(target);
         self.connect(side, cx);
     }
 

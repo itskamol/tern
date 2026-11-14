@@ -239,6 +239,7 @@ impl PanelModel {
     }
 
     /// True while an ask of the host is unanswered.
+    #[cfg(test)]
     pub fn pending(&self) -> bool {
         self.waiting
     }
