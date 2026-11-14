@@ -407,6 +407,12 @@ impl FilesView {
             p.state = State::Loading;
         }
         p.notice = None;
+        // The first folder after a login still shows what the login said.
+        if !p.cwd.is_empty()
+            && let Some(login) = p.login.clone()
+        {
+            login.update(cx, |l, cx| l.clear_note(cx));
+        }
         cx.notify();
         let rt = self.rt.clone();
         let asked = path.clone();

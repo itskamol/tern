@@ -171,6 +171,13 @@ fn a_password_answered_from_the_vault_says_so_as_a_session_does() {
         note.as_deref(),
         Some("Used the password for test@127.0.0.1 from the vault.")
     );
+    let login = s.login.clone();
+    s.app
+        .update(|cx| login.update(cx, |l, cx| l.clear_note(cx)));
+    assert_eq!(
+        s.app.read(|cx| s.login.read(cx).note().map(str::to_owned)),
+        None
+    );
 }
 
 #[test]

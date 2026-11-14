@@ -155,6 +155,13 @@ impl PanelLogin {
         self.note.as_deref()
     }
 
+    /// The panel moved on to another folder: what the login said is old news.
+    pub fn clear_note(&mut self, cx: &mut Context<Self>) {
+        if self.note.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// The offer to save a typed password, once connected and while it stands.
     pub fn save_offer(&self) -> Option<String> {
         self.offer
