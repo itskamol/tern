@@ -47,6 +47,12 @@ struct Scene {
 
 /// A session to the test server whose vault (locked, passphrase `vp1`) holds the password.
 fn scene() -> Scene {
+    scene_with(LinkAuth::default())
+}
+
+/// [`scene`] for a saved connection with `auth`; commands are approved in the scene's own
+/// folder, never the real settings.
+fn scene_with(auth: LinkAuth) -> Scene {
     let (server, port, typed) = serve();
     let dir = tempfile::tempdir().unwrap();
     let vault_path = dir.path().join("vault.age");
@@ -77,7 +83,7 @@ fn scene() -> Scene {
         let theme = crate::theme::Theme::zeron_dark().terminal(13.0, None);
         Host(Session::open(
             Launch::Ssh(spec),
-            LinkAuth::default(),
+            auth,
             "demo".into(),
             false,
             theme,
@@ -86,6 +92,12 @@ fn scene() -> Scene {
         ))
     });
     let session = window.read(|host, _| host.0.clone());
+    let approved = dir.path().join("approved");
+    app.update(|cx| {
+        session.update(cx, |s, _| {
+            s.link.approvals = crate::password_command::Approvals::in_dir(Some(approved));
+        })
+    });
     Scene {
         app,
         session,
@@ -628,4 +640,85 @@ fn leaving_ask_drops_the_write_it_held_without_writing_it() {
     s.set_clipboard(crate::clipboard::Policy::Allow);
     s.answer_clipboard(crate::clipboard::Answer::Once);
     assert_eq!(s.clipboard(), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_approved_password_command_answers_the_password_question_without_asking_the_person() {
+    let mut s = scene_with(LinkAuth {
+        password_command: Some(format!("printf {PASSWORD}")),
+        ..LinkAuth::default()
+    });
+    s.wait_for("continue connecting (yes/no)?");
+    s.type_line("yes");
+    s.wait_for("to get its password. Run it? (yes/no)");
+    s.type_line("yes");
+    s.wait_for("[password from the command]");
+    s.wait_for(PROMPT.trim_end());
+    assert_eq!(s.status(), Status::Connected);
+    assert!(!s.screen().contains("'s password"), "{}", s.screen());
+    assert!(
+        !s.screen().contains("Vault passphrase"),
+        "the command answered, so the vault was not needed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_password_command_waits_for_a_yes_before_it_first_runs() {
+    let marker = tempfile::tempdir().unwrap();
+    let ran = marker.path().join("ran");
+    let mut s = scene_with(LinkAuth {
+        password_command: Some(format!("touch {}; printf {PASSWORD}", ran.display())),
+        ..LinkAuth::default()
+    });
+    s.wait_for("continue connecting (yes/no)?");
+    s.type_line("yes");
+    s.wait_for("to get its password. Run it? (yes/no)");
+    s.settle();
+    assert!(!ran.exists(), "the command ran before it was approved");
+    s.type_line("yes");
+    s.wait_for(PROMPT.trim_end());
+    assert!(ran.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refused_password_command_falls_through_to_the_vault_and_then_the_person() {
+    let marker = tempfile::tempdir().unwrap();
+    let ran = marker.path().join("ran");
+    let mut s = scene_with(LinkAuth {
+        password_command: Some(format!("touch {}; printf {PASSWORD}", ran.display())),
+        ..LinkAuth::default()
+    });
+    s.wait_for("continue connecting (yes/no)?");
+    s.type_line("yes");
+    s.wait_for("to get its password. Run it? (yes/no)");
+    s.type_line("no");
+    s.wait_for("Vault passphrase (Enter to skip):");
+    s.type_line("");
+    s.wait_for("test@127.0.0.1's password:");
+    s.type_line(PASSWORD);
+    s.wait_for(PROMPT.trim_end());
+    assert!(!ran.exists(), "a refused command must not run");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failing_password_command_says_why_and_then_the_person_is_asked() {
+    let mut s = scene_with(LinkAuth {
+        password_command: Some("echo nope >&2; exit 1".into()),
+        ..LinkAuth::default()
+    });
+    s.wait_for("continue connecting (yes/no)?");
+    s.type_line("yes");
+    s.wait_for("exit 1` to get its password.");
+    s.type_line("yes");
+    s.wait_for("password command failed (exit 1): nope");
+    s.wait_for("Vault passphrase (Enter to skip):");
+    s.type_line("");
+    s.wait_for("test@127.0.0.1's password:");
+    s.type_line(PASSWORD);
+    s.wait_for(PROMPT.trim_end());
+    assert_eq!(s.status(), Status::Connected);
 }
