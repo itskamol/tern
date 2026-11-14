@@ -28,6 +28,7 @@ pub async fn change_then(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use std::cell::RefCell;
 
     use tern_ssh::LocalFs;
