@@ -220,6 +220,10 @@ impl FilesView {
                     .child(title("Modified", SortKey::Modified)),
             );
         let picked = p.selection.len();
+        let login_note = p
+            .login
+            .as_ref()
+            .and_then(|l| l.read(cx).note().map(str::to_owned));
         let footer = div()
             .flex_none()
             .px(px(10.))
@@ -240,12 +244,10 @@ impl FilesView {
                     } else {
                         t.faint
                     })
-                    .child(SharedString::from(p.notice.clone().unwrap_or_else(
-                        || match picked {
-                            0 => "Drag files here, or from Finder".to_owned(),
-                            1 => "1 selected".to_owned(),
-                            n => format!("{n} selected"),
-                        },
+                    .child(SharedString::from(footer_text(
+                        p.notice.as_deref(),
+                        login_note.as_deref(),
+                        picked,
                     ))),
             )
             .child(
@@ -729,5 +731,38 @@ impl Render for FilesView {
             )
             .children(transfers)
             .children(dialog)
+    }
+}
+
+/// The line under a panel: a failure first, then what the login said ("From the vault: …", the source first
+/// so a narrow footer cuts the host, not the source), then how many rows are picked.
+fn footer_text(notice: Option<&str>, login_note: Option<&str>, picked: usize) -> String {
+    match (notice, login_note, picked) {
+        (Some(text), _, _) => text.to_owned(),
+        (None, Some(text), 0) => text.to_owned(),
+        (None, _, 0) => "Drag files here, or from Finder".to_owned(),
+        (None, _, 1) => "1 selected".to_owned(),
+        (None, _, n) => format!("{n} selected"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::footer_text;
+
+    #[test]
+    fn the_login_note_shows_under_the_listing_until_something_else_has_to_be_said() {
+        const NOTE: &str = "From the vault: the password for u@h.";
+        let note = Some(NOTE);
+        assert_eq!(footer_text(None, note, 0), NOTE);
+        assert_eq!(
+            footer_text(Some("Could not copy."), note, 0),
+            "Could not copy."
+        );
+        assert_eq!(footer_text(None, note, 2), "2 selected");
+        assert_eq!(
+            footer_text(None, None, 0),
+            "Drag files here, or from Finder"
+        );
     }
 }

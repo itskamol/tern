@@ -4,9 +4,7 @@
 use gpui::{App, AppContext, Context, Entity, Subscription, Task, WeakEntity, Window};
 use std::time::{Duration, Instant};
 
-use tern_ssh::{
-    ConnectSpec, InputError, MemoryKey, SecretString, SessionEvent, SessionHandle, TermSize,
-};
+use tern_ssh::{ConnectSpec, InputError, MemoryKey, SessionEvent, SessionHandle, TermSize};
 use tern_term::{ShellFolder, Terminal, TerminalEvent, TerminalView};
 
 use crate::indicator::Dot;
@@ -59,16 +57,8 @@ impl Link {
 struct Attempt {
     login: Option<Login>,
     flow: Option<vault::Flow>,
-    /// The vault entry the open server question would answer.
-    asking: Option<tern_vault::Key>,
-    /// What the user typed for that question, offered for saving once connected.
-    typed: Option<(tern_vault::Key, SecretString)>,
-    /// Entries already answered from the vault on this connection.
-    tried: Vec<tern_vault::Key>,
-    /// The password command already had its turn on this connection.
-    command_tried: bool,
-    /// Secrets the user was already asked for on this connection.
-    asked: Vec<tern_vault::Key>,
+    /// What this connection already tried, and the order of what is tried next.
+    ladder: crate::login_ladder::Ladder,
     /// The vault is being opened or written for tern's own question; its note ("Saved in the
     /// vault.") is still to come, so remote output keeps waiting too.
     vault_busy: bool,

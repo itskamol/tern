@@ -159,6 +159,28 @@ fn a_locked_vault_is_opened_in_the_panel_and_answers_the_password() {
 }
 
 #[test]
+fn a_password_answered_from_the_vault_says_so_as_a_session_does() {
+    let mut s = scene(true);
+    s.asking("can't be established");
+    s.say_yes();
+    s.asking("Vault passphrase");
+    s.type_in("vp1");
+    s.connected();
+    let note = s.app.read(|cx| s.login.read(cx).note().map(str::to_owned));
+    assert_eq!(
+        note.as_deref(),
+        Some("From the vault: the password for test@127.0.0.1.")
+    );
+    let login = s.login.clone();
+    s.app
+        .update(|cx| login.update(cx, |l, cx| l.clear_note(cx)));
+    assert_eq!(
+        s.app.read(|cx| s.login.read(cx).note().map(str::to_owned)),
+        None
+    );
+}
+
+#[test]
 fn a_wrong_vault_passphrase_falls_through_to_the_server_s_own_question() {
     let mut s = scene(true);
     s.asking("can't be established");

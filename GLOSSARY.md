@@ -51,6 +51,10 @@ _Avoid_: right pane
 A tab showing two file panels side by side, each the Mac's own files or one host's, for copying between them.
 _Avoid_: SFTP browser, file manager
 
+**Login ladder**:
+The one order in which a host's login question is answered, for a Session and a Files tab login alike: the password command, then the vault, then the person.
+_Avoid_: login chain, auth flow
+
 **Files panel**:
 A side panel showing one host's files: the host of the focused pane, starting at its shell folder.
 _Avoid_: drawer, SFTP sidebar
