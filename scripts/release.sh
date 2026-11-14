@@ -107,16 +107,24 @@ sed -e "s|@REPO@|$repo|g" -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" \
 # read breaks `brew install` for everyone using the tap.
 if command -v brew >/dev/null; then
   check_tap=local/tern-release-check
-  brew untap "$check_tap" >/dev/null 2>&1 || true
+  check_dir="$(brew --repository)/Library/Taps/local/homebrew-tern-release-check"
+  # Homebrew 7 loads a local tap's casks only once the tap is trusted, and cannot untap an
+  # untrusted one, so the check tap is trusted while it exists and removed as a directory.
+  drop_check_tap() {
+    rm -rf "$check_dir"
+    brew untrust --tap "$check_tap" >/dev/null 2>&1 || true
+  }
+  drop_check_tap
   brew tap-new --no-git "$check_tap" >/dev/null
-  mkdir -p "$(brew --repository)/Library/Taps/local/homebrew-tern-release-check/Casks"
-  cp "$cask" "$(brew --repository)/Library/Taps/local/homebrew-tern-release-check/Casks/tern.rb"
+  brew trust --tap "$check_tap" >/dev/null
+  mkdir -p "$check_dir/Casks"
+  cp "$cask" "$check_dir/Casks/tern.rb"
   if ! brew style --cask "$check_tap/tern"; then
-    brew untap "$check_tap" >/dev/null 2>&1 || true
+    drop_check_tap
     echo "the cask fails brew style; fix packaging/homebrew/tern.rb" >&2
     exit 1
   fi
-  brew untap "$check_tap" >/dev/null 2>&1 || true
+  drop_check_tap
   echo "cask passes brew style"
 else
   echo "cask not checked (no brew)"
