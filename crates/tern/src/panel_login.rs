@@ -224,7 +224,6 @@ impl PanelLogin {
             }
             (Then::Login(prompt), Some(command)) => self.run_command(command, prompt, cx),
             (Then::Login(prompt), None) => {
-                self.ladder.command_refused();
                 self.on_prompt(prompt, cx);
             }
             _ => {}

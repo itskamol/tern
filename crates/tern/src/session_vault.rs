@@ -432,7 +432,6 @@ impl Session {
         match (then, self.link.approvals.answer(question, yes)) {
             (Then::Login(prompt), Some(command)) => self.run_command(command, prompt, cx),
             (Then::Login(prompt), None) => {
-                self.attempt.ladder.command_refused();
                 self.on_prompt(prompt, cx);
             }
             (Then::Proxy, Some(_)) => self.dial(cx),

@@ -20,6 +20,7 @@ pub enum InVault {
 }
 
 /// What the caller knows that the ladder must not look up itself.
+#[derive(Debug)]
 pub struct Facts<'a> {
     pub host: &'a str,
     pub port: u16,
@@ -32,8 +33,7 @@ pub struct Facts<'a> {
 /// What happens next for a question.
 #[derive(Debug)]
 pub enum Next {
-    /// Ask whether the password command may run; the answer goes to [`Ladder::command_refused`]
-    /// or, on yes, the command runs and the question is put again.
+    /// Ask whether the password command may run. Yes runs it; no goes on down the ladder.
     ApproveCommand(Question),
     RunCommand(String),
     FromVault(Key, SecretString),
@@ -74,6 +74,8 @@ impl Ladder {
             match pc::plan(facts.command, self.command_tried, facts.approval.is_none()) {
                 pc::Step::Approve => {
                     if let Some(question) = facts.approval {
+                        // Yes runs the command and no refuses it: either way the turn is spent.
+                        self.command_tried = true;
                         return Next::ApproveCommand(question);
                     }
                 }
@@ -113,11 +115,6 @@ impl Ladder {
             }
             None => false,
         }
-    }
-
-    /// The person said no to running the password command: it has had its turn.
-    pub fn command_refused(&mut self) {
-        self.command_tried = true;
     }
 
     /// The person answered the question put by [`Ladder::ask`]; `None` after Ctrl-C.
@@ -232,6 +229,15 @@ mod tests {
     }
 
     #[test]
+    fn an_approved_command_run_after_the_question_gets_no_second_turn() {
+        let mut ladder = Ladder::default();
+        let asked = ladder.next(&password(), facts(Some("pass"), false), nothing);
+        assert!(matches!(asked, Next::ApproveCommand(_)));
+        let again = ladder.next(&password(), facts(Some("pass"), true), nothing);
+        assert!(matches!(again, Next::Ask { .. }));
+    }
+
+    #[test]
     fn the_command_gets_one_turn_and_the_second_ask_goes_to_the_vault() {
         let mut ladder = Ladder::default();
         ladder.next(&password(), facts(Some("pass"), true), nothing);
@@ -242,7 +248,7 @@ mod tests {
     #[test]
     fn a_refused_command_falls_through_to_the_vault_then_the_person() {
         let mut ladder = Ladder::default();
-        ladder.command_refused();
+        ladder.next(&password(), facts(Some("pass"), false), nothing);
         let next = ladder.next(&password(), facts(Some("pass"), false), vault_holds("v"));
         assert!(matches!(next, Next::FromVault(..)));
         let next = ladder.next(&password(), facts(Some("pass"), false), nothing);
@@ -336,9 +342,11 @@ mod tests {
 
         ladder.next(&passphrase(), facts(None, true), nothing);
         ladder.answered(Some(secret("typed")));
-        let (key, typed) = ladder.take_typed().expect("typed secret");
-        assert_eq!(typed.expose_secret(), "typed");
-        assert!(matches!(key, Key::KeyPassphrase { .. }));
+        let typed = ladder.take_typed();
+        assert!(matches!(
+            &typed,
+            Some((Key::KeyPassphrase { .. }, s)) if s.expose_secret() == "typed"
+        ));
         assert!(ladder.take_typed().is_none());
     }
 
