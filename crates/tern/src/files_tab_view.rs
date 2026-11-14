@@ -734,8 +734,8 @@ impl Render for FilesView {
     }
 }
 
-/// The line under a panel: a failure first, then what the login said ("Used the password for
-/// … from the vault."), then how many rows are picked.
+/// The line under a panel: a failure first, then what the login said ("From the vault: …", the source first
+/// so a narrow footer cuts the host, not the source), then how many rows are picked.
 fn footer_text(notice: Option<&str>, login_note: Option<&str>, picked: usize) -> String {
     match (notice, login_note, picked) {
         (Some(text), _, _) => text.to_owned(),
@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn the_login_note_shows_under_the_listing_until_something_else_has_to_be_said() {
-        const NOTE: &str = "Used the password for u@h from the vault.";
+        const NOTE: &str = "From the vault: the password for u@h.";
         let note = Some(NOTE);
         assert_eq!(footer_text(None, note, 0), NOTE);
         assert_eq!(

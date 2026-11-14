@@ -249,7 +249,7 @@ impl PanelLogin {
                     Ok(secret) => {
                         // Answered straight to the server, never through `typed`, so it is not
                         // offered for saving in the vault.
-                        s.note = Some("Password from the command.".into());
+                        s.note = Some("From the command: the password.".into());
                         if let Some(other) = crate::login::answer(prompt, secret) {
                             s.on_prompt(other, cx);
                         }
@@ -354,10 +354,7 @@ impl PanelLogin {
             Next::ApproveCommand(question) => self.ask_approval(question, Then::Login(prompt), cx),
             Next::RunCommand(command) => self.run_command(command, prompt, cx),
             Next::FromVault(key, secret) => {
-                self.note = Some(format!(
-                    "Used {} from the vault.",
-                    crate::login::describe(&key)
-                ));
+                self.note = Some(format!("From the vault: {}.", crate::login::describe(&key)));
                 cx.notify();
                 if let Some(other) = crate::login::answer(prompt, secret) {
                     self.ask_user(other, cx);

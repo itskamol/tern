@@ -169,7 +169,7 @@ fn a_password_answered_from_the_vault_says_so_as_a_session_does() {
     let note = s.app.read(|cx| s.login.read(cx).note().map(str::to_owned));
     assert_eq!(
         note.as_deref(),
-        Some("Used the password for test@127.0.0.1 from the vault.")
+        Some("From the vault: the password for test@127.0.0.1.")
     );
     let login = s.login.clone();
     s.app
