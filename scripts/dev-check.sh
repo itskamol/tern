@@ -12,7 +12,10 @@
 # - config/: TERN_CONFIG_DIR with hosts `demo` (password hunter2) and `demo-cmd` (a password
 #   command, asked about before it first runs), both reopened as idle tabs;
 # - known_hosts: TERN_KNOWN_HOSTS, so ~/.ssh/known_hosts is never touched.
-# The window opens at 80,80 on the main display, 1100x700, so screenshots find it whole.
+# The window opens at 80,80 on the main display, 1100x700, so screenshots find it whole. It
+# opens on the desktop Space: while a full-screen app has the screen, it is there but not in view
+# (window tools find no window, and the frame stats count almost no frames, since nothing is
+# drawn). Leave full screen, or switch to the desktop, before checking anything.
 # A debug build keeps its Keychain items apart too ("tern vault (debug)").
 set -euo pipefail
 cd "$(dirname "$0")/.."
