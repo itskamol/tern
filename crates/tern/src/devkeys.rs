@@ -1,14 +1,16 @@
-//! Debug builds, and release builds made with the `dev-keys` feature (never shipped): `TERN_DEV_KEYS="cmd-k s t b"` replays keystrokes into the window after
-//! start-up (`sleep-500` waits half a second, for a prompt to arrive; `click:x,y` and
-//! `dblclick:x,y` click, `scroll:x,y,dy` scrolls, `type:text` types, `rclick:x,y` right-clicks and `drag:x0,y0,x1,y1` drags at window points),
-//! start-up, so a scripted visual check can drive the app without taking keyboard focus from
-//! whatever window the person at the machine is using.
+//! Debug builds, and release builds made with the `dev-keys` feature (never shipped):
+//! `TERN_DEV_KEYS="cmd-k s t b"` replays keystrokes into the window after start-up, so a scripted
+//! visual check can drive the app without taking keyboard focus from whatever window the person at
+//! the machine is using. Besides keys: `sleep-500` waits half a second (for a prompt to arrive);
+//! `type:text` types; `click:x,y`, `dblclick:x,y`, `rclick:x,y`, `scroll:x,y,dy` and
+//! `drag:x0,y0,x1,y1` act at window points; `hold:alt-cmd` leaves modifiers held (for what shows
+//! only while they are, like the ⌥⌘ pane numbers, so a screenshot can catch it) until `release`.
 
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PlatformInput, Point, WindowHandle, point, px,
+    App, AppContext, Capslock, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, Point, WindowHandle, point, px,
 };
 
 use crate::shell::Shell;
@@ -44,6 +46,16 @@ pub fn replay(window: WindowHandle<Shell>, cx: &mut App) {
                         .timer(Duration::from_millis(40))
                         .await;
                 }
+                continue;
+            }
+            if let Some(modifiers) = held(source) {
+                let event = PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+                    modifiers,
+                    capslock: Capslock::default(),
+                });
+                let _ = cx.update_window(window.into(), |_, window, cx| {
+                    window.dispatch_event(event, cx);
+                });
                 continue;
             }
             if let Some(events) = mouse(source) {
@@ -153,5 +165,42 @@ fn mouse(token: &str) -> Option<Vec<PlatformInput>> {
             Some(events)
         }
         _ => None,
+    }
+}
+
+/// The modifiers a `hold:` token leaves held (`hold:alt-cmd`), or none for `release`; `None` for
+/// any other token, or a `hold:` naming a key that is not a modifier.
+fn held(token: &str) -> Option<Modifiers> {
+    if token == "release" {
+        return Some(Modifiers::default());
+    }
+    let mut m = Modifiers::default();
+    for name in token.strip_prefix("hold:")?.split('-') {
+        match name {
+            "alt" | "option" => m.alt = true,
+            "cmd" | "command" => m.platform = true,
+            "ctrl" | "control" => m.control = true,
+            "shift" => m.shift = true,
+            "fn" => m.function = true,
+            _ => return None,
+        }
+    }
+    Some(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hold_names_the_modifiers_left_held_and_release_lets_go() {
+        let m = held("hold:alt-cmd").unwrap_or_default();
+        assert!(m.alt && m.platform && !m.control && !m.shift && !m.function);
+        let all = held("hold:option-command-control-shift-fn").unwrap_or_default();
+        assert!(all.alt && all.platform && all.control && all.shift && all.function);
+        assert_eq!(held("release"), Some(Modifiers::default()));
+        assert_eq!(held("hold:alt-k"), None, "a key is not a modifier");
+        assert_eq!(held("cmd-k"), None, "a keystroke is not a hold");
+        assert_eq!(held("hold:"), None);
     }
 }
