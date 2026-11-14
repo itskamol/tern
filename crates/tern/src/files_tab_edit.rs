@@ -6,6 +6,7 @@ use std::sync::Arc;
 use gpui::{AppContext, Context, Entity, Focusable, Window};
 use tern_ssh::{Call, FileSource};
 
+use crate::files_change::change_then;
 use crate::files_tab::{Dialog, FilesView, State};
 use crate::text_input::TextInput;
 
@@ -122,18 +123,15 @@ impl FilesView {
         };
         let rt = self.rt.clone();
         cx.spawn(async move |this, cx| {
-            let done = rt.spawn(work(source)).await;
-            let _ = this.update(cx, |this, cx| {
-                match done {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        tracing::warn!(error = %e, what, "files_change_failed");
-                        this.panels[side].notice = Some(format!("Could not {what}: {e}"));
+            change_then(&rt, source, what, work, |failure| {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(text) = failure {
+                        this.panels[side].notice = Some(text);
                     }
-                    Err(_) => this.panels[side].notice = Some(format!("Could not {what}.")),
-                }
-                this.refresh(side, cx);
-            });
+                    this.refresh(side, cx);
+                });
+            })
+            .await;
         })
         .detach();
     }

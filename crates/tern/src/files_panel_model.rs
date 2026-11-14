@@ -7,11 +7,12 @@
 //! the pane in view only. The model answers "what should be listed" ([`Shown`]); the window
 //! lists it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use tern_term::ShellFolder;
 
+use crate::files_pick::Picked;
 use crate::lifecycle::Status;
 use crate::split::PaneId;
 
@@ -98,49 +99,6 @@ impl Shown {
 pub enum Edit {
     Rename(String),
     Delete(Vec<String>),
-}
-
-/// The rows picked, by path: a path stays picked through a new listing and a trip to another
-/// pane, where a row number would point at something else.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Picked {
-    paths: BTreeSet<String>,
-    anchor: Option<String>,
-}
-
-impl Picked {
-    fn click(&mut self, rows: &[String], ix: usize, command: bool, shift: bool) {
-        let Some(row) = rows.get(ix) else { return };
-        let anchor = self
-            .anchor
-            .as_ref()
-            .and_then(|a| rows.iter().position(|r| r == a));
-        match (command, shift, anchor) {
-            (_, true, Some(from)) => {
-                if !command {
-                    self.paths.clear();
-                }
-                let (lo, hi) = (from.min(ix), from.max(ix));
-                self.paths.extend(rows[lo..=hi].iter().cloned());
-            }
-            (true, _, _) => {
-                if !self.paths.remove(row) {
-                    self.paths.insert(row.clone());
-                }
-                self.anchor = Some(row.clone());
-            }
-            _ => {
-                self.paths.clear();
-                self.paths.insert(row.clone());
-                self.anchor = Some(row.clone());
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.paths.clear();
-        self.anchor = None;
-    }
 }
 
 #[derive(Debug)]
@@ -435,14 +393,14 @@ impl FilesPanelModel {
     pub fn is_picked(&self, path: &str) -> bool {
         self.focused
             .and_then(|id| self.panes.get(&id))
-            .is_some_and(|p| p.picked.paths.contains(path))
+            .is_some_and(|p| p.picked.contains(path))
     }
 
     /// F2 or the row's Rename: the one picked row's name becomes editable. `None` unless exactly
     /// one row is picked.
     pub fn start_rename(&mut self) -> Option<String> {
         let p = self.view()?;
-        let mut picked = p.picked.paths.iter();
+        let mut picked = p.picked.paths();
         let (Some(one), None) = (picked.next(), picked.next()) else {
             return None;
         };
@@ -453,10 +411,10 @@ impl FilesPanelModel {
 
     /// ⌘⌫ or the row's Delete: the picked rows ask before anything goes. False when none is.
     pub fn start_delete(&mut self) -> bool {
-        let Some(p) = self.view().filter(|p| !p.picked.paths.is_empty()) else {
+        let Some(p) = self.view().filter(|p| !p.picked.is_empty()) else {
             return false;
         };
-        p.edit = Some(Edit::Delete(p.picked.paths.iter().cloned().collect()));
+        p.edit = Some(Edit::Delete(p.picked.paths().cloned().collect()));
         true
     }
 
@@ -482,7 +440,7 @@ impl FilesPanelModel {
     pub fn picked(&self) -> Vec<String> {
         self.focused
             .and_then(|id| self.panes.get(&id))
-            .map(|p| p.picked.paths.iter().cloned().collect())
+            .map(|p| p.picked.paths().cloned().collect())
             .unwrap_or_default()
     }
 }

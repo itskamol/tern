@@ -26,6 +26,16 @@ impl SftpFiles {
         }
     }
 
+    /// Opens a host's files on a connection that is already up. The source keeps the connection
+    /// (see [`keeping`](Self::keeping)), so callers never build one without it.
+    ///
+    /// # Errors
+    /// The connection is gone, or the host refuses SFTP.
+    pub async fn open(id: impl Into<String>, handle: SessionHandle) -> Result<Self, SftpError> {
+        let sftp = handle.open_sftp().await?;
+        Ok(Self::new(id, sftp).keeping(handle))
+    }
+
     /// Ties the connection's life to this source (and every clone of it): a copy still using
     /// the source keeps the connection open after whoever opened it is done.
     #[must_use]
