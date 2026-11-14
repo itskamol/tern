@@ -60,6 +60,9 @@ impl FilesView {
                     _ => return,
                 }
                 window.focus(&self.focus, cx);
+                // The next question may keep this field ("Repeat vault passphrase"): it is to
+                // take the keyboard again, as a new field would.
+                self.asked = None;
                 return cx.stop_propagation();
             }
         }
@@ -584,6 +587,7 @@ impl FilesView {
                             if let Some(l) = this.panels[side].login.clone() {
                                 l.update(cx, |l, cx| l.submit(cx));
                             }
+                            this.asked = None;
                         },
                     )),
                 )
