@@ -90,7 +90,7 @@ impl FilesView {
             "f2" => self.start_rename(side, window, cx),
             "escape" => {
                 if self.menu.take().is_none() {
-                    self.panels[side].selection.clear();
+                    self.panels[side].model.unpick();
                 }
                 cx.notify();
             }

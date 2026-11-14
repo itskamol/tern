@@ -32,12 +32,15 @@ impl FilesView {
             self.panels[from].source.clone(),
             self.panels[to].source.clone(),
         ) else {
-            self.panels[to].notice =
-                Some("Both panels need a host or this Mac open to copy.".into());
+            self.panels[to]
+                .model
+                .set_notice("Both panels need a host or this Mac open to copy.".into());
             return cx.notify();
         };
         if self.panels[to].state != State::Ready {
-            self.panels[to].notice = Some("Open a folder to copy into first.".into());
+            self.panels[to]
+                .model
+                .set_notice("Open a folder to copy into first.".into());
             return cx.notify();
         }
         let dir = self.panels[to].cwd.clone();

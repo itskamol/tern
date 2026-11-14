@@ -80,7 +80,9 @@ impl FilesView {
                         Box::pin(async move { s.mkdir(&path).await })
                     });
                 } else {
-                    self.panels[side].notice = Some(format!("{name:?} is not a folder name."));
+                    self.panels[side]
+                        .model
+                        .set_notice(format!("{name:?} is not a folder name."));
                 }
             }
             Dialog::Rename { side, entry, input } => {
@@ -93,7 +95,9 @@ impl FilesView {
                         });
                     }
                     Some(_) => {}
-                    None => self.panels[side].notice = Some(format!("{name:?} is not a name.")),
+                    None => self.panels[side]
+                        .model
+                        .set_notice(format!("{name:?} is not a name.")),
                 }
             }
             Dialog::Delete { side, entries } => {
@@ -128,7 +132,7 @@ impl FilesView {
                     this.refresh(side, cx);
                     // After the refresh, which clears the notice line as listing starts.
                     if let Some(text) = failure {
-                        this.panels[side].notice = Some(text);
+                        this.panels[side].model.set_notice(text);
                     }
                 });
             })
@@ -146,15 +150,9 @@ pub(crate) fn plain_name(name: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
-    use std::time::{Duration, Instant};
-
-    use gpui::{TestApp, WeakEntity};
-
     use super::*;
-    use crate::files_tab::{FilesView, State};
-    use crate::platform::SshRuntime;
-    use crate::theme::Theme;
-    use crate::transfers::Transfers;
+    use crate::files_tab::State;
+    use crate::files_tab_tests::Tab;
 
     #[test]
     fn a_failed_change_stays_in_the_notice_line_after_the_folder_is_listed_again() {
@@ -162,50 +160,19 @@ mod tests {
         let taken = dir.path().join("taken");
         std::fs::create_dir(&taken).unwrap();
         let cwd = dir.path().to_string_lossy().into_owned();
-        let mut app = TestApp::new();
-        let view = app.update(|cx| {
-            SshRuntime::install(cx).unwrap();
-            let rt = SshRuntime::handle(cx);
-            let transfers = cx.new(|cx| Transfers::new(rt, cx));
-            cx.new(|cx| {
-                FilesView::new(
-                    Vec::new(),
-                    None,
-                    transfers,
-                    WeakEntity::new_invalid(),
-                    Theme::zeron_dark(),
-                    cx,
-                )
-            })
-        });
-        let settle = |app: &mut TestApp, ready: &dyn Fn(&FilesView) -> bool| {
-            let until = Instant::now() + Duration::from_secs(10);
-            while Instant::now() < until {
-                app.run_until_parked();
-                if app.read(|cx| ready(view.read(cx))) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            panic!("never ready");
-        };
-        app.update(|cx| view.update(cx, |v, cx| v.go(0, cwd.clone(), cx)));
-        settle(&mut app, &|v| {
-            v.panels[0].state == State::Ready && v.panels[0].cwd == cwd
-        });
-        let before = app.read(|cx| view.read(cx).panels[0].generation);
+        let mut tab = Tab::new();
+        tab.update(|v, cx| v.go(0, cwd.clone(), cx));
+        tab.settle(|v| v.panels[0].state == State::Ready && v.panels[0].cwd == cwd);
         let path = taken.to_string_lossy().into_owned();
-        app.update(|cx| {
-            view.update(cx, |v, cx| {
-                v.change(0, "make the folder", cx, move |s| {
-                    Box::pin(async move { s.mkdir(&path).await })
-                });
-            })
+        tab.update(|v, cx| {
+            v.change(0, "make the folder", cx, move |s| {
+                Box::pin(async move { s.mkdir(&path).await })
+            });
         });
-        settle(&mut app, &|v| v.panels[0].generation > before);
-        // Let the listing the refresh asked for arrive.
-        settle(&mut app, &|v| v.panels[0].state == State::Ready);
-        let notice = app.read(|cx| view.read(cx).panels[0].notice.clone());
+        // The notice is set once the change has failed and the folder is asked for again; the
+        // listing that follows must not clear it.
+        tab.settle(|v| v.panels[0].notice.is_some() && !v.panels[0].pending());
+        let notice = tab.read(|v| v.panels[0].notice.clone());
         assert!(
             notice.is_some_and(|n| n.starts_with("Could not make the folder: ")),
             "the failure is shown"
