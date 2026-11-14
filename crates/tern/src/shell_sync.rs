@@ -20,18 +20,13 @@ use crate::text_input::TextInput;
 
 #[path = "shell_sync_engine.rs"]
 mod engine;
-use engine::{Outcome, Resolutions, Side, Snapshot, Throttle, run, snapshot};
+#[path = "shell_sync_timing.rs"]
+mod timing;
+use engine::{Outcome, Resolutions, Side, Snapshot, run, snapshot};
+use timing::{End, Facts, Next, Timing};
 
-/// Edits are batched this long, so typing a host name is one sync, not twenty.
-const DEBOUNCE: Duration = Duration::from_secs(5);
 /// How often the synced files are looked at for changes.
 const POLL: Duration = Duration::from_secs(2);
-/// After a failed automatic sync, the same data is not retried for this long (offline).
-const BACKOFF: Duration = Duration::from_secs(300);
-/// Bringing the window to the front looks at the remote, but not more than once a minute.
-const ACTIVATE_EVERY: Duration = Duration::from_secs(60);
-/// While tern stays open the remote is looked at this often, for changes from other Macs.
-const PERIODIC_EVERY: Duration = Duration::from_secs(300);
 
 /// What the user still has to decide after a conflict.
 struct Ask {
@@ -54,38 +49,14 @@ pub(super) struct SyncUi {
 }
 
 /// Automatic sync's bookkeeping; lives on the shell so it runs before Settings is opened.
+#[derive(Default)]
 pub(super) struct AutoSync {
     started: bool,
-    /// Looking at the remote when the window comes to the front: at most once a minute.
-    on_activate: Throttle,
-    /// And while the app stays open: every 5 minutes.
-    periodic: Throttle,
-    /// Sync once when the app starts (waits for the vault to be unlocked).
-    launch_pending: bool,
-    /// The local hash the debounce is waiting on, and when it may run.
-    seen: Option<String>,
-    deadline: Option<Instant>,
-    /// The last automatic failure: the data it failed on, when, and the text already shown.
-    failed: Option<(String, Instant)>,
+    timing: Timing,
+    /// The text of the last automatic failure already shown as an Alert.
     alerted: Option<String>,
     /// The line shown in Settings → Sync.
     status: Option<String>,
-}
-
-impl Default for AutoSync {
-    fn default() -> Self {
-        Self {
-            started: false,
-            on_activate: Throttle::new(ACTIVATE_EVERY),
-            periodic: Throttle::new(PERIODIC_EVERY),
-            launch_pending: false,
-            seen: None,
-            deadline: None,
-            failed: None,
-            alerted: None,
-            status: None,
-        }
-    }
 }
 
 fn item_label(name: &str) -> &'static str {
@@ -250,7 +221,6 @@ impl Shell {
         ui.busy = true;
         ui.message = None;
         ui.ask = None;
-        let started_on = self.auto_sync.seen.clone();
         cx.notify();
         let work = cx.background_spawn(async move {
             run(
@@ -303,7 +273,13 @@ impl Shell {
                         ui.pass_input.update(cx, |i, cx| i.set_text("", cx));
                     }
                 }
-                s.auto_sync.seen = None;
+                let end = match &result {
+                    Ok(Outcome::Conflict { .. }) => End::Other,
+                    Ok(_) => End::Worked,
+                    Err(_) if auto => End::Failed,
+                    Err(_) => End::Other,
+                };
+                s.auto_sync.timing.finished(end, Instant::now());
                 s.auto_sync.status = Some(match &result {
                     Ok(Outcome::UpToDate) => "Up to date".into(),
                     Ok(Outcome::Pushed) => "Uploaded this Mac's changes".into(),
@@ -321,7 +297,6 @@ impl Shell {
                     }
                     Ok(outcome) => {
                         s.auto_sync.alerted = None;
-                        s.auto_sync.failed = None;
                         // A quiet background run only speaks when something changed here.
                         let text = match outcome {
                             Outcome::UpToDate => "Already up to date",
@@ -334,9 +309,6 @@ impl Shell {
                         }
                     }
                     Err(e) if auto => {
-                        if let Some(h) = started_on {
-                            s.auto_sync.failed = Some((h, Instant::now()));
-                        }
                         // Offline retries must not repeat the same Alert.
                         if s.auto_sync.alerted.as_deref() != Some(e.as_str()) {
                             s.auto_sync.alerted = Some(e.clone());
@@ -362,8 +334,7 @@ impl Shell {
         self.auto_sync.started = true;
         // Coming back to tern after working on another Mac: look at the remote.
         cx.observe_window_activation(window, |s, window, cx| {
-            if window.is_window_active() && s.auto_sync.on_activate.allow(Instant::now()) {
-                s.auto_sync.launch_pending = true;
+            if window.is_window_active() && s.auto_sync.timing.window_came_forward(Instant::now()) {
                 cx.notify();
             }
         })
@@ -379,7 +350,7 @@ impl Shell {
                     .spawn(async move { snapshot(&dir) })
                     .await;
                 if let Some(snap) = snap
-                    && this.update(cx, |s, cx| s.auto_tick(snap, cx)).is_err()
+                    && this.update(cx, |s, cx| s.auto_tick(&snap, cx)).is_err()
                 {
                     break;
                 }
@@ -388,60 +359,30 @@ impl Shell {
         .detach();
     }
 
-    /// One look at the files: arms the debounce on a change, and runs the sync once it is due.
-    fn auto_tick(&mut self, snap: Snapshot, cx: &mut Context<Self>) {
-        let enabled =
-            self.settings.sync_auto && (self.settings.sync_remote.is_some() || snap.last.is_some());
-        if !enabled {
-            return;
-        }
-        // The first look is the launch sync; after that every few minutes. `launch_pending`
-        // is "look at the remote", and stays set until the vault is open and a run starts.
-        if self.auto_sync.periodic.allow(Instant::now()) {
-            self.auto_sync.launch_pending = true;
-        }
-        // One sync at a time; a change meanwhile shows up as a difference afterwards.
-        if self
-            .sync_ui
-            .as_ref()
-            .is_some_and(|u| u.busy || u.ask.is_some())
-        {
-            return;
-        }
-        let dirty = snap.last.as_deref() != Some(snap.local.as_str());
-        let now = Instant::now();
-        let a = &mut self.auto_sync;
-        if !dirty && !a.launch_pending {
-            a.seen = None;
-            a.deadline = None;
-            return;
-        }
-        if dirty && a.seen.as_deref() != Some(snap.local.as_str()) {
-            a.seen = Some(snap.local.clone());
-            a.deadline = Some(now + DEBOUNCE);
-        }
-        if !(a.launch_pending || a.deadline.is_some_and(|d| now >= d)) {
-            return;
-        }
-        if let Some((hash, at)) = &a.failed
-            && *hash == snap.local
-            && now.duration_since(*at) < BACKOFF
-        {
-            return;
-        }
-        if Keeper::len(cx).is_none() {
-            // Never prompt for a passphrase from the background.
-            let text = "Automatic sync is waiting for the vault to be unlocked";
-            if a.status.as_deref() != Some(text) {
-                a.status = Some(text.into());
-                cx.notify();
+    /// One look at the files; [`Timing`] says whether a sync is due.
+    fn auto_tick(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        let facts = Facts {
+            now: Instant::now(),
+            enabled: self.settings.sync_auto
+                && (self.settings.sync_remote.is_some() || snap.last.is_some()),
+            local: &snap.local,
+            last: snap.last.as_deref(),
+            busy: self
+                .sync_ui
+                .as_ref()
+                .is_some_and(|u| u.busy || u.ask.is_some()),
+            vault_open: Keeper::len(cx).is_some(),
+        };
+        match self.auto_sync.timing.look(&facts) {
+            Next::Run => self.sync_now(None, Resolutions::new(), true, cx),
+            Next::Wait => {}
+            Next::WaitSaying(text) => {
+                if self.auto_sync.status.as_deref() != Some(text) {
+                    self.auto_sync.status = Some(text.into());
+                    cx.notify();
+                }
             }
-            return;
         }
-        a.launch_pending = false;
-        a.deadline = None;
-        a.seen = Some(snap.local);
-        self.sync_now(None, Resolutions::new(), true, cx);
     }
 
     /// Records the answer for one conflicted item; the sync runs once every item has one.

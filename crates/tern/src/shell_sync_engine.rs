@@ -2,7 +2,6 @@
 //! `tern_sync::bundle`, which does the sync itself. No UI in here.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use tern_ssh::SecretString;
 use tern_sync::Plan;
@@ -11,30 +10,6 @@ pub(super) use tern_sync::bundle::{Outcome, Resolutions, Side, Snapshot, snapsho
 use tern_vault::{Vault, VaultError, Zeroizing};
 
 const VAULT_FILE: &str = "vault.age";
-
-/// Lets an event through at most once per `every`; only an allowed event restarts the clock.
-/// Used for "check the remote when the window comes to the front" and the 5-minute poll.
-pub(super) struct Throttle {
-    every: Duration,
-    last: Option<Instant>,
-}
-
-impl Throttle {
-    pub(super) fn new(every: Duration) -> Self {
-        Self { every, last: None }
-    }
-
-    pub(super) fn allow(&mut self, now: Instant) -> bool {
-        if self
-            .last
-            .is_some_and(|last| now.duration_since(last) < self.every)
-        {
-            return false;
-        }
-        self.last = Some(now);
-        true
-    }
-}
 
 /// tern's vault as the sync sees it. A newtype, as the trait is `tern-sync`'s and the vault
 /// `tern-vault`'s.

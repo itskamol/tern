@@ -3,20 +3,6 @@
 //! The sync's own rules are tested in `tern_sync::bundle`.
 use super::*;
 
-#[test]
-fn throttle_lets_one_event_per_window_through_and_counts_from_the_allowed_one() {
-    let t0 = Instant::now();
-    let s = Duration::from_secs;
-    let mut gate = Throttle::new(s(60));
-    assert!(gate.allow(t0), "the first event passes");
-    assert!(!gate.allow(t0 + s(1)));
-    assert!(!gate.allow(t0 + s(59)));
-    // A refused event must not push the window out: 61 s after the allowed one passes.
-    assert!(gate.allow(t0 + s(61)));
-    assert!(!gate.allow(t0 + s(100)), "the clock restarted at 61");
-    assert!(gate.allow(t0 + s(121)));
-}
-
 fn bare_repo(root: &Path) -> String {
     let bare = root.join("remote.git");
     let ok = std::process::Command::new("git")
