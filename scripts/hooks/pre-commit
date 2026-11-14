@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Refuses a commit that pre-push would refuse for formatting or a craft rule (a file over 800
+# lines, a missing header), while the fix is still a plain edit and not an amend. Seconds, not
+# minutes: clippy and the tests stay in pre-push. Enabled with the other hooks:
+# git config core.hooksPath scripts/hooks
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+echo "pre-commit: fmt"   && cargo fmt --all --check
+echo "pre-commit: craft" && scripts/check-craft.sh

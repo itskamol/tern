@@ -171,6 +171,9 @@ while the count holds), so the window never holds more than 2 window-sized IOSur
 less, about 18.6 MB at 1320x880 and about 31 MB full screen. The same-build A/B in #8 held
 IOSurface at 36 MB in 4 of 4 idle runs, against 54 MB in 3 of 8 for stock.
 
+`scripts/measure-frames.sh <binary> <seconds> [label]` reruns this: frame stats on, IOSurface
+sampled each second, the busy seconds printed; once per build compared, with the same scenes.
+
 Measured 2026-11-14 on a MacBook with a 1728x1117 built-in display, release build with the
 `dev-keys` feature, `TERN_FRAME_STATS=1`, window 1320x880 in front, one connected demo tab. The
 stock build was the same tree with `drawables::apply` skipped. Each ran the same scenes back to

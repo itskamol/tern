@@ -41,7 +41,9 @@ We follow written conventions of well-maintained projects, not taste. Each rule 
 
 - **Formatting:** `rustfmt` with `style_edition = "2024"`, as in Zed and gpui-component, so copied code needs no reformatting.
 - **API shape:** the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/): `C-FAILURE` (every public fallible fn
-  has an `# Errors` doc section, enforced by `clippy::missing_errors_doc`), `C-DEBUG` (all public types implement `Debug`),
+  has an `# Errors` doc section, enforced by `clippy::missing_errors_doc`), `C-DEBUG` (all public types implement `Debug`;
+  `missing_debug_implementations` enforces it in the library crates only, since a binary has no public API, so in
+  `crates/tern` review checks it for plain data types; a type holding a secret keeps `Debug` out on purpose),
   `C-GOOD-ERR` (error types are `std::error::Error`, messages lowercase without trailing punctuation).
 - **No blocking in async or UI code:** Zed's `clippy.toml` pattern, a `disallowed-methods` list that names the replacement.
 - **Comments are rare and say why.** No comment restates the code, narrates a step, or names

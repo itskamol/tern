@@ -1,7 +1,8 @@
 # tern
 
 - Rules every change is held to, and the scripts that enforce them: `CRAFT.md`.
-- Gates: `scripts/hooks/pre-push` runs what CI runs; wire it once per clone with
+- Gates: `scripts/hooks/pre-commit` checks formatting and the craft rules in seconds;
+  `scripts/hooks/pre-push` runs what CI runs. Wire both once per clone with
   `git config core.hooksPath scripts/hooks`.
 - UI changes are checked by eye (`docs/testing.md` § 5): `scripts/dev-check.sh` runs a debug
   build as its own app (bundle id `dev.tern.check`) against a seeded config and a local demo SSH

@@ -15,7 +15,11 @@
 # The window opens at 80,80 on the main display, 1100x700, so screenshots find it whole. It
 # opens on the desktop Space: while a full-screen app has the screen, it is there but not in view
 # (window tools find no window, and the frame stats count almost no frames, since nothing is
-# drawn). Leave full screen, or switch to the desktop, before checking anything.
+# drawn). Leave full screen, or switch to the desktop, before checking anything;
+# `swift scripts/onscreen-windows.swift` says what holds the screen and where tern's windows are.
+# TERN_DEV_WINDOW, TERN_DEV_WINDOW_AT and TERN_DEV_KEYS work in debug builds only (TERN_DEV_KEYS
+# also in a release built with `--features dev-keys`). A GPUI window takes no keystrokes sent to
+# it in the background: drive it with TERN_DEV_KEYS, or with input to the screen.
 # A debug build keeps its Keychain items apart too ("tern vault (debug)").
 set -euo pipefail
 cd "$(dirname "$0")/.."
