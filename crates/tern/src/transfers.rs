@@ -263,16 +263,20 @@ pub fn outcome(label: &str, moving: bool, s: &Summary) -> (bool, String) {
         };
         return (false, format!("Could not {verb} {label}: {first}{more}"));
     }
-    let mut notes = String::new();
-    if s.skipped > 0 {
-        notes += &format!(", {} skipped", s.skipped);
+    let links = match s.links {
+        0 => String::new(),
+        1 => ", 1 folder not copied because it is a link".to_owned(),
+        n => format!(", {n} folders not copied because they are links"),
+    };
+    if s.copied == 0 && s.skipped > 0 {
+        // Nothing landed, so "Copied" would be untrue; the label already names what was skipped.
+        return (true, format!("Skipped {label}{links}"));
     }
-    match s.links {
-        0 => {}
-        1 => notes += ", 1 folder not copied because it is a link",
-        n => notes += &format!(", {n} folders not copied because they are links"),
-    }
-    (true, format!("{done} {label}{notes}"))
+    let skipped = match s.skipped {
+        0 => String::new(),
+        n => format!(", {n} skipped"),
+    };
+    (true, format!("{done} {label}{skipped}{links}"))
 }
 
 #[cfg(test)]
@@ -377,6 +381,17 @@ mod tests {
         assert_eq!(
             outcome("a", false, &summary(0, 0, &[], true)),
             (false, "Cancelled: a".into())
+        );
+    }
+
+    #[test]
+    fn a_batch_where_everything_was_skipped_does_not_say_it_copied() {
+        let (ok, text) = outcome("a.txt to web", false, &summary(0, 1, &[], false));
+        assert!(ok, "skipping is an Activity, not a failure");
+        assert_eq!(text, "Skipped a.txt to web");
+        assert_eq!(
+            outcome("a.txt to web", true, &summary(0, 3, &[], false)).1,
+            "Skipped a.txt to web"
         );
     }
 

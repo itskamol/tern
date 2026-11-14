@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tern_ssh::{
-    Call, CopyJob, Event, FileEntry, FileSource, LocalFs, Reader, TransferQueue, Writer,
+    Call, Conflict, CopyJob, Event, FileEntry, FileSource, LocalFs, Reader, TransferQueue, Writer,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -166,4 +166,75 @@ async fn a_write_error_stops_the_read_and_leaves_nothing_behind() {
     // Reading ahead of the writer is bounded, so far less than the file was read.
     let got = read.load(Ordering::SeqCst);
     assert!(got < size / 4, "{got} of {size} bytes were read");
+}
+
+/// Cancelling one batch drops only its own pending clash question: the other batch's stays
+/// answerable and its copy still lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_batch_leaves_another_batch_s_question_answerable() {
+    let trash = tempfile::tempdir().unwrap();
+    let local: Arc<dyn FileSource> = Arc::new(LocalFs::with_trash(trash.path().to_path_buf()));
+    let (queue, events) = TransferQueue::new(tokio::runtime::Handle::current());
+    let mut batches = Vec::new();
+    let mut dirs = Vec::new();
+    for name in ["one.txt", "two.txt"] {
+        let (src, dst) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(src.path().join(name), "new").unwrap();
+        std::fs::write(dst.path().join(name), "old").unwrap();
+        let item = local
+            .list(src.path().to_str().unwrap())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == name)
+            .unwrap();
+        batches.push(queue.submit(vec![CopyJob {
+            from: local.clone(),
+            item,
+            to: local.clone(),
+            dir: dst.path().to_str().unwrap().to_owned(),
+            rule: None,
+            moving: false,
+        }]));
+        dirs.push((src, dst));
+    }
+    let (first, second) = (batches[0], batches[1]);
+
+    let mut asked = Vec::new();
+    let mut finished = Vec::new();
+    while asked.len() < 2 {
+        match next(&events).await {
+            Event::Question(q) => asked.push(q),
+            Event::Finished(s) => finished.push(s),
+            Event::Progress(_) => {}
+        }
+    }
+    let question = asked.iter().find(|q| q.batch == second).unwrap().id;
+    queue.cancel(first);
+    queue.answer(question, Conflict::Replace, false);
+
+    while finished.len() < 2 {
+        if let Event::Finished(s) = next(&events).await {
+            finished.push(s);
+        }
+    }
+    let of = |b: u64| finished.iter().find(|s| s.batch == b).unwrap();
+    assert!(of(first).cancelled);
+    assert!(!of(second).cancelled, "{:?}", of(second));
+    assert_eq!(of(second).copied, 1);
+    assert_eq!(
+        std::fs::read_to_string(dirs[1].1.path().join("two.txt")).unwrap(),
+        "new"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dirs[0].1.path().join("one.txt")).unwrap(),
+        "old"
+    );
+}
+
+async fn next(events: &async_channel::Receiver<Event>) -> Event {
+    tokio::time::timeout(Duration::from_secs(20), events.recv())
+        .await
+        .expect("no event arrived")
+        .unwrap()
 }
