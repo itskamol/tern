@@ -293,7 +293,7 @@ fn a_locked_vault_opened_at_the_prompt_answers_the_server() {
     // The server asks for the password; the vault holds it but is locked: tern asks for it.
     s.wait_for("Vault passphrase (Enter to skip):");
     s.type_line("vp1");
-    s.wait_for("from the vault]");
+    s.wait_for("[From the vault: the password for ");
     s.wait_for(PROMPT.trim_end());
     assert_eq!(s.status(), Status::Connected);
     assert!(
@@ -653,7 +653,7 @@ fn an_approved_password_command_answers_the_password_question_without_asking_the
     s.type_line("yes");
     s.wait_for("to get its password. Run it? (yes/no)");
     s.type_line("yes");
-    s.wait_for("[password from the command]");
+    s.wait_for("[From the command: the password]");
     s.wait_for(PROMPT.trim_end());
     assert_eq!(s.status(), Status::Connected);
     assert!(!s.screen().contains("'s password"), "{}", s.screen());

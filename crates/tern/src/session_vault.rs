@@ -81,11 +81,7 @@ impl Session {
             Next::RunCommand(command) => self.run_command(command, prompt, cx),
             Next::FromVault(key, secret) => {
                 self.show(
-                    format!(
-                        "\x1b[2m[{} from the vault]\x1b[0m\r\n",
-                        crate::login::describe(&key)
-                    )
-                    .as_bytes(),
+                    format!("\x1b[2m[{}]\x1b[0m\r\n", crate::login::from_vault(&key)).as_bytes(),
                     cx,
                 );
                 if let Some(other) = crate::login::answer(prompt, secret) {
@@ -454,7 +450,10 @@ impl Session {
             let result = work.await;
             let _ = this.update(cx, |s, cx| match result {
                 Ok(secret) => {
-                    s.show(b"\x1b[2m[password from the command]\x1b[0m\r\n", cx);
+                    s.show(
+                        format!("\x1b[2m[{}]\x1b[0m\r\n", crate::login::FROM_COMMAND).as_bytes(),
+                        cx,
+                    );
                     // Answered straight to the server, never through `typed`, so it is not
                     // offered for saving in the vault.
                     if let Some(other) = crate::login::answer(prompt, secret) {

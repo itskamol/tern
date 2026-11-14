@@ -278,6 +278,14 @@ pub fn is_yes(answer: Option<&SecretString>) -> bool {
     answer.is_some_and(|a| matches!(a.expose_secret().trim(), "y" | "yes" | "Y" | "Yes"))
 }
 
+/// Where an answer tern gave for the person came from, in the words a Session and a Files tab
+/// both use: the source first, so a narrow line cuts the host and not the source.
+pub fn from_vault(key: &Key) -> String {
+    format!("From the vault: {}", describe(key))
+}
+
+pub const FROM_COMMAND: &str = "From the command: the password";
+
 pub fn describe(key: &Key) -> String {
     match key {
         Key::Password { user, host, .. } => format!("the password for {user}@{host}"),
