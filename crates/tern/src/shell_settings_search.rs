@@ -16,7 +16,14 @@ pub(crate) struct SettingsSearch {
 impl SettingsSearch {
     pub(crate) fn new(t: &crate::theme::Theme, cx: &mut Context<Shell>) -> Self {
         let input = cx.new(|cx| TextInput::new("Search settings", false, t.input_colors(), cx));
-        let repaint = cx.observe(&input, |_, _, cx| cx.notify());
+        // The Vault page's fields are made when Vault is opened; a search draws it unopened,
+        // so they are made once something is typed and its unlock row can show.
+        let repaint = cx.observe(&input, |shell, input, cx| {
+            if !input.read(cx).text().trim().is_empty() {
+                shell.ensure_vault_ui(cx);
+            }
+            cx.notify();
+        });
         Self {
             input,
             _repaint: repaint,

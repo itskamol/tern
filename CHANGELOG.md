@@ -25,6 +25,8 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- A copy where every item was skipped now says "Skipped notes.txt to web-01" instead of "Copied notes.txt to web-01, 1 skipped".
+- Searching Settings for "vault" finds the Vault section before it has been opened, locked or not; it shows the vault's status and the way to unlock it.
 - Keep both keeps a compressed file's type: `dump.sql.gz` becomes `dump 2.sql.gz` and `release.tar.gz` becomes `release 2.tar.gz`, not `dump.sql 2.gz`. A rotated log keeps its number: `api.log.1.gz` becomes `api.log.1 2.gz`. The same applies to `.bz2`, `.xz`, `.zst` and `.lz4`.
 - Activity Monitor no longer counts tern's own memory as GPU memory. The allocator labelled its memory "IOAccelerator"; it now shows as "App-Specific Tag 1".
 

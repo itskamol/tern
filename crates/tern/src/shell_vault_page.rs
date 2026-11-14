@@ -15,33 +15,48 @@ use crate::keeper::{self, Keeper};
 use crate::settings_widgets as w;
 use crate::text_input::TextInput;
 
+/// The Status row's title and line under it: what the vault is, never what it holds.
+fn vault_status(saved: Option<usize>, exists: bool) -> (&'static str, String) {
+    match saved {
+        Some(n) => (
+            "Unlocked",
+            format!("{n} saved secret{}", if n == 1 { "" } else { "s" }),
+        ),
+        None if exists => (
+            "Locked",
+            "Unlocks the first time a saved login is needed, or here".into(),
+        ),
+        None => (
+            "No vault yet",
+            "Created the first time you save a password, or here".into(),
+        ),
+    }
+}
+
+/// The Status section without controls, for the page drawn before its fields exist.
+fn status_only(t: &crate::theme::Theme, status: &'static str, detail: String) -> gpui::Div {
+    w::section(
+        t,
+        "Status",
+        w::card(t).child(w::row(t, true, status, Some(detail.into()), div())),
+    )
+}
+
 impl Shell {
     // ---- the page -----------------------------------------------------------------------
 
     pub(super) fn vault_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;
-        let Some(ui) = &self.vault_ui else {
-            return w::page_column().child(w::page_header(&t, "Vault"));
-        };
         let entries = Keeper::keys(cx);
         let exists = Keeper::exists(cx);
-        let (status, detail): (&str, String) = match &entries {
-            Some(list) => (
-                "Unlocked",
-                format!(
-                    "{} saved secret{}",
-                    list.len(),
-                    if list.len() == 1 { "" } else { "s" }
-                ),
-            ),
-            None if exists => (
-                "Locked",
-                "Unlocks the first time a saved login is needed, or here".into(),
-            ),
-            None => (
-                "No vault yet",
-                "Created the first time you save a password, or here".into(),
-            ),
+        let (status, detail) = vault_status(entries.as_ref().map(Vec::len), exists);
+        let Some(ui) = &self.vault_ui else {
+            // The page's fields are made when Vault is opened, but a Settings search draws
+            // every page without opening it: the status row alone, so "vault" still finds
+            // this section (its controls follow once the fields exist).
+            return w::page_column()
+                .child(w::page_header(&t, "Vault"))
+                .child(status_only(&t, status, detail));
         };
         // Only an open vault can be locked; a dimmed button that does nothing is noise.
         let lock = div().when(entries.is_some(), |el| {
@@ -441,4 +456,44 @@ fn field(input: &Entity<TextInput>, t: &crate::theme::Theme) -> impl IntoElement
         .overflow_hidden()
         .text_sm()
         .child(input.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings_search::Query;
+    use crate::theme::Theme;
+
+    /// How many rows of the Vault page a search for `words` lets through, built before the
+    /// page's fields exist (a search before Vault was ever opened).
+    fn rows_found(words: &str, saved: Option<usize>, exists: bool) -> usize {
+        let t = Theme::zeron_dark();
+        let Some(searching) = w::Searching::start(Query::new(words)) else {
+            return 0;
+        };
+        searching.page("Vault");
+        let (status, detail) = vault_status(saved, exists);
+        let _ = status_only(&t, status, detail);
+        searching.matched()
+    }
+
+    #[test]
+    fn a_locked_vault_is_found_by_searching_vault_before_its_page_was_opened() {
+        assert_eq!(rows_found("vault", None, true), 1);
+        assert_eq!(rows_found("vault locked", None, true), 1);
+        assert_eq!(rows_found("vault unlocks", None, true), 1);
+    }
+
+    #[test]
+    fn an_unlocked_or_missing_vault_is_found_too_and_other_words_are_not() {
+        assert_eq!(rows_found("vault", Some(2), true), 1);
+        assert_eq!(rows_found("vault", None, false), 1);
+        assert_eq!(rows_found("vault terminal", None, true), 0);
+    }
+
+    #[test]
+    fn the_status_never_says_what_the_vault_holds() {
+        assert_eq!(vault_status(Some(1), true).1, "1 saved secret");
+        assert_eq!(vault_status(Some(3), true).1, "3 saved secrets");
+    }
 }
