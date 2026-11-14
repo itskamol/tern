@@ -162,7 +162,7 @@ of both PNGs and parses the sidecar; no pixel is decoded. A miss, a truncated fi
 sidecar takes the previous path, which also writes the sidecar. The after-figure is measured by the
 lead, not recorded here.
 
-## 2026-11-12 — window drawables capped at 2 (#20, unmeasured)
+## 2026-11-12 — window drawables capped at 2 (#20)
 
 GPUI makes the window's `CAMetalLayer` with `maximumDrawableCount` 3 (`MetalRenderer::configure_layer`),
 once, and never replaces the layer or resets the count on resize, full screen or display change.
@@ -171,9 +171,27 @@ while the count holds), so the window never holds more than 2 window-sized IOSur
 less, about 18.6 MB at 1320x880 and about 31 MB full screen. The same-build A/B in #8 held
 IOSurface at 36 MB in 4 of 4 idle runs, against 54 MB in 3 of 8 for stock.
 
-Still to record here, with the window in front (`footprint -p`): IOSurface during the flood demo
-and a window resize never above 2 x the window size, and frame stats during a flood, a resize and
-a divider drag inside the limits above.
+Measured 2026-11-14 on a MacBook with a 1728x1117 built-in display, release build with the
+`dev-keys` feature, `TERN_FRAME_STATS=1`, window 1320x880 in front, one connected demo tab. The
+stock build was the same tree with `drawables::apply` skipped. Each ran the same scenes back to
+back: two `flood` bursts in the demo shell (20,000 wrapping log lines of 200-290 characters each,
+the demo server's `flood` command), a split, a held divider drag swept across the window, then a
+held drag of the window's corner. IOSurface was read with `footprint -p` once a second for 100 s.
+
+| | Capped at 2 | Stock (3) |
+| --- | --- | --- |
+| IOSurface, 100 samples | 32-36 MB | 25-54 MB |
+| Divider drag, busiest second | 61 frames; render worst 0.29 ms, terminal prepaint worst 4.0 ms | 65 frames; 0.33 ms, 4.6 ms |
+| Divider drag, first second | 32 frames; prepaint worst 8.5 ms | 41 frames; 7.0 ms |
+| Flood bursts | each drawn within a second; prepaint worst 1.1 ms | the same; 1.3 ms |
+| Window resize | 14 frames; prepaint worst 4.2 ms | 16 frames; 5.7 ms |
+| Footprint after the run | 160 MB | 158 MB |
+
+The capped window never went above 2 x its size (37.2 MB at 1320x880); stock reached the third
+buffer (54 MB). Frames and frame times are the same within run-to-run noise, and the worst frame
+in either was a new pane's first prepaint (12.7 ms capped, 14.8 ms stock), under a 60 Hz frame.
+One run each, read from the logs and screenshots rather than watched live; the resize was a short scripted drag, so it shows few
+frames; `frame_stats` times the CPU side of a frame (render and prepaint), not the GPU's present.
 
 ## 2026-11-12 — memory budget check at release (#22)
 

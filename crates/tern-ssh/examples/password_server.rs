@@ -16,7 +16,8 @@
 //!
 //! With `--demo` the shell is a canned Ubuntu box (`web-01`, all data made up) with a MOTD, a
 //! coloured prompt and a table of commands (`docker ps`, `htop`, `df -h`, `tail -f`, `sudo ...`),
-//! for taking README screenshots of tern.
+//! for taking README screenshots of tern. `flood [lines]` prints a burst of long, wrapping log
+//! lines (20,000 by default) for measuring a terminal under load (docs/perf.md).
 //!
 //! With `--otp 123456` it behaves like a 2FA server: the password is only the first step
 //! (partial success), then a keyboard-interactive "Verification code:" prompt with echo off
@@ -331,6 +332,33 @@ Last login: Mon Oct  5 18:03:22 2026 from 10.0.0.23
         s
     }
 
+    /// Lines `flood` prints when not told how many, and the most it prints: a burst for
+    /// measuring a terminal under load (docs/perf.md), bounded so a typo cannot fill memory.
+    const FLOOD_LINES: usize = 20_000;
+    const FLOOD_MAX: usize = 200_000;
+
+    /// `n` pm2-style log lines of 200 to 290 characters, wrapping at a laptop's width, all at
+    /// once: the output burst docs/perf.md measures under.
+    fn flood(n: usize) -> String {
+        let mut s = String::with_capacity(n * 300);
+        for i in 0..n {
+            let (c, level) = if i % 17 == 0 {
+                (YELLOW, "WARN")
+            } else {
+                (GREEN, "INFO")
+            };
+            let pad = "x".repeat(150 + (i * 37) % 90);
+            s.push_str(&format!(
+                "{DIM}2026-10-06T09:{:02}:{:02}Z{RESET} {c}{level:<5}{RESET} api|worker-{} job id={i} \
+                 path=/v1/orders/{i}/items trace={pad}\n",
+                (i / 60) % 60,
+                i % 60,
+                i % 8,
+            ));
+        }
+        s
+    }
+
     const PS: &str = "CONTAINER ID   IMAGE                COMMAND                  CREATED       STATUS                PORTS                                      NAMES
 3f9a1c7d2b10   acme/api:2.14.1      \"/app/api --serve\"      3 weeks ago   Up 3 weeks (healthy)  0.0.0.0:8080->8080/tcp                     api
 8c2e55a90d3f   acme/worker:2.14.1   \"/app/worker\"           3 weeks ago   Up 3 weeks                                                       worker
@@ -415,6 +443,12 @@ drwxrwxr-x 2 {u} {u} 4096 Sep 28 02:00 backups
             ),
             ("htop" | "top", _) => Reply::Text(top()),
             ("git", ["log", ..]) => text(GIT_LOG),
+            ("flood", a) => Reply::Text(flood(
+                a.first()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(FLOOD_LINES)
+                    .min(FLOOD_MAX),
+            )),
             _ => Reply::Text(format!("bash: {cmd}: command not found\n")),
         }
     }
@@ -455,6 +489,24 @@ drwxrwxr-x 2 {u} {u} 4096 Sep 28 02:00 backups
             let (good, _) = type_line(&mut sh, "hunter2");
             assert!(!good.contains("hunter2"));
             assert!(good.contains("postgres"), "{good:?}");
+        }
+
+        #[test]
+        fn flood_prints_the_lines_asked_for_long_enough_to_wrap_and_bounded() {
+            let (out, _) = type_line(&mut Shell::default(), "flood 300");
+            let lines: Vec<&str> = out.lines().filter(|l| l.contains("job id=")).collect();
+            assert_eq!(lines.len(), 300);
+            assert!(
+                lines.iter().all(|l| l.len() >= 200),
+                "every line wraps at 160 columns"
+            );
+            assert!(out.ends_with("$ "), "the prompt comes back");
+            let (huge, _) = type_line(&mut Shell::default(), "flood 999999999");
+            assert_eq!(
+                huge.lines().filter(|l| l.contains("job id=")).count(),
+                FLOOD_MAX,
+                "a typo cannot fill memory"
+            );
         }
 
         #[test]
