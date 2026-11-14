@@ -22,7 +22,10 @@ mod files_pick;
 mod files_tab;
 mod files_tab_copy;
 mod files_tab_edit;
+mod files_tab_model;
 mod files_tab_parts;
+#[cfg(test)]
+mod files_tab_tests;
 mod files_tab_view;
 mod files_text;
 mod forward_spec;

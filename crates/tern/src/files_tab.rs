@@ -8,15 +8,14 @@
 //! the panel is told when they are done. Copies go to the shell's transfer queue, which outlives
 //! this tab.
 
+pub use crate::files_tab_model::{State, Target};
 use std::sync::Arc;
 
 use gpui::{AppContext, Context, Entity, FocusHandle, Focusable, Subscription, WeakEntity};
-use tern_ssh::{
-    ConnectSpec, FileEntry, FileError, FileSource, HostEntry, LocalFs, SessionHandle, SftpFiles,
-};
+use tern_ssh::{ConnectSpec, FileEntry, FileSource, HostEntry, LocalFs, SessionHandle, SftpFiles};
 
-use crate::files_model::{Sort, SortKey, order};
-use crate::files_pick::Picked;
+use crate::files_model::SortKey;
+use crate::files_tab_model::{Ask, PanelModel, Reason};
 use crate::panel_login::{LoginEvent, PanelLogin, Step};
 use crate::password_command::Auth;
 use crate::shell::Shell;
@@ -24,96 +23,20 @@ use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::transfers::{Finished, Transfers};
 
-/// What a panel shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    Mac,
-    /// A host by its name in tern (or the `user@host` it was opened by).
-    Host(String),
-}
-
-impl Target {
-    pub fn label(&self) -> String {
-        match self {
-            Self::Mac => "This Mac".to_owned(),
-            Self::Host(alias) => alias.clone(),
-        }
-    }
-}
-
-/// Why a panel could not show a host's files, worded in one place.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reason {
-    /// The host stopped answering while the panel was open.
-    Gone,
-    /// The panel was asked for a name tern has no host for.
-    Unknown(String),
-    /// The host went away after the login; what it said, if anything.
-    Lost(String),
-    /// A host's or the login's own message, as it came.
-    Said(String),
-}
-
-impl Reason {
-    pub fn text(&self) -> String {
-        match self {
-            Self::Gone => "The host stopped answering.".to_owned(),
-            Self::Unknown(alias) => format!("{alias}: not a host tern knows"),
-            Self::Lost(why) if why.is_empty() => "The host went away.".to_owned(),
-            Self::Lost(why) => format!("The host went away: {why}"),
-            Self::Said(text) => text.clone(),
-        }
-    }
-}
-
-impl From<&FileError> for Reason {
-    fn from(e: &FileError) -> Self {
-        match e {
-            FileError::Closed => Self::Gone,
-            other => Self::Said(other.to_string()),
-        }
-    }
-}
-
-/// Where a panel stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum State {
-    /// Opening the connection, or answering its login questions.
-    Connecting,
-    Loading,
-    Ready,
-    /// Could not connect or list; Retry tries again.
-    Failed(Reason),
-    /// The host was there and went away; Reconnect starts over.
-    Dropped(Reason),
-}
-
+/// One panel: its model, and what only the window holds.
 pub struct Panel {
-    pub target: Target,
-    pub state: State,
-    pub cwd: String,
-    pub entries: Vec<FileEntry>,
-    pub sort: Sort,
-    pub selection: Picked,
+    pub model: PanelModel,
     pub path: Entity<TextInput>,
     pub source: Option<Arc<dyn FileSource>>,
     pub login: Option<Entity<PanelLogin>>,
-    pub notice: Option<String>,
-    /// Answers to older listings are dropped when a newer one was asked for.
-    pub(crate) generation: u64,
     _login: Option<Subscription>,
 }
 
-impl Panel {
-    /// The paths of the rows shown, top to bottom.
-    pub fn paths(&self) -> Vec<String> {
-        self.entries.iter().map(|e| e.path.clone()).collect()
-    }
+impl std::ops::Deref for Panel {
+    type Target = PanelModel;
 
-    /// The row last plainly clicked, if it is still listed.
-    pub fn anchor_row(&self) -> Option<usize> {
-        let anchor = self.selection.anchor()?;
-        self.entries.iter().position(|e| e.path == anchor)
+    fn deref(&self) -> &PanelModel {
+        &self.model
     }
 }
 
@@ -191,17 +114,10 @@ impl FilesView {
             let path = cx.new(|cx| TextInput::new("/", false, colors, cx));
             cx.observe(&path, |_, _, cx| cx.notify()).detach();
             Panel {
-                target,
-                state: State::Connecting,
-                cwd: String::new(),
-                entries: Vec::new(),
-                sort: Sort::default(),
-                selection: Picked::default(),
+                model: PanelModel::new(target),
                 path,
                 source: None,
                 login: None,
-                notice: None,
-                generation: 0,
                 _login: None,
             }
         };
@@ -249,8 +165,7 @@ impl FilesView {
     /// Shows `target` in panel `side`, starting from its home folder.
     pub fn set_target(&mut self, side: usize, target: Target, cx: &mut Context<Self>) {
         self.menu = None;
-        let p = &mut self.panels[side];
-        p.target = target;
+        self.panels[side].model.switch_to(target);
         self.connect(side, cx);
     }
 
@@ -292,25 +207,21 @@ impl FilesView {
 
     fn start(&mut self, side: usize, access: Option<HostAccess>, cx: &mut Context<Self>) {
         let p = &mut self.panels[side];
-        p.generation += 1;
+        p.model.start();
         p.login = None;
         p._login = None;
         p.source = None;
-        p.entries.clear();
-        p.cwd.clear();
-        p.selection.clear();
-        p.notice = None;
-        p.state = State::Connecting;
         cx.notify();
         let alias = match p.target.clone() {
             Target::Mac => {
                 p.source = Some(Arc::new(LocalFs::new()));
-                return self.go_home(side, cx);
+                let ask = p.model.files_open();
+                return self.run(side, ask, cx);
             }
             Target::Host(alias) => alias,
         };
         let Some(access) = access else {
-            self.panels[side].state = State::Failed(Reason::Unknown(alias));
+            self.panels[side].model.unknown_host(&alias);
             return;
         };
         match access.session.clone() {
@@ -333,7 +244,7 @@ impl FilesView {
                     }
                 }
                 LoginEvent::Dropped(why) => {
-                    this.panels[side].state = State::Dropped(Reason::Lost(why.clone()));
+                    this.panels[side].model.dropped(why.clone());
                 }
             }
             cx.notify();
@@ -354,124 +265,94 @@ impl FilesView {
         label: String,
         cx: &mut Context<Self>,
     ) {
-        let generation = self.panels[side].generation;
+        let ticket = self.panels[side].model.opening();
         let rt = self.rt.clone();
-        self.panels[side].state = State::Loading;
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let opened = rt.spawn(SftpFiles::open(label, handle)).await;
             let _ = this.update(cx, |this, cx| {
-                let p = &mut this.panels[side];
-                if p.generation != generation {
-                    return;
-                }
-                match opened {
+                let opened = match opened {
                     Ok(Ok(files)) => {
-                        p.source = Some(Arc::new(files));
-                        this.go_home(side, cx);
+                        this.panels[side].source = Some(Arc::new(files));
+                        Ok(())
                     }
                     Ok(Err(e)) => {
                         tracing::warn!(error = %e, "files_sftp_open_failed");
-                        p.state = State::Failed(Reason::Said(e.to_string()));
+                        Err(Reason::Said(e.to_string()))
                     }
-                    Err(_) => p.state = State::Failed(Reason::Gone),
+                    Err(_) => Err(Reason::Gone),
+                };
+                let ask = this.panels[side].model.opened(ticket, opened);
+                if let Some(ask) = ask {
+                    this.run(side, ask, cx);
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Does what the model asked of the panel's source, and tells it the answer.
+    fn run(&mut self, side: usize, ask: Ask, cx: &mut Context<Self>) {
+        let Some(source) = self.panels[side].source.clone() else {
+            return;
+        };
+        let rt = self.rt.clone();
+        cx.spawn(async move |this, cx| match ask {
+            Ask::Home(ticket) => {
+                let home = rt.spawn(async move { source.home().await }).await;
+                let _ = this.update(cx, |this, cx| {
+                    let next = this.panels[side].model.home(ticket, answer(home));
+                    if let Some(next) = next {
+                        this.run(side, next, cx);
+                    }
+                    cx.notify();
+                });
+            }
+            Ask::List(ticket, path) => {
+                let asked = path.clone();
+                let listed = rt.spawn(async move { source.list(&asked).await }).await;
+                let _ = this.update(cx, |this, cx| {
+                    let listed = answer(listed);
+                    match &listed {
+                        Ok(entries) => {
+                            tracing::info!(path = %path, count = entries.len(), "files_list");
+                        }
+                        Err(why) => tracing::warn!(reason = %why.text(), "files_list_failed"),
+                    }
+                    let p = &mut this.panels[side];
+                    if p.model.listed(ticket, &path, listed) {
+                        p.path.update(cx, |i, cx| i.set_text(path, cx));
+                    }
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
 
     pub fn go_home(&mut self, side: usize, cx: &mut Context<Self>) {
-        let Some(source) = self.panels[side].source.clone() else {
-            return;
-        };
-        let generation = self.panels[side].generation;
-        let rt = self.rt.clone();
-        cx.spawn(async move |this, cx| {
-            let home = rt.spawn(async move { source.home().await }).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.panels[side].generation != generation {
-                    return;
-                }
-                match home {
-                    Ok(Ok(home)) => this.go(side, home, cx),
-                    Ok(Err(e)) => this.failed(side, &e, cx),
-                    Err(_) => this.panels[side].state = State::Failed(Reason::Gone),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        if self.panels[side].source.is_some() {
+            let ask = self.panels[side].model.go_home();
+            self.run(side, ask, cx);
+        }
     }
 
-    /// Lists `path` and makes it the folder shown once the source answers; the old rows stay on
-    /// screen until then, so a slow host does not flash an empty list.
+    /// Lists `path` and makes it the folder shown once the source answers.
     pub fn go(&mut self, side: usize, path: String, cx: &mut Context<Self>) {
         let p = &mut self.panels[side];
-        let Some(source) = p.source.clone() else {
+        if p.source.is_none() {
             return;
-        };
-        p.generation += 1;
-        let generation = p.generation;
-        if p.entries.is_empty() {
-            p.state = State::Loading;
         }
-        p.notice = None;
         // The first folder after a login still shows what the login said.
         if !p.cwd.is_empty()
             && let Some(login) = p.login.clone()
         {
             login.update(cx, |l, cx| l.clear_note(cx));
         }
+        let ask = self.panels[side].model.open(path);
         cx.notify();
-        let rt = self.rt.clone();
-        let asked = path.clone();
-        cx.spawn(async move |this, cx| {
-            let listed = rt.spawn(async move { source.list(&asked).await }).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.panels[side].generation != generation {
-                    return;
-                }
-                match listed {
-                    Ok(Ok(mut entries)) => {
-                        tracing::info!(path = %path, count = entries.len(), "files_list");
-                        let p = &mut this.panels[side];
-                        order(&mut entries, p.sort);
-                        p.cwd = path.clone();
-                        p.entries = entries;
-                        p.selection.keep_only(&p.paths());
-                        p.state = State::Ready;
-                        p.path.update(cx, |i, cx| i.set_text(path, cx));
-                    }
-                    Ok(Err(e)) => this.listing_failed(side, &e, cx),
-                    Err(_) => this.panels[side].state = State::Failed(Reason::Gone),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// A listing failed: a gone connection is its own state; anything else stays a notice when
-    /// there is a folder to stay in.
-    fn listing_failed(&mut self, side: usize, e: &FileError, cx: &mut Context<Self>) {
-        tracing::warn!(error = %e, "files_list_failed");
-        if self.panels[side].cwd.is_empty() {
-            return self.failed(side, e, cx);
-        }
-        self.panels[side].notice = Some(Reason::from(e).text());
-        self.panels[side].state = if *e == FileError::Closed {
-            State::Dropped(Reason::Gone)
-        } else {
-            State::Ready
-        };
-    }
-
-    fn failed(&mut self, side: usize, e: &FileError, _cx: &mut Context<Self>) {
-        self.panels[side].state = match e {
-            FileError::Closed => State::Dropped(Reason::Gone),
-            other => State::Failed(Reason::from(other)),
-        };
+        self.run(side, ask, cx);
     }
 
     pub fn up(&mut self, side: usize, cx: &mut Context<Self>) {
@@ -504,19 +385,14 @@ impl FilesView {
     }
 
     pub fn sort_by(&mut self, side: usize, key: SortKey, cx: &mut Context<Self>) {
-        let p = &mut self.panels[side];
-        p.sort = p.sort.click(key);
-        order(&mut p.entries, p.sort);
+        self.panels[side].model.sort_by(key);
         cx.notify();
     }
 
     /// Up and down keys: move the pick by `delta` rows from the last one clicked.
     pub fn step(&mut self, side: usize, delta: isize, cx: &mut Context<Self>) {
-        let p = &mut self.panels[side];
-        if let Some(next) = crate::files_text::step(p.anchor_row(), delta, p.entries.len()) {
-            p.selection.only(&p.paths(), next);
-            cx.notify();
-        }
+        self.panels[side].model.step(delta);
+        cx.notify();
     }
 
     pub fn click_row(
@@ -528,19 +404,13 @@ impl FilesView {
         cx: &mut Context<Self>,
     ) {
         self.active = side;
-        let p = &mut self.panels[side];
-        p.selection.click(&p.paths(), ix, command, shift);
+        self.panels[side].model.click_row(ix, command, shift);
         cx.notify();
     }
 
     /// The rows picked in panel `side`, as entries.
     pub fn picked(&self, side: usize) -> Vec<FileEntry> {
-        let p = &self.panels[side];
-        p.entries
-            .iter()
-            .filter(|e| p.selection.contains(&e.path))
-            .cloned()
-            .collect()
+        self.panels[side].picked()
     }
 
     pub fn toggle_menu(&mut self, side: usize, cx: &mut Context<Self>) {
@@ -569,22 +439,11 @@ fn dev_spec(spec: ConnectSpec) -> ConnectSpec {
     spec
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_reason_is_worded_in_the_hosts_terms() {
-        assert_eq!(Reason::Gone.text(), "The host stopped answering.");
-        assert_eq!(Reason::from(&FileError::Closed).text(), Reason::Gone.text());
-        assert_eq!(
-            Reason::Unknown("web".into()).text(),
-            "web: not a host tern knows"
-        );
-        assert_eq!(
-            Reason::Lost("exit status 1".into()).text(),
-            "The host went away: exit status 1"
-        );
-        assert_eq!(Reason::Lost(String::new()).text(), "The host went away.");
-    }
+/// What a source answered, or why the call never came back.
+fn answer<T>(
+    joined: Result<Result<T, tern_ssh::FileError>, tokio::task::JoinError>,
+) -> Result<T, Reason> {
+    joined
+        .map_err(|_| Reason::Gone)?
+        .map_err(|e| Reason::from(&e))
 }
