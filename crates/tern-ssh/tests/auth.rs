@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
-use russh::server::{self, Auth, Msg, Response, Session};
+use russh::server::{self, Auth, Msg, Response, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use tern_ssh::{ChallengePrompt, ConnectSpec, Prompt, SecretString, SessionEvent, TermSize};
 
@@ -44,9 +44,13 @@ impl server::Handler for TestServer {
         })
     }
 
-    async fn auth_publickey(&mut self, _: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(
+        &mut self,
+        _: &str,
+        key: VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
         Ok(match &self.0 {
-            Want::Key(k) if k.key_data() == key.key_data() => Auth::Accept,
+            Want::Key(k) if k.key_data() == key.public_key.key_data() => Auth::Accept,
             _ => Auth::reject(),
         })
     }
