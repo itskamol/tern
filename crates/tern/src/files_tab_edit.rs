@@ -125,10 +125,11 @@ impl FilesView {
         cx.spawn(async move |this, cx| {
             change_then(&rt, source, what, work, |failure| {
                 let _ = this.update(cx, |this, cx| {
+                    this.refresh(side, cx);
+                    // After the refresh, which clears the notice line as listing starts.
                     if let Some(text) = failure {
                         this.panels[side].notice = Some(text);
                     }
-                    this.refresh(side, cx);
                 });
             })
             .await;
@@ -144,7 +145,72 @@ pub(crate) fn plain_name(name: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
+    use std::time::{Duration, Instant};
+
+    use gpui::{TestApp, WeakEntity};
+
     use super::*;
+    use crate::files_tab::{FilesView, State};
+    use crate::platform::SshRuntime;
+    use crate::theme::Theme;
+    use crate::transfers::Transfers;
+
+    #[test]
+    fn a_failed_change_stays_in_the_notice_line_after_the_folder_is_listed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let taken = dir.path().join("taken");
+        std::fs::create_dir(&taken).unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let mut app = TestApp::new();
+        let view = app.update(|cx| {
+            SshRuntime::install(cx).unwrap();
+            let rt = SshRuntime::handle(cx);
+            let transfers = cx.new(|cx| Transfers::new(rt, cx));
+            cx.new(|cx| {
+                FilesView::new(
+                    Vec::new(),
+                    None,
+                    transfers,
+                    WeakEntity::new_invalid(),
+                    Theme::zeron_dark(),
+                    cx,
+                )
+            })
+        });
+        let settle = |app: &mut TestApp, ready: &dyn Fn(&FilesView) -> bool| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < until {
+                app.run_until_parked();
+                if app.read(|cx| ready(view.read(cx))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("never ready");
+        };
+        app.update(|cx| view.update(cx, |v, cx| v.go(0, cwd.clone(), cx)));
+        settle(&mut app, &|v| {
+            v.panels[0].state == State::Ready && v.panels[0].cwd == cwd
+        });
+        let before = app.read(|cx| view.read(cx).panels[0].generation);
+        let path = taken.to_string_lossy().into_owned();
+        app.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.change(0, "make the folder", cx, move |s| {
+                    Box::pin(async move { s.mkdir(&path).await })
+                });
+            })
+        });
+        settle(&mut app, &|v| v.panels[0].generation > before);
+        // Let the listing the refresh asked for arrive.
+        settle(&mut app, &|v| v.panels[0].state == State::Ready);
+        let notice = app.read(|cx| view.read(cx).panels[0].notice.clone());
+        assert!(
+            notice.is_some_and(|n| n.starts_with("Could not make the folder: ")),
+            "the failure is shown"
+        );
+    }
 
     #[test]
     fn a_new_name_is_one_plain_name() {

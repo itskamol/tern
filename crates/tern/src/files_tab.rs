@@ -100,7 +100,7 @@ pub struct Panel {
     pub login: Option<Entity<PanelLogin>>,
     pub notice: Option<String>,
     /// Answers to older listings are dropped when a newer one was asked for.
-    generation: u64,
+    pub(crate) generation: u64,
     _login: Option<Subscription>,
 }
 
