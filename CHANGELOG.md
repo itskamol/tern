@@ -4,6 +4,8 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-14
+
 ### Added
 
 - Drag a row from the Files panel onto another pane, or onto a tab, to copy it into that pane's shell folder (else its home); hold ⌥ to move it instead. Dragging a picked row takes every picked row. ⌘C in the panel puts the picked rows on tern's own clipboard, and ⌘V in another pane's panel pastes them into the folder shown; a banner under the path says what is on the clipboard and where it would go, with Paste and Forget. A paste empties the clipboard; it is also forgotten when its pane closes or reconnects.
@@ -29,6 +31,10 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 - Searching Settings for "vault" finds the Vault section before it has been opened, locked or not; it shows the vault's status and the way to unlock it.
 - Keep both keeps a compressed file's type: `dump.sql.gz` becomes `dump 2.sql.gz` and `release.tar.gz` becomes `release 2.tar.gz`, not `dump.sql 2.gz`. A rotated log keeps its number: `api.log.1.gz` becomes `api.log.1 2.gz`. The same applies to `.bz2`, `.xz`, `.zst` and `.lz4`.
 - Activity Monitor no longer counts tern's own memory as GPU memory. The allocator labelled its memory "IOAccelerator"; it now shows as "App-Specific Tag 1".
+
+### Security
+
+- russh is 0.65.1, which fixes RUSTSEC-2026-0495 in its SSH agent server (a confirm-constrained key signed without asking). tern only talks to your agent as a client, so no tern release was exposed.
 
 ## [0.3.1] - 2026-11-12
 
@@ -232,7 +238,8 @@ The first release: a daily-driver SSH client for macOS.
 - Secrets are held as zeroizing `SecretString`s and never logged; session output is redacted from `Debug`.
 - RUSTSEC-2023-0071 in `rsa` (via russh) is accepted for now; see [SECURITY.md](SECURITY.md) and #16.
 
-[Unreleased]: https://github.com/itskamol/tern/compare/v0.3.1...main
+[Unreleased]: https://github.com/itskamol/tern/compare/v0.4.0...main
+[0.4.0]: https://github.com/itskamol/tern/releases/tag/v0.4.0
 [0.3.1]: https://github.com/itskamol/tern/releases/tag/v0.3.1
 [0.3.0]: https://github.com/itskamol/tern/releases/tag/v0.3.0
 [0.2.0]: https://github.com/itskamol/tern/releases/tag/v0.2.0

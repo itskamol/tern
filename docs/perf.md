@@ -275,3 +275,21 @@ and 24 ms at 100 ms (256 chunks), well under one round trip per chunk, so reques
 overlapping below the copy loop and the loop's own overlap hides little. Only a channel of 3 was
 tried. The seam test `a_write_error_stops_the_read_and_leaves_nothing_behind`
 (`tests/transfer_stop.rs`) stays: it passes on the serial loop too.
+
+## 2026-11-14 — 0.4.0 release check
+
+`scripts/measure-memory.sh` on the 0.4.0 bundle (release build of 10b3a53 bumped to 0.4.0) and on
+the installed 0.3.1 (`/Applications/tern.app`), one after the other on the same Mac, screen
+unlocked, the copy's window in view and nothing over it. Medians of 3 with the range, in MB:
+
+| Build | No tab | One tab | Peak, no vault | Vault peak |
+| --- | --- | --- | --- | --- |
+| 0.3.1 | 71 (71-72) | 83 (83-83) | 79 (79-83) | 338 (337-338) |
+| 0.4.0 | 71 (71-74) | 83 (83-83) | 79 (79-83) | 337 (337-338) |
+
+Every scene is within its ceiling and 0.4.0 matches 0.3.1, so the Files panel, Send to… and the
+transfer rows cost nothing measurable until used. No tab and one tab stay over their targets
+(70, 75), as in 0.3.1 today. Earlier tries the same day read 71-129 MB with no tab and 86-96 with
+one; each was taken while another app's window was being moved over and off the copies, and each
+try was refused before it finished (a window log every 2 s caught it on the last), so those
+readings are not counted.
