@@ -15,7 +15,8 @@ use tern_ssh::{
     ConnectSpec, FileEntry, FileError, FileSource, HostEntry, LocalFs, SessionHandle, SftpFiles,
 };
 
-use crate::files_model::{Selection, Sort, SortKey, order};
+use crate::files_model::{Sort, SortKey, order};
+use crate::files_pick::Picked;
 use crate::panel_login::{LoginEvent, PanelLogin, Step};
 use crate::password_command::Auth;
 use crate::shell::Shell;
@@ -93,14 +94,27 @@ pub struct Panel {
     pub cwd: String,
     pub entries: Vec<FileEntry>,
     pub sort: Sort,
-    pub selection: Selection,
+    pub selection: Picked,
     pub path: Entity<TextInput>,
     pub source: Option<Arc<dyn FileSource>>,
     pub login: Option<Entity<PanelLogin>>,
     pub notice: Option<String>,
     /// Answers to older listings are dropped when a newer one was asked for.
-    generation: u64,
+    pub(crate) generation: u64,
     _login: Option<Subscription>,
+}
+
+impl Panel {
+    /// The paths of the rows shown, top to bottom.
+    pub fn paths(&self) -> Vec<String> {
+        self.entries.iter().map(|e| e.path.clone()).collect()
+    }
+
+    /// The row last plainly clicked, if it is still listed.
+    pub fn anchor_row(&self) -> Option<usize> {
+        let anchor = self.selection.anchor()?;
+        self.entries.iter().position(|e| e.path == anchor)
+    }
 }
 
 /// What a host panel needs to open a connection, from the shell: the host's address and login
@@ -182,7 +196,7 @@ impl FilesView {
                 cwd: String::new(),
                 entries: Vec::new(),
                 sort: Sort::default(),
-                selection: Selection::default(),
+                selection: Picked::default(),
                 path,
                 source: None,
                 login: None,
@@ -344,18 +358,14 @@ impl FilesView {
         let rt = self.rt.clone();
         self.panels[side].state = State::Loading;
         cx.spawn(async move |this, cx| {
-            let opened = {
-                let handle = handle.clone();
-                rt.spawn(async move { handle.open_sftp().await }).await
-            };
+            let opened = rt.spawn(SftpFiles::open(label, handle)).await;
             let _ = this.update(cx, |this, cx| {
                 let p = &mut this.panels[side];
                 if p.generation != generation {
                     return;
                 }
                 match opened {
-                    Ok(Ok(sftp)) => {
-                        let files = SftpFiles::new(label, sftp).keeping(handle);
+                    Ok(Ok(files)) => {
                         p.source = Some(Arc::new(files));
                         this.go_home(side, cx);
                     }
@@ -429,7 +439,7 @@ impl FilesView {
                         order(&mut entries, p.sort);
                         p.cwd = path.clone();
                         p.entries = entries;
-                        p.selection.clear();
+                        p.selection.keep_only(&p.paths());
                         p.state = State::Ready;
                         p.path.update(cx, |i, cx| i.set_text(path, cx));
                     }
@@ -495,28 +505,16 @@ impl FilesView {
 
     pub fn sort_by(&mut self, side: usize, key: SortKey, cx: &mut Context<Self>) {
         let p = &mut self.panels[side];
-        let picked: Vec<String> = p
-            .selection
-            .rows()
-            .filter_map(|ix| p.entries.get(ix).map(|e| e.path.clone()))
-            .collect();
         p.sort = p.sort.click(key);
         order(&mut p.entries, p.sort);
-        // The same items stay picked in their new places.
-        p.selection.clear();
-        for (ix, e) in p.entries.iter().enumerate() {
-            if picked.contains(&e.path) {
-                p.selection.click(ix, true, false);
-            }
-        }
         cx.notify();
     }
 
     /// Up and down keys: move the pick by `delta` rows from the last one clicked.
     pub fn step(&mut self, side: usize, delta: isize, cx: &mut Context<Self>) {
         let p = &mut self.panels[side];
-        if let Some(next) = crate::files_text::step(p.selection.anchor(), delta, p.entries.len()) {
-            p.selection.only(next);
+        if let Some(next) = crate::files_text::step(p.anchor_row(), delta, p.entries.len()) {
+            p.selection.only(&p.paths(), next);
             cx.notify();
         }
     }
@@ -530,16 +528,18 @@ impl FilesView {
         cx: &mut Context<Self>,
     ) {
         self.active = side;
-        self.panels[side].selection.click(ix, command, shift);
+        let p = &mut self.panels[side];
+        p.selection.click(&p.paths(), ix, command, shift);
         cx.notify();
     }
 
     /// The rows picked in panel `side`, as entries.
     pub fn picked(&self, side: usize) -> Vec<FileEntry> {
         let p = &self.panels[side];
-        p.selection
-            .rows()
-            .filter_map(|ix| p.entries.get(ix).cloned())
+        p.entries
+            .iter()
+            .filter(|e| p.selection.contains(&e.path))
+            .cloned()
             .collect()
     }
 

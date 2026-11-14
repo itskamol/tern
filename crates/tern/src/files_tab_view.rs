@@ -77,7 +77,7 @@ impl FilesView {
             "down" if plain => self.step(side, 1, cx),
             "up" if plain => self.step(side, -1, cx),
             "enter" if plain => {
-                if let Some(ix) = self.panels[side].selection.anchor() {
+                if let Some(ix) = self.panels[side].anchor_row() {
                     self.open_row(side, ix, cx);
                 }
             }
@@ -618,7 +618,7 @@ impl FilesView {
         range
             .filter_map(|ix| p.entries.get(ix).map(|e| (ix, e.clone())))
             .map(|(ix, e)| {
-                let selected = p.selection.contains(ix);
+                let selected = p.selection.contains(&e.path);
                 let modified = e
                     .modified
                     .map(|m| files_text::modified(m, now))

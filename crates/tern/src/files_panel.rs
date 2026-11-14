@@ -260,10 +260,7 @@ impl FilesPanel {
         self.opening = Some((pane, epoch));
         let rt = self.rt.clone();
         cx.spawn(async move |this, cx| {
-            let opened = {
-                let handle = handle.clone();
-                rt.spawn(async move { handle.open_sftp().await }).await
-            };
+            let opened = rt.spawn(SftpFiles::open(label, handle)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.opening == Some((pane, epoch)) {
                     this.opening = None;
@@ -272,8 +269,7 @@ impl FilesPanel {
                     return this.update_listing(cx);
                 }
                 match opened {
-                    Ok(Ok(sftp)) => {
-                        let files = SftpFiles::new(label, sftp).keeping(handle);
+                    Ok(Ok(files)) => {
                         this.sources.insert(pane, (epoch, Arc::new(files)));
                         this.update_listing(cx);
                     }

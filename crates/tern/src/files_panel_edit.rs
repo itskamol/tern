@@ -8,6 +8,7 @@ use std::sync::Arc;
 use gpui::{AppContext as _, Context, Focusable as _, Window};
 use tern_ssh::{Call, FileEntry, FileSource, LocalFs};
 
+use crate::files_change::change_then;
 use crate::files_panel::FilesPanel;
 use crate::files_panel_model::Edit;
 use crate::files_panel_send::SendTo;
@@ -132,19 +133,16 @@ impl FilesPanel {
         };
         let rt = self.rt.clone();
         cx.spawn(async move |this, cx| {
-            let done = rt.spawn(work(source)).await;
-            let _ = this.update(cx, |this, cx| {
-                match done {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        tracing::warn!(error = %e, what, "files_panel_change_failed");
-                        this.alert(&format!("Could not {what}: {e}"), cx);
+            change_then(&rt, source, what, work, |failure| {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(text) = failure {
+                        this.alert(&text, cx);
                     }
-                    Err(_) => this.alert(&format!("Could not {what}"), cx),
-                }
-                this.model.clear_picked();
-                this.refresh(cx);
-            });
+                    this.model.clear_picked();
+                    this.refresh(cx);
+                });
+            })
+            .await;
         })
         .detach();
     }

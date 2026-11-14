@@ -300,27 +300,18 @@ fn a_closed_pane_is_forgotten_and_cannot_be_in_view() {
 }
 
 #[test]
-fn picking_follows_the_click_rules_and_goes_with_the_folder() {
+fn picking_goes_with_the_folder_and_a_new_listing_drops_it() {
     let mut m = one_pane();
-    let rows: Vec<String> = ["a", "b", "c", "d"].map(|n| format!("/x/{n}")).to_vec();
-    m.click_row(&rows, 1, false, false);
-    m.click_row(&rows, 3, false, true);
-    assert_eq!(m.picked(), ["/x/b", "/x/c", "/x/d"]);
-    m.click_row(&rows, 2, true, false);
-    assert!(!m.is_picked("/x/c") && m.is_picked("/x/b"));
-    // ⌘⇧ extends from the anchor and keeps what was picked.
-    m.click_row(&rows, 0, true, true);
-    assert_eq!(m.picked(), ["/x/a", "/x/b", "/x/c", "/x/d"]);
-    m.clear_picked();
-    assert!(m.picked().is_empty(), "a new listing drops the picks");
-    m.click_row(&rows, 2, false, false);
-    m.click_row(&rows, 1, true, false);
+    let rows: Vec<String> = ["a", "b"].map(|n| format!("/x/{n}")).to_vec();
     m.click_row(&rows, 0, false, false);
-    assert_eq!(m.picked(), ["/x/a"]);
+    m.click_row(&rows, 1, true, false);
+    assert_eq!(m.picked(), ["/x/a", "/x/b"]);
+    m.clear_picked();
+    assert!(m.picked().is_empty());
+    m.click_row(&rows, 0, false, false);
+    assert!(m.is_picked("/x/a"));
     m.open_folder("/y");
     assert!(m.picked().is_empty());
-    m.click_row(&rows, 9, false, false);
-    assert!(m.picked().is_empty(), "a row past the end picks nothing");
 }
 
 #[test]

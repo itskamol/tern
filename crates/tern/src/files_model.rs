@@ -1,7 +1,5 @@
-//! What a Files tab panel shows and picks, apart from the window: how its rows are ordered and
-//! which of them a click selects. Rows are the entries of the folder listed, in the order shown.
-
-use std::collections::BTreeSet;
+//! What a Files tab panel shows, apart from the window: how the entries of the folder listed are
+//! ordered.
 
 use tern_ssh::FileEntry;
 
@@ -59,67 +57,6 @@ pub fn order(entries: &mut [FileEntry], sort: Sort) {
             if sort.ascending { by } else { by.reverse() }
         })
     });
-}
-
-/// The rows picked: ⌘-click toggles one, ⇧-click extends from the last plain click.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Selection {
-    picked: BTreeSet<usize>,
-    anchor: Option<usize>,
-}
-
-impl Selection {
-    /// A click on row `ix`.
-    pub fn click(&mut self, ix: usize, command: bool, shift: bool) {
-        match (command, shift, self.anchor) {
-            (_, true, Some(anchor)) => {
-                let (from, to) = (anchor.min(ix), anchor.max(ix));
-                if !command {
-                    self.picked.clear();
-                }
-                self.picked.extend(from..=to);
-            }
-            (true, _, _) => {
-                if !self.picked.remove(&ix) {
-                    self.picked.insert(ix);
-                }
-                self.anchor = Some(ix);
-            }
-            _ => {
-                self.picked.clear();
-                self.picked.insert(ix);
-                self.anchor = Some(ix);
-            }
-        }
-    }
-
-    /// Row `ix` alone, as an arrow key picks it.
-    pub fn only(&mut self, ix: usize) {
-        self.click(ix, false, false);
-    }
-
-    pub fn clear(&mut self) {
-        self.picked.clear();
-        self.anchor = None;
-    }
-
-    pub fn contains(&self, ix: usize) -> bool {
-        self.picked.contains(&ix)
-    }
-
-    pub fn len(&self) -> usize {
-        self.picked.len()
-    }
-
-    /// The rows picked, top to bottom.
-    pub fn rows(&self) -> impl Iterator<Item = usize> + '_ {
-        self.picked.iter().copied()
-    }
-
-    /// The row an arrow key moves from: the last one clicked.
-    pub fn anchor(&self) -> Option<usize> {
-        self.anchor
-    }
 }
 
 #[cfg(test)]
@@ -197,33 +134,5 @@ mod tests {
         assert!(!flipped.ascending);
         let size = flipped.click(SortKey::Size);
         assert_eq!((size.key, size.ascending), (SortKey::Size, true));
-    }
-
-    #[test]
-    fn a_plain_click_picks_one_command_toggles_and_shift_extends_from_the_anchor() {
-        let mut s = Selection::default();
-        s.click(2, false, false);
-        s.click(5, true, false);
-        assert_eq!(s.rows().collect::<Vec<_>>(), [2, 5]);
-        s.click(2, true, false);
-        assert_eq!(s.rows().collect::<Vec<_>>(), [5]);
-        s.click(1, false, false);
-        s.click(4, false, true);
-        assert_eq!(
-            s.rows().collect::<Vec<_>>(),
-            [1, 2, 3, 4],
-            "shift replaces the old pick"
-        );
-        s.click(7, true, true);
-        assert_eq!(s.rows().collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7]);
-        s.clear();
-        assert!(s.rows().next().is_none() && s.anchor().is_none());
-    }
-
-    #[test]
-    fn shift_with_no_anchor_is_a_plain_click() {
-        let mut s = Selection::default();
-        s.click(3, false, true);
-        assert_eq!(s.rows().collect::<Vec<_>>(), [3]);
     }
 }

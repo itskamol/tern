@@ -205,8 +205,8 @@ impl FilesPanel {
                     let to: Arc<dyn FileSource> = match (open, dial) {
                         (Some(to), _) => to,
                         (None, Some((handle, label))) => {
-                            let sftp = handle.open_sftp().await.map_err(|e| e.to_string())?;
-                            Arc::new(SftpFiles::new(label, sftp).keeping(handle))
+                            let files = SftpFiles::open(label, handle).await;
+                            Arc::new(files.map_err(|e| e.to_string())?)
                         }
                         (None, None) => return Err("That pane is no longer connected".into()),
                     };
