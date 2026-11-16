@@ -3,8 +3,10 @@
 //! visual check can drive the app without taking keyboard focus from whatever window the person at
 //! the machine is using. Besides keys: `sleep-500` waits half a second (for a prompt to arrive);
 //! `type:text` types; `click:x,y`, `dblclick:x,y`, `rclick:x,y`, `scroll:x,y,dy` and
-//! `drag:x0,y0,x1,y1` act at window points; `hold:alt-cmd` leaves modifiers held (for what shows
-//! only while they are, like the ⌥⌘ pane numbers, so a screenshot can catch it) until `release`.
+//! `drag:x0,y0,x1,y1` act at window points, and with modifiers named first they act with those
+//! held (`cmd-click:x,y`, `shift-click:x,y`); `hold:alt-cmd` leaves modifiers held (for what
+//! shows only while they are, like the ⌥⌘ pane numbers, so a screenshot can catch it) until
+//! `release`.
 
 use std::time::Duration;
 
@@ -49,10 +51,7 @@ pub fn replay(window: WindowHandle<Shell>, cx: &mut App) {
                 continue;
             }
             if let Some(modifiers) = held(source) {
-                let event = PlatformInput::ModifiersChanged(ModifiersChangedEvent {
-                    modifiers,
-                    capslock: Capslock::default(),
-                });
+                let event = changed(modifiers);
                 let _ = cx.update_window(window.into(), |_, window, cx| {
                     window.dispatch_event(event, cx);
                 });
@@ -89,83 +88,112 @@ fn at(x: f32, y: f32) -> Point<gpui::Pixels> {
     point(px(x), px(y))
 }
 
-fn down(p: Point<gpui::Pixels>, clicks: usize) -> PlatformInput {
-    down_with(p, clicks, MouseButton::Left)
+/// A pointer at a window point with some modifiers held: the events one mouse token is made of.
+#[derive(Clone, Copy)]
+struct Pointer {
+    at: Point<gpui::Pixels>,
+    held: Modifiers,
 }
 
-fn down_with(p: Point<gpui::Pixels>, clicks: usize, button: MouseButton) -> PlatformInput {
-    PlatformInput::MouseDown(MouseDownEvent {
-        button,
-        position: p,
-        modifiers: Modifiers::default(),
-        click_count: clicks,
-        first_mouse: false,
+impl Pointer {
+    fn down(self, clicks: usize, button: MouseButton) -> PlatformInput {
+        PlatformInput::MouseDown(MouseDownEvent {
+            button,
+            position: self.at,
+            modifiers: self.held,
+            click_count: clicks,
+            first_mouse: false,
+        })
+    }
+
+    fn up(self, clicks: usize, button: MouseButton) -> PlatformInput {
+        PlatformInput::MouseUp(MouseUpEvent {
+            button,
+            position: self.at,
+            modifiers: self.held,
+            click_count: clicks,
+        })
+    }
+
+    fn moved(self, pressed: bool) -> PlatformInput {
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: self.at,
+            pressed_button: pressed.then_some(MouseButton::Left),
+            modifiers: self.held,
+        })
+    }
+}
+
+fn changed(modifiers: Modifiers) -> PlatformInput {
+    PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+        modifiers,
+        capslock: Capslock::default(),
     })
 }
 
-fn up(p: Point<gpui::Pixels>, clicks: usize) -> PlatformInput {
-    up_with(p, clicks, MouseButton::Left)
-}
-
-fn up_with(p: Point<gpui::Pixels>, clicks: usize, button: MouseButton) -> PlatformInput {
-    PlatformInput::MouseUp(MouseUpEvent {
-        button,
-        position: p,
-        modifiers: Modifiers::default(),
-        click_count: clicks,
-    })
-}
-
-fn moved(p: Point<gpui::Pixels>, pressed: bool) -> PlatformInput {
-    PlatformInput::MouseMove(MouseMoveEvent {
-        position: p,
-        pressed_button: pressed.then_some(MouseButton::Left),
-        modifiers: Modifiers::default(),
-    })
-}
-
-/// The window events for a `click:`, `dblclick:` or `drag:` token.
+/// The window events for a mouse token: `click:`, `dblclick:`, `rclick:`, `scroll:` or `drag:`,
+/// alone or after the modifiers it is made with (`cmd-click:`, `shift-cmd-click:`).
 fn mouse(token: &str) -> Option<Vec<PlatformInput>> {
     let (kind, args) = token.split_once(':')?;
+    let (held, kind) = match kind.rsplit_once('-') {
+        Some((names, kind)) => (modifiers(names)?, kind),
+        None => (Modifiers::default(), kind),
+    };
     let n: Vec<f32> = args.split(',').filter_map(|v| v.parse().ok()).collect();
-    match (kind, n.as_slice()) {
-        ("rclick", [x, y]) => Some(vec![
-            moved(at(*x, *y), false),
-            down_with(at(*x, *y), 1, MouseButton::Right),
-            up_with(at(*x, *y), 1, MouseButton::Right),
-        ]),
-        ("click", [x, y]) => Some(vec![
-            moved(at(*x, *y), false),
-            down(at(*x, *y), 1),
-            up(at(*x, *y), 1),
-        ]),
-        ("dblclick", [x, y]) => Some(vec![
-            moved(at(*x, *y), false),
-            down(at(*x, *y), 1),
-            up(at(*x, *y), 1),
-            down(at(*x, *y), 2),
-            up(at(*x, *y), 2),
-        ]),
-        ("scroll", [x, y, dy]) => Some(vec![
-            moved(at(*x, *y), false),
+    let p = |x: f32, y: f32| Pointer { at: at(x, y), held };
+    let left = MouseButton::Left;
+    let events = match (kind, n.as_slice()) {
+        ("rclick", [x, y]) => {
+            let p = p(*x, *y);
+            vec![
+                p.moved(false),
+                p.down(1, MouseButton::Right),
+                p.up(1, MouseButton::Right),
+            ]
+        }
+        ("click", [x, y]) => {
+            let p = p(*x, *y);
+            vec![p.moved(false), p.down(1, left), p.up(1, left)]
+        }
+        ("dblclick", [x, y]) => {
+            let p = p(*x, *y);
+            vec![
+                p.moved(false),
+                p.down(1, left),
+                p.up(1, left),
+                p.down(2, left),
+                p.up(2, left),
+            ]
+        }
+        ("scroll", [x, y, dy]) => vec![
+            p(*x, *y).moved(false),
             PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
                 position: at(*x, *y),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.), px(*dy))),
-                modifiers: Modifiers::default(),
+                modifiers: held,
                 touch_phase: gpui::TouchPhase::Moved,
             }),
-        ]),
+        ],
         ("drag", [x0, y0, x1, y1]) => {
-            let mut events = vec![moved(at(*x0, *y0), false), down(at(*x0, *y0), 1)];
+            let mut events = vec![p(*x0, *y0).moved(false), p(*x0, *y0).down(1, left)];
             for step in 1..=8 {
                 let f = step as f32 / 8.0;
-                events.push(moved(at(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f), true));
+                events.push(p(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f).moved(true));
             }
-            events.push(up(at(*x1, *y1), 1));
-            Some(events)
+            events.push(p(*x1, *y1).up(1, left));
+            events
         }
-        _ => None,
+        _ => return None,
+    };
+    if held == Modifiers::default() {
+        return Some(events);
     }
+    // The window is told the modifiers went down and came up, as it is for a real click: what
+    // reads them from the window, not from the click, sees them too.
+    let mut around = vec![changed(held)];
+    around.extend(events);
+    around.push(changed(Modifiers::default()));
+    Some(around)
 }
 
 /// The modifiers a `hold:` token leaves held (`hold:alt-cmd`), or none for `release`; `None` for
@@ -174,8 +202,13 @@ fn held(token: &str) -> Option<Modifiers> {
     if token == "release" {
         return Some(Modifiers::default());
     }
+    modifiers(token.strip_prefix("hold:")?)
+}
+
+/// The modifiers named in `alt-cmd`; `None` when a name is not a modifier.
+fn modifiers(names: &str) -> Option<Modifiers> {
     let mut m = Modifiers::default();
-    for name in token.strip_prefix("hold:")?.split('-') {
+    for name in names.split('-') {
         match name {
             "alt" | "option" => m.alt = true,
             "cmd" | "command" => m.platform = true,
@@ -190,6 +223,7 @@ fn held(token: &str) -> Option<Modifiers> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
     use super::*;
 
     #[test]
@@ -202,5 +236,41 @@ mod tests {
         assert_eq!(held("hold:alt-k"), None, "a key is not a modifier");
         assert_eq!(held("cmd-k"), None, "a keystroke is not a hold");
         assert_eq!(held("hold:"), None);
+    }
+
+    fn held_at_each(token: &str) -> Vec<Modifiers> {
+        mouse(token)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| match e {
+                PlatformInput::ModifiersChanged(e) => e.modifiers,
+                PlatformInput::MouseMove(e) => e.modifiers,
+                PlatformInput::MouseDown(e) => e.modifiers,
+                PlatformInput::MouseUp(e) => e.modifiers,
+                _ => panic!("not an event a click is made of"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_click_named_after_modifiers_is_made_with_them_held_and_lets_go_after() {
+        let none = Modifiers::default();
+        let cmd = Modifiers {
+            platform: true,
+            ..none
+        };
+        assert_eq!(held_at_each("click:10,20"), vec![none, none, none]);
+        assert_eq!(
+            held_at_each("cmd-click:10,20"),
+            vec![cmd, cmd, cmd, cmd, none],
+            "told of the modifier, moved, pressed, let go, told it is up"
+        );
+        let both = Modifiers { shift: true, ..cmd };
+        assert_eq!(held_at_each("shift-cmd-click:10,20")[1], both);
+        assert!(mouse("k-click:10,20").is_none(), "a key is not a modifier");
+        assert!(
+            mouse("cmd-click:10").is_none(),
+            "a click needs both of x and y"
+        );
     }
 }
