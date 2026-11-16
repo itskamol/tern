@@ -293,3 +293,18 @@ transfer rows cost nothing measurable until used. No tab and one tab stay over t
 one; each was taken while another app's window was being moved over and off the copies, and each
 try was refused before it finished (a window log every 2 s caught it on the last), so those
 readings are not counted.
+
+## 2026-11-16 — 0.4.1 release check
+
+`scripts/measure-memory.sh` on the 0.4.1 bundle (release build of 009f1d9 bumped to 0.4.1), screen
+unlocked, the copy's window in view and nothing over it. Medians of 3 with the range, in MB:
+
+| Build | No tab | One tab | Peak, no vault | Vault peak |
+| --- | --- | --- | --- | --- |
+| 0.4.0 | 71 (71-74) | 83 (83-83) | 79 (79-83) | 337 (337-338) |
+| 0.4.1 | 71 (71-72) | 83 (83-83) | 80 (79-83) | 337 (337-338) |
+
+Every scene is within its ceiling and 0.4.1 matches 0.4.0. No tab and one tab stay over their
+targets (70, 75), as before. Three earlier tries the same day were refused before they finished
+because another app's window covered the copy; one of them read 82-88 MB with no tab and 87-90
+with one, and those readings are not counted.

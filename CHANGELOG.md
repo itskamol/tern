@@ -4,6 +4,18 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-16
+
+### Changed
+
+- A Files tab keeps its picked rows when the folder is listed again, as the Files panel does. Rows that are gone drop out of the selection.
+- A password that came from the vault or from a password command is named the same way in a Session and in a Files tab: "From the vault: the password for …" or "From the command: the password". In a Files tab the line stays under the listing after it connects, until a failure, a selection or the next folder.
+
+### Fixed
+
+- In the Files panel the number of picked rows is the Name column's title ("2 selected"). In the footer it shared a row with the buttons and was cut to "1 s…" at the default width.
+- In a Files tab, a question that follows another in the same field takes the keyboard: after Enter on a new vault passphrase, "Repeat vault passphrase" (or a second prompt from the host) can be typed at once. Typing went nowhere until the field was clicked.
+
 ## [0.4.0] - 2026-11-14
 
 ### Added
@@ -238,7 +250,8 @@ The first release: a daily-driver SSH client for macOS.
 - Secrets are held as zeroizing `SecretString`s and never logged; session output is redacted from `Debug`.
 - RUSTSEC-2023-0071 in `rsa` (via russh) is accepted for now; see [SECURITY.md](SECURITY.md) and #16.
 
-[Unreleased]: https://github.com/itskamol/tern/compare/v0.4.0...main
+[Unreleased]: https://github.com/itskamol/tern/compare/v0.4.1...main
+[0.4.1]: https://github.com/itskamol/tern/releases/tag/v0.4.1
 [0.4.0]: https://github.com/itskamol/tern/releases/tag/v0.4.0
 [0.3.1]: https://github.com/itskamol/tern/releases/tag/v0.3.1
 [0.3.0]: https://github.com/itskamol/tern/releases/tag/v0.3.0
