@@ -124,6 +124,7 @@ does not. See `docs/ui.md` and the project memory on verifying by eye.
 
 ```sh
 cargo test --workspace                       # the suite
+scripts/test-gate.sh                         # the suite as the push gate runs it: a hung test is stopped and named
 cargo clippy --workspace --all-targets       # the craft gates
 cargo mutants -p tern-vault -p tern-sync     # prove the critical tests can fail
 cargo llvm-cov --workspace --branch          # branch coverage of the critical crates

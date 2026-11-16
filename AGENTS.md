@@ -10,6 +10,8 @@
 - Memory and frame budgets, and how to measure them: `docs/perf.md`.
 - Releases: `RELEASING.md`.
 - Remotes: `fork` (itskamol/tern) is where `main` is pushed; `origin` (your-moon/tern) is upstream.
+- CI does not run on the fork, so a red check there says nothing: before merging a pull request,
+  `scripts/check-merge.sh <number>` runs the push gates on the merged tree.
 
 ## Agent skills
 

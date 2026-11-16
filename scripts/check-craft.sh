@@ -5,9 +5,15 @@ cd "$(dirname "$0")/.."
 fail=0
 
 # 1. No god-files: production .rs files stay under 800 lines.
+touched=$(git diff --name-only "$(git merge-base HEAD main 2>/dev/null || echo HEAD)" 2>/dev/null || true)
 while read -r n f; do
   [[ "$f" == "total" ]] && continue
   if (( n > 800 )); then echo "file too long ($n > 800): $f"; fail=1; fi
+  # A warning, not a failure, and only for a file this change touches: the next addition is
+  # the one that has to split it, so the split is better planned now.
+  if (( n > 750 && n <= 800 )) && grep -qxF "$f" <<< "$touched"; then
+    echo "note: $f is at $n of 800 lines"
+  fi
 done < <(find crates -name '*.rs' -not -path '*/tests/*' -not -name '*_tests.rs' -print0 | xargs -0 wc -l)
 
 # 2. Every file with copied code names its origin.

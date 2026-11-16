@@ -33,7 +33,9 @@ tern is held to a higher bar than the projects it copies from. These rules are e
   Borrow instead of clone, `&str`/`&[u8]` in APIs, `#[must_use]` on handles and results that matter.
   GPUI entities for UI state, never `Arc<Mutex<_>>`. `cargo deny` gates licenses (GPL-compatible),
   advisories and sources.
-- **Verified by eye.** UI changes are checked by running the app and looking at a screenshot.
+- **Verified by eye.** UI changes are checked by running the app and looking at a screenshot
+  (`scripts/dev-check.sh`). A pull request that changes what a view draws or where the keyboard
+  goes carries that screenshot as its evidence; review sends it back without one.
 
 ## Style
 

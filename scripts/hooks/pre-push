@@ -8,7 +8,7 @@ refs=$(cat)
 export CARGO_INCREMENTAL=0
 echo "pre-push: fmt"     && cargo fmt --all --check
 echo "pre-push: clippy"  && cargo clippy -q --workspace --all-targets -- -D warnings
-echo "pre-push: test"    && cargo test -q --workspace >/dev/null
+echo "pre-push: test"    && scripts/test-gate.sh
 echo "pre-push: craft"   && scripts/check-craft.sh
 if command -v cargo-deny >/dev/null; then echo "pre-push: deny" && cargo deny check -s 2>/dev/null; fi
 
