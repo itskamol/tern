@@ -13,7 +13,7 @@ Download). Each covers the terminal's top lines for 4 s, so "Copied 3 files" get
 - **Alert** is a failure, or a message with one action. It stays a snackbar, moved from the top
   centre to the top right under the titlebar. It stays at the top so the terminal's live last lines
   stay clear, and at the edge so it covers less.
-- **Decision** is a question tern cannot go on without. A card that stays until answered.
+- **Decision** is a question tern cannot go on without. A card that stays until answered, or until the caller cancels or its deadline expires (such as an Agent request; see ADR 0003).
 
 ## Considered options
 

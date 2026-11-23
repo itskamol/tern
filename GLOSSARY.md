@@ -74,7 +74,7 @@ A message the person should see now: a failure, or one with a single action such
 _Avoid_: toast, snackbar, error popup
 
 **Decision**:
-A question tern cannot go on without, such as letting a host set the clipboard; it stays until answered.
+A question tern cannot go on without, such as letting a host set the clipboard or an Agent act on a Host; it stays until answered, cancelled, or expired.
 _Avoid_: modal, prompt, confirm dialog
 
 ## At the prompt
@@ -86,3 +86,13 @@ _Avoid_: shell history (that is the server's own `~/.bash_history`), log
 **Fill**:
 Typing a saved password into the remote's prompt, once, when the person presses the key for it.
 _Avoid_: autofill, auto-type
+
+## Agents
+
+**Agent**:
+A local external caller that asks tern to operate on a Host.
+_Avoid_: MCP client, integration, bot
+
+**Grant**:
+An in-memory approval letting Agents repeat an allowed operation on a Host without raising a Decision again until the Mac locks, sleeps, or tern quits.
+_Avoid_: permission, rule, allowance
