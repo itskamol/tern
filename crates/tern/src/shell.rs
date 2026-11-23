@@ -55,6 +55,8 @@ actions!(
     ]
 );
 
+#[path = "shell_agents.rs"]
+mod agents_ui;
 #[path = "shell_broadcast.rs"]
 mod broadcast_ui;
 #[path = "shell_files_panel.rs"]
@@ -187,6 +189,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 vault_ui: None,
                 last_input: std::time::Instant::now(),
                 activity: messages_ui::ActivityUi::default(),
+                agents: agents_ui::AgentsUi::default(),
                 tab_scroll: tabs::StripScroll::default(),
                 context_menu: None,
                 hostlist: hostlist::HostList::new(&theme, recent, cx),
@@ -255,6 +258,7 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
         .detach();
         shell.check_for_updates(cx);
         shell.start_auto_sync(window, cx);
+        shell.start_agents(cx);
     })?;
     // With no tab open nothing else holds focus, and gpui only dispatches key bindings along
     // the focused element's path, so the shell itself must be focused for ⌘T to work.
@@ -319,6 +323,7 @@ pub struct Shell {
     last_input: std::time::Instant,
     /// Activity and Alerts raised so far, and the Activity list.
     activity: messages_ui::ActivityUi,
+    agents: agents_ui::AgentsUi,
     tab_scroll: tabs::StripScroll,
     context_menu: Option<menu::ContextMenu>,
     hostlist: hostlist::HostList,
