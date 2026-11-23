@@ -3,39 +3,26 @@
 // CrabPort crabport-ssh/src/backend.rs (Apache-2.0) for the overall auth ordering.
 // Adapted from russh russh/examples/client_exec_interactive.rs (Apache-2.0) for the
 // `agent_forward` request; the channel proxy follows `ssh(1)` agent forwarding (PROTOCOL.agent).
-// Adapted from russh russh/examples/client_open_direct_tcpip.rs (Apache-2.0): direct-tcpip
-// channel, then a handshake over its stream, repeated once per hop.
-//! Agent forwarding: the server opens `auth-agent@openssh.com` channels, and each one is wired to
-//! the local agent socket, so the remote side can sign with keys that never leave this machine.
-//!
-//! ProxyJump: each hop is a full SSH login, and the next connection runs inside a direct-tcpip
-//! channel of the one before, as `ssh -J` does (russh `channel_open_direct_tcpip`, then a new
-//! handshake over `Channel::into_stream`, after russh `examples/client_open_direct_tcpip.rs`).
+//! Authentication (`none`, ssh-agent, in-memory vault keys, identity files, keyboard-interactive,
+//! password) and agent forwarding (`auth-agent@openssh.com` channels bridged to the local agent
+//! socket so keys never leave this machine).
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::channel::oneshot;
-use russh::client::{self, AuthResult, KeyboardInteractiveAuthResponse};
+use russh::Channel;
+use russh::client::{self, AuthResult, KeyboardInteractiveAuthResponse, Msg};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
 use russh::{MethodKind, MethodSet};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::error::{Cause, Error, Failure};
-use crate::hostkey::{Asking, Handler, within};
-use crate::{ChallengePrompt, ConnectSpec, MemoryKey, Prompt, SessionEvent};
-use std::ffi::OsStr;
-
-use russh::Channel;
-use russh::client::Handle;
-use russh::client::Msg;
-use tokio::io::{AsyncRead, AsyncWrite};
-
-use crate::config;
-use crate::forward::RemoteTargets;
-use crate::session::{CONNECT_TIMEOUT, client_config, connect_failure};
+use crate::error::Failure;
+use crate::hostkey::Handler;
+use crate::{ChallengePrompt, MemoryKey, Prompt, SessionEvent};
 
 const MAX_TRIES: usize = 3;
 
@@ -502,100 +489,6 @@ pub(crate) async fn bridge(channel: Channel<Msg>, socket: PathBuf) {
             let _ = channel.close().await;
         }
     }
-}
-
-/// A byte stream both ways; russh's channel stream type is not public.
-pub(crate) trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
-
-/// The logged-in jump hosts (kept alive by being held) and a stream to the final target.
-pub(crate) struct Chain {
-    pub hops: Vec<Handle<Handler>>,
-    pub stream: Box<dyn Duplex>,
-}
-
-/// Logs in to every hop in order, then opens a channel from the last one to `spec.host:port`.
-/// Host keys and credentials are checked per hop; prompts name the hop they are about.
-pub(crate) async fn open_jump_chain(
-    spec: &ConnectSpec,
-    events: &async_channel::Sender<SessionEvent>,
-) -> Result<Chain, Failure> {
-    let mut hops: Vec<Handle<Handler>> = Vec::new();
-    for hop in &spec.proxy_jump {
-        if hop.port == 0 {
-            return Err(Failure::BadJump(hop.host.clone()));
-        }
-        let label = format!("{}:{}", hop.host, hop.port);
-        let wrap = |f: Failure| Failure::Jump(label.clone(), Box::new(f));
-        let asking = Asking::default();
-        let handler = Handler {
-            host: hop.host.clone(),
-            port: hop.port,
-            known_hosts: spec.known_hosts.clone(),
-            events: events.clone(),
-            cause: Cause::default(),
-            remote: RemoteTargets::default(),
-            agent_socket: None,
-            asking: asking.clone(),
-        };
-        let cfg = client_config(spec, &hop.host, hop.port);
-        let connecting = async {
-            match hops.last() {
-                None => client::connect(cfg, (hop.host.as_str(), hop.port), handler).await,
-                Some(prev) => {
-                    let ch = open_channel(prev, &hop.host, hop.port).await?;
-                    client::connect_stream(cfg, ch.into_stream(), handler).await
-                }
-            }
-        };
-        let mut session = within(CONNECT_TIMEOUT, &asking, connecting)
-            .await
-            .ok_or_else(|| wrap(Failure::ConnectTimeout))?
-            .map_err(|e| wrap(connect_failure(e, &hop.host, hop.port)))?;
-        let user = hop
-            .user
-            .clone()
-            .or_else(config::local_user)
-            .ok_or_else(|| wrap(Failure::Transport(Error::NoLocalUser.to_string())))?;
-        Authenticator::new(
-            &mut session,
-            &user,
-            &hop.host,
-            hop.identity_files.clone(),
-            events,
-        )
-        .run()
-        .await
-        .map_err(wrap)?;
-        tracing::info!(host = %hop.host, port = hop.port, "ssh_jump_connected");
-        hops.push(session);
-    }
-    let last = hops.last().ok_or(Failure::UiGone)?;
-    let label = format!("{}:{}", spec.proxy_jump.last().map_or("", |h| &h.host), {
-        spec.proxy_jump.last().map_or(0, |h| h.port)
-    });
-    let ch = open_channel(last, &spec.host, spec.port)
-        .await
-        .map_err(|f| Failure::Jump(label, Box::new(f)))?;
-    Ok(Chain {
-        hops,
-        stream: Box::new(ch.into_stream()),
-    })
-}
-
-async fn open_channel(
-    from: &Handle<Handler>,
-    host: &str,
-    port: u16,
-) -> Result<Channel<Msg>, Failure> {
-    from.channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
-        .await
-        .map_err(|e| match e {
-            russh::Error::ChannelOpenFailure(_) => {
-                Failure::Transport(format!("it could not open a connection to {host}:{port}"))
-            }
-            other => other.into(),
-        })
 }
 
 #[cfg(test)]

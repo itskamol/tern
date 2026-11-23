@@ -1,48 +1,39 @@
 // Adapted from russh russh/examples/client_exec_interactive.rs (Apache-2.0) for the
 // PTY/shell/event loop, and from CrabPort crabport-ssh/src/backend.rs (Apache-2.0)
-// for window_change handling and protocol-level keepalive.
+// for window_change handling.
 //! Remote output on its way to the UI, coalesced and bounded. While the outbox is full the
 //! session stops reading the channel, so russh stops reading the socket (backpressure).
 //!
 //! Round-trip time of the live connection, probed with our own `keepalive@openssh.com`
 //! global request so it does not depend on the user's ServerAliveInterval (often off).
 
-use std::borrow::Cow;
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::oneshot;
+use russh::ChannelMsg;
 use russh::client::{self, Handle};
-use russh::{ChannelMsg, Disconnect as SshDisconnect, Preferred};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Child;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::authn::{self, Authenticator};
-use crate::config;
+use crate::connect::{AuthenticatedConnection, ConnectOptions};
 use crate::error::{Cause, Failure, classify};
 use crate::forward::{self, Registry};
-use crate::hostkey::{Asking, Handler, known_algorithms, within};
 use crate::sftp;
 use crate::{
     ConnectSpec, Disconnect, Forward, ForwardError, ForwardInfo, SessionEvent, Sftp, SftpError,
     TermSize,
 };
-use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
-use tokio::task::JoinHandle;
 
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long to wait for russh to say why a connection that went quiet has died.
 const CAUSE_GRACE: Duration = Duration::from_millis(500);
 /// After exit-status, how long to wait for the server to close the channel.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 const TERM: &str = "xterm-256color";
-/// Unread SSH messages russh buffers per channel before it stops reading the socket.
-/// russh's default is 100; at up to 32 KiB a packet that is 3 MiB per session.
-const CHANNEL_BUFFER: usize = 16;
 
 #[derive(Debug)]
 pub(crate) enum Command {
@@ -120,105 +111,6 @@ pub(crate) async fn run(
         .await;
 }
 
-/// The proxy's first stderr line, which says why it failed when it does.
-#[derive(Clone, Default)]
-struct ProxyReason(Arc<std::sync::Mutex<Option<String>>>);
-
-impl ProxyReason {
-    fn get(&self) -> Option<String> {
-        self.0.lock().ok().and_then(|s| s.clone())
-    }
-}
-
-/// The ProxyCommand wrapped in the platform shell: `sh -c` on Unix, `cmd /C` on Windows.
-fn proxy_shell(cmd: &str) -> tokio::process::Command {
-    #[cfg(unix)]
-    {
-        let mut shell = tokio::process::Command::new("sh");
-        shell.arg("-c").arg(cmd);
-        shell
-    }
-    #[cfg(windows)]
-    {
-        /// `CREATE_NO_WINDOW`: no console window flashes up for a GUI app.
-        const NO_WINDOW: u32 = 0x0800_0000;
-        let mut shell = tokio::process::Command::new("cmd");
-        // `raw_arg`: cmd parses its own command line, so Rust's quoting must not touch it.
-        shell.arg("/C").raw_arg(cmd).creation_flags(NO_WINDOW);
-        shell
-    }
-}
-
-/// ProxyCommand transport: the child's stdio is the byte stream.
-fn spawn_proxy(
-    cmd: &str,
-) -> Result<
-    (
-        Child,
-        impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-        ProxyReason,
-    ),
-    Failure,
-> {
-    let mut shell = proxy_shell(cmd);
-    let mut child = shell
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| Failure::Proxy(e.to_string()))?;
-    let (Some(stdin), Some(stdout), Some(stderr)) =
-        (child.stdin.take(), child.stdout.take(), child.stderr.take())
-    else {
-        return Err(Failure::Proxy("stdio unavailable".into()));
-    };
-    let reason = ProxyReason::default();
-    let first = reason.clone();
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(proxy_stderr = %line, "ssh_proxy_stderr");
-            // The first line is usually the error; what follows tends to be usage text.
-            if let Ok(mut slot) = first.0.lock()
-                && slot.is_none()
-                && !line.trim().is_empty()
-            {
-                *slot = Some(line.trim().to_owned());
-            }
-        }
-    });
-    Ok((child, tokio::io::join(stdout, stdin), reason))
-}
-
-/// The russh settings for one connection: keep-alive from the spec, and the host key types
-/// already in known_hosts for `host:port` asked for first.
-pub(crate) fn client_config(spec: &ConnectSpec, host: &str, port: u16) -> Arc<client::Config> {
-    let mut preferred = Preferred::default();
-    let known = known_algorithms(host, port, spec.known_hosts.as_deref());
-    if !known.is_empty() {
-        let mut keys = known;
-        let rest: Vec<_> = preferred
-            .key
-            .iter()
-            .filter(|a| !keys.contains(a))
-            .cloned()
-            .collect();
-        keys.extend(rest);
-        preferred.key = Cow::Owned(keys);
-    }
-    Arc::new(client::Config {
-        // OpenSSH: an interval of 0 turns keep-alives off; a count of 0 never gives up (russh
-        // reads 0 the same way).
-        keepalive_interval: Some(spec.server_alive_interval).filter(|d| !d.is_zero()),
-        keepalive_max: spec.server_alive_count_max as usize,
-        nodelay: true,
-        channel_buffer_size: CHANNEL_BUFFER,
-        preferred,
-        ..Default::default()
-    })
-}
-
 async fn run_inner(
     spec: &ConnectSpec,
     size: Option<TermSize>,
@@ -228,77 +120,24 @@ async fn run_inner(
     handshaken: &mut bool,
     forwards: &Arc<Registry>,
 ) -> Result<Outcome, Failure> {
-    let shell = size.is_some();
-    // A files-only connection has no shell for a server to ask the agent through.
-    let agent_socket = authn::socket_for(shell && spec.forward_agent, spec.agent_socket.as_deref());
-    let asking = Asking::default();
-    let handler = Handler {
-        host: spec.host.clone(),
-        port: spec.port,
-        known_hosts: spec.known_hosts.clone(),
-        events: events.clone(),
-        cause: cause.clone(),
-        remote: forwards.remote_targets.clone(),
-        agent_socket: agent_socket.clone(),
-        asking: asking.clone(),
-    };
-
-    let cfg = client_config(spec, &spec.host, spec.port);
-
-    tracing::info!(host = %spec.host, port = spec.port, user = %spec.user, "ssh_connecting");
-    // Jump hosts are logged in to first; their connections stay open for the whole session.
-    let mut _hops = Vec::new();
-    let mut jump_stream = None;
-    if !spec.proxy_jump.is_empty() {
-        let chain = authn::open_jump_chain(spec, events).await?;
-        _hops = chain.hops;
-        jump_stream = Some(chain.stream);
-    }
-    let proxy = spec.proxy_command.as_deref();
-    // Held for the whole session so the proxy process lives as long as the connection.
-    let mut _proxy_child: Option<Child> = None;
-    let mut proxy_reason: Option<ProxyReason> = None;
-    let connecting = async {
-        if let Some(stream) = jump_stream.take() {
-            return Ok(client::connect_stream(cfg, stream, handler).await);
-        }
-        match proxy {
-            Some(cmd) => {
-                let cmd = config::expand_proxy_command(cmd, &spec.host, spec.port, &spec.user);
-                tracing::debug!("ssh_proxy_command_start");
-                let (child, stream, reason) = spawn_proxy(&cmd)?;
-                _proxy_child = Some(child);
-                proxy_reason = Some(reason);
-                Ok(client::connect_stream(cfg, stream, handler).await)
-            }
-            None => Ok::<_, Failure>(
-                client::connect(cfg, (spec.host.as_str(), spec.port), handler).await,
-            ),
-        }
-    };
-    let connected = within(CONNECT_TIMEOUT, &asking, connecting)
-        .await
-        .ok_or(Failure::ConnectTimeout)??;
-    let mut session = match connected {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(proxy_exit(&mut _proxy_child, proxy_reason.as_ref())
-                .unwrap_or_else(|| connect_failure(e, &spec.host, spec.port)));
-        }
-    };
-
-    let identity_files = spec.identity_files.clone();
-    Authenticator::new(&mut session, &spec.user, &spec.host, identity_files, events)
-        .with_memory_keys(spec.memory_keys.clone())
-        .run()
-        .await?;
+    let conn = AuthenticatedConnection::open(
+        spec,
+        ConnectOptions {
+            // A files-only connection has no shell for a server to ask the agent through.
+            allow_agent_forwarding: size.is_some(),
+            remote_targets: forwards.remote_targets.clone(),
+            cause: cause.clone(),
+        },
+        events,
+    )
+    .await?;
 
     *handshaken = true;
-    let session = Arc::new(session);
+    let session = conn.session();
     let mut channel = None;
     if let Some(size) = size {
         let opened = session.channel_open_session().await?;
-        if agent_socket.is_some() {
+        if conn.agent_forwarding() {
             // No reply wanted: a refusal would arrive as a channel failure and read as a refused shell.
             opened.agent_forward(false).await?;
         }
@@ -422,77 +261,13 @@ async fn run_inner(
             .await
             .unwrap_or(Disconnect::ServerClosed),
     };
-    disconnect(&session).await;
+    drop(_latency);
+    conn.disconnect().await;
     Ok(Outcome {
         exit_status,
         error,
         reason,
     })
-}
-
-/// A proxy that died during the handshake explains the failure better than russh's
-/// "Disconnected".
-fn proxy_exit(child: &mut Option<Child>, reason: Option<&ProxyReason>) -> Option<Failure> {
-    let status = child.as_mut()?.try_wait().ok()??;
-    Some(Failure::Proxy(
-        reason
-            .and_then(ProxyReason::get)
-            .unwrap_or_else(|| status.to_string()),
-    ))
-}
-
-/// A connect error in words a person can act on, naming where tern tried to go.
-pub(crate) fn connect_failure(e: Failure, host: &str, port: u16) -> Failure {
-    match e {
-        Failure::Io(io) => Failure::Unreachable(describe_io(&io, host, port)),
-        other => other,
-    }
-}
-
-pub(crate) fn describe_io(e: &std::io::Error, host: &str, port: u16) -> String {
-    use std::io::ErrorKind as K;
-    let text = e.to_string();
-    match e.kind() {
-        K::ConnectionRefused => {
-            format!("{host}:{port} refused the connection (is an SSH server running there?)")
-        }
-        K::TimedOut => format!("{host}:{port} did not answer"),
-        K::HostUnreachable | K::NetworkUnreachable => format!("no route to {host}"),
-        K::ConnectionReset => format!("{host}:{port} closed the connection"),
-        _ if text.contains("lookup address") || text.contains("nodename nor servname") => {
-            format!("could not find host {host}")
-        }
-        _ => text,
-    }
-}
-
-async fn disconnect(session: &Handle<Handler>) {
-    let _ = session
-        .disconnect(SshDisconnect::ByApplication, "", "en")
-        .await;
-}
-
-#[cfg(test)]
-mod describe_tests {
-    use super::describe_io;
-    use std::io::{Error, ErrorKind};
-
-    #[test]
-    fn common_failures_read_as_sentences_naming_the_target() {
-        let refused = Error::from(ErrorKind::ConnectionRefused);
-        assert_eq!(
-            describe_io(&refused, "10.0.0.5", 2222),
-            "10.0.0.5:2222 refused the connection (is an SSH server running there?)"
-        );
-        let dns =
-            Error::other("failed to lookup address information: nodename nor servname provided");
-        assert_eq!(
-            describe_io(&dns, "nope.example", 22),
-            "could not find host nope.example"
-        );
-        let odd = Error::other("something else");
-        assert_eq!(describe_io(&odd, "h", 22), "something else");
-    }
 }
 
 /// Largest coalesced chunk handed to the UI in one [`SessionEvent::Data`].
