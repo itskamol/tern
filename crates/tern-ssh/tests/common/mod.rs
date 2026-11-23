@@ -8,10 +8,11 @@ pub mod sftp;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use russh::keys::{Algorithm, PrivateKey};
+use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Msg, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use tern_ssh::{ConnectSpec, Disconnect, Prompt, SessionEvent, SessionHandle, TermSize};
@@ -234,12 +235,25 @@ async fn pipe(mut tcp: TcpStream, channel: Channel<Msg>) {
 
 pub struct Server {
     pub port: u16,
+    /// Host public key presented by this server during key exchange.
+    pub host_key: PublicKey,
+    /// Number of currently live SSH client connections on this server.
+    pub active: Arc<AtomicUsize>,
     /// How agent channels the server opened ended up: the bytes echoed back, or `refused`.
     pub agent_log: Arc<Mutex<Vec<String>>>,
     /// Direct-tcpip targets this server was asked to open.
     pub opened: Arc<Mutex<Vec<String>>>,
     /// `pty`, `shell` and `agent` requests received, in order.
     pub requests: Arc<Mutex<Vec<&'static str>>>,
+}
+
+/// Decrements a server's active-connection counter when a client stream finishes.
+struct ActiveGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 pub async fn serve(shell: Shell) -> Server {
@@ -256,15 +270,19 @@ pub async fn serve_sftp(sftp_root: PathBuf) -> Server {
 }
 
 async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>) -> Server {
+    let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+    let host_key = key.public_key().clone();
     let config = Arc::new(server::Config {
         methods: MethodSet::from(&[MethodKind::None][..]),
         auth_rejection_time: Duration::ZERO,
         auth_rejection_time_initial: Some(Duration::ZERO),
-        keys: vec![PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()],
+        keys: vec![key],
         ..Default::default()
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let active = Arc::new(AtomicUsize::new(0));
+    let active_counter = active.clone();
     let opened = Arc::new(Mutex::new(Vec::new()));
     let log = opened.clone();
     let agent_log = Arc::new(Mutex::new(Vec::new()));
@@ -285,7 +303,10 @@ async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>)
                 requests: seen.clone(),
             };
             let config = config.clone();
+            let counter = active_counter.clone();
+            counter.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
+                let _guard = ActiveGuard(counter);
                 if let Ok(running) = server::run_stream(config, stream, handler).await {
                     let _ = running.await;
                 }
@@ -294,9 +315,24 @@ async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>)
     });
     Server {
         port,
+        host_key,
+        active,
         agent_log,
         opened,
         requests,
+    }
+}
+
+/// Polls until `active` reaches `want`, failing if it takes longer than 5 seconds.
+pub async fn wait_active(active: &AtomicUsize, want: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while active.load(Ordering::SeqCst) != want {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected {want} active connections, still {}",
+            active.load(Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
