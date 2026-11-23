@@ -207,6 +207,11 @@ impl<W> Gate<W> {
         self.in_flight
     }
 
+    #[cfg(test)]
+    pub(crate) fn tried(&self) -> bool {
+        self.tried
+    }
+
     pub(crate) fn need(&mut self, enabled: bool, locked: bool, waiter: W) -> Need {
         if self.in_flight {
             self.waiting.push(waiter);
