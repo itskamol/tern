@@ -26,7 +26,7 @@ use crate::forward::RemoteTargets;
 use crate::hostkey::{Asking, Handler, known_algorithms, within};
 use crate::{ConnectSpec, SessionEvent};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Grace window for a proxy child to settle its exit status/stderr on handshake failure, or
 /// to exit on stdin EOF after SSH disconnect before being killed.
 const PROXY_EXIT_GRACE: Duration = Duration::from_millis(200);

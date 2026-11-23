@@ -6,8 +6,10 @@
 
 pub mod sftp;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,7 +20,18 @@ use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use tern_ssh::{ConnectSpec, Disconnect, Prompt, SessionEvent, SessionHandle, TermSize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
+
+/// Context passed to a test server's `exec_request` handler.
+pub struct ExecCtx {
+    pub command: String,
+    pub channel: ChannelId,
+    pub handle: server::Handle,
+    /// Resolves once the client sends `SSH_MSG_CHANNEL_EOF` on this exec channel.
+    pub stdin_eof: oneshot::Receiver<()>,
+}
+
+type ExecHandler = Arc<dyn Fn(ExecCtx) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// What the server's shell does once asked for.
 #[derive(Clone, Copy)]
@@ -54,8 +67,41 @@ struct TestServer {
     /// Serve SFTP from this directory when asked for the subsystem.
     sftp_root: Option<PathBuf>,
     sessions: HashMap<ChannelId, Channel<Msg>>,
-    /// `pty`, `shell` and `agent` requests received, in order.
+    /// Handler for non-PTY `exec` channel requests; `None` refuses `exec`.
+    exec: Option<ExecHandler>,
+    /// Waiters for client `SSH_MSG_CHANNEL_EOF`, keyed by channel.
+    eof_waiters: HashMap<ChannelId, oneshot::Sender<()>>,
+    /// Channels that already sent `SSH_MSG_CHANNEL_EOF` before `exec_request` registered.
+    eof_seen: HashSet<ChannelId>,
+    /// `pty`, `shell`, `exec` and `agent` requests received, in order.
     requests: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl TestServer {
+    fn maybe_probe_agent(&self, s: &Session) {
+        if self.probe == AgentProbe::Always
+            || (self.probe == AgentProbe::WhenAsked && self.agent_asked)
+        {
+            let (h, log) = (s.handle(), self.agent_log.clone());
+            tokio::spawn(async move {
+                let entry = match h.channel_open_agent().await {
+                    Ok(ch) => {
+                        let mut st = ch.into_stream();
+                        let _ = st.write_all(b"agent-ping").await;
+                        let mut buf = [0u8; 10];
+                        match tokio::time::timeout(Duration::from_secs(5), st.read_exact(&mut buf))
+                            .await
+                        {
+                            Ok(Ok(_)) => String::from_utf8_lossy(&buf).into_owned(),
+                            _ => "no answer".into(),
+                        }
+                    }
+                    Err(_) => "refused".into(),
+                };
+                log.lock().unwrap().push(entry);
+            });
+        }
+    }
 }
 
 impl server::Handler for TestServer {
@@ -121,28 +167,7 @@ impl server::Handler for TestServer {
         self.requests.lock().unwrap().push("shell");
         s.channel_success(ch)?;
         self.shell_channel = Some(ch);
-        if self.probe == AgentProbe::Always
-            || (self.probe == AgentProbe::WhenAsked && self.agent_asked)
-        {
-            let (h, log) = (s.handle(), self.agent_log.clone());
-            tokio::spawn(async move {
-                let entry = match h.channel_open_agent().await {
-                    Ok(ch) => {
-                        let mut st = ch.into_stream();
-                        let _ = st.write_all(b"agent-ping").await;
-                        let mut buf = [0u8; 10];
-                        match tokio::time::timeout(Duration::from_secs(5), st.read_exact(&mut buf))
-                            .await
-                        {
-                            Ok(Ok(_)) => String::from_utf8_lossy(&buf).into_owned(),
-                            _ => "no answer".into(),
-                        }
-                    }
-                    Err(_) => "refused".into(),
-                };
-                log.lock().unwrap().push(entry);
-            });
-        }
+        self.maybe_probe_agent(s);
         match self.shell {
             Shell::Exit(code) => {
                 s.data(ch, &b"hi\r\n"[..])?;
@@ -159,6 +184,43 @@ impl server::Handler for TestServer {
                         .await;
                 });
             }
+        }
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        ch: ChannelId,
+        data: &[u8],
+        s: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.requests.lock().unwrap().push("exec");
+        self.maybe_probe_agent(s);
+        let Some(exec) = self.exec.clone() else {
+            s.channel_failure(ch)?;
+            return Ok(());
+        };
+        let (eof_tx, eof_rx) = oneshot::channel();
+        if self.eof_seen.remove(&ch) {
+            let _ = eof_tx.send(());
+        } else {
+            self.eof_waiters.insert(ch, eof_tx);
+        }
+        let ctx = ExecCtx {
+            command: String::from_utf8_lossy(data).into_owned(),
+            channel: ch,
+            handle: s.handle(),
+            stdin_eof: eof_rx,
+        };
+        tokio::spawn(exec(ctx));
+        Ok(())
+    }
+
+    async fn channel_eof(&mut self, ch: ChannelId, _: &mut Session) -> Result<(), Self::Error> {
+        if let Some(tx) = self.eof_waiters.remove(&ch) {
+            let _ = tx.send(());
+        } else {
+            self.eof_seen.insert(ch);
         }
         Ok(())
     }
@@ -261,15 +323,39 @@ pub async fn serve(shell: Shell) -> Server {
 }
 
 pub async fn serve_with(shell: Shell, probe: AgentProbe) -> Server {
-    serve_full(shell, probe, None).await
+    serve_full(shell, probe, None, None).await
 }
 
 /// A server that also offers SFTP over `sftp_root`.
 pub async fn serve_sftp(sftp_root: PathBuf) -> Server {
-    serve_full(Shell::Echo, AgentProbe::Never, Some(sftp_root)).await
+    serve_full(Shell::Echo, AgentProbe::Never, Some(sftp_root), None).await
 }
 
-async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>) -> Server {
+/// A server whose `exec_request` handler runs `handler` per command.
+pub async fn serve_exec<F, Fut>(handler: F) -> Server
+where
+    F: Fn(ExecCtx) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    serve_exec_with(AgentProbe::Never, handler).await
+}
+
+/// Like [`serve_exec`], with configurable agent-channel probing.
+pub async fn serve_exec_with<F, Fut>(probe: AgentProbe, handler: F) -> Server
+where
+    F: Fn(ExecCtx) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let exec: ExecHandler = Arc::new(move |ctx| Box::pin(handler(ctx)));
+    serve_full(Shell::Echo, probe, None, Some(exec)).await
+}
+
+async fn serve_full(
+    shell: Shell,
+    probe: AgentProbe,
+    sftp_root: Option<PathBuf>,
+    exec: Option<ExecHandler>,
+) -> Server {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
     let host_key = key.public_key().clone();
     let config = Arc::new(server::Config {
@@ -297,6 +383,9 @@ async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>)
                 shell_channel: None,
                 sftp_root: sftp_root.clone(),
                 sessions: HashMap::new(),
+                exec: exec.clone(),
+                eof_waiters: HashMap::new(),
+                eof_seen: HashSet::new(),
                 probe,
                 agent_asked: false,
                 agent_log: agent.clone(),
@@ -321,6 +410,18 @@ async fn serve_full(shell: Shell, probe: AgentProbe, sftp_root: Option<PathBuf>)
         opened,
         requests,
     }
+}
+
+/// Records `key` as a known host key for `127.0.0.1:port` (appending if the file exists).
+pub fn write_known_host(known_hosts: &Path, port: u16, key: &PublicKey) {
+    use std::io::Write as _;
+    let pub_text = key.to_openssh().unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(known_hosts)
+        .unwrap();
+    writeln!(f, "[127.0.0.1]:{port} {pub_text}").unwrap();
 }
 
 /// Polls until `active` reaches `want`, failing if it takes longer than 5 seconds.
