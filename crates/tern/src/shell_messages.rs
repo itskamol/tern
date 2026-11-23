@@ -1,19 +1,15 @@
-//! Activity and Alert on the window (ADR 0002). [`crate::messages`] decides where a message
-//! goes; this file raises messages, wakes the view when an Activity's time is up, and draws the
-//! Activity list the titlebar button opens.
+//! Activity, Alert, and Decision on the window (ADR 0002). [`crate::messages`] decides where a
+//! message goes and [`crate::decisions`] owns the FIFO Decision queue; this file raises messages,
+//! schedules wake-ups, and draws the Decision card and Activity list.
 
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Anchor, AnyElement, App, Context, InteractiveElement, IntoElement, MouseDownEvent,
-    ParentElement, Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Task, Window,
-    anchored, deferred, div, point, px,
+    Anchor, AnyElement, App, Context, Entity, InteractiveElement, IntoElement, MouseDownEvent,
+    ParentElement, Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Task,
+    WeakEntity, Window, anchored, deferred, div, point, px,
 };
-
-use std::collections::VecDeque;
-
-use gpui::{Entity, WeakEntity};
 
 #[path = "shell_toast.rs"]
 mod toast;
@@ -22,9 +18,18 @@ pub(crate) use toast::{Alert, CubicBezier};
 
 use super::Shell;
 use crate::clipboard::Answer;
+use crate::decisions::{
+    DecisionChoice, DecisionId, DecisionPrompt, DecisionQueue, DecisionRequest, DecisionTag,
+    PendingDecision, QueueFull,
+};
+use crate::hover::HoverFade as _;
 use crate::messages::{Kind, Messages, Place, SHOWN_FOR, Work};
 use crate::session::Session;
-use crate::theme::{SPACE_SM, TITLEBAR_HEIGHT};
+use crate::theme::{MONO_FONT, SPACE_SM, TITLEBAR_HEIGHT, Theme};
+
+const CLIPBOARD_ONCE: &str = "once";
+const CLIPBOARD_ALWAYS: &str = "always";
+const CLIPBOARD_DENY: &str = "deny";
 
 /// Whether the Activity list is open. A press outside it closes it before the titlebar button
 /// hears the same press, so the button is told which press that was and does not reopen it.
@@ -61,11 +66,46 @@ impl ListState {
     }
 }
 
-/// A Decision waiting for its answer: a session holding a clipboard write.
+/// What a queued Decision represents inside the main window.
 #[derive(Debug)]
-struct Decision {
-    session: WeakEntity<Session>,
-    who: String,
+enum DecisionKind {
+    Clipboard {
+        session: WeakEntity<Session>,
+        who: String,
+    },
+    #[allow(dead_code)] // Enqueued by Agents and other callers (#61/#62/#63).
+    External { tag: DecisionTag },
+}
+
+fn clipboard_choices() -> Vec<DecisionChoice> {
+    vec![
+        DecisionChoice::primary(CLIPBOARD_ONCE, "Allow once"),
+        DecisionChoice::secondary(CLIPBOARD_ALWAYS, "Always for this host"),
+        DecisionChoice::secondary(CLIPBOARD_DENY, "Deny"),
+    ]
+}
+
+fn decision_button(
+    ix: usize,
+    label: impl Into<SharedString>,
+    primary: bool,
+    t: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("decision-choice", ix))
+        .h(px(28.))
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .rounded(px(8.))
+        .text_sm()
+        .cursor_pointer()
+        .when(primary, |el| el.bg(t.accent).text_color(t.on_accent))
+        .when(!primary, |el| {
+            el.hover_fade(format!("decision-button-{ix}"), t.row_hover, t.row_active)
+                .text_color(t.text)
+        })
+        .child(label.into())
 }
 
 #[derive(Debug, Default)]
@@ -73,11 +113,15 @@ pub(super) struct ActivityUi {
     /// The snackbar an Alert shows as; nothing outside this module can show one.
     snackbars: toast::Snackbars,
     /// Questions tern cannot go on without, oldest first; the first one's card shows.
-    decisions: VecDeque<Decision>,
+    decisions: DecisionQueue<DecisionKind>,
     messages: Messages,
     list_state: ListState,
     /// The one wake-up for when the newest Activity's time is up; a newer one replaces it.
     wake: Option<Task<()>>,
+    /// The one wake-up for Decision countdown ticks and expiry deadlines; `None` when idle.
+    decision_timer: Option<Task<()>>,
+    /// Watches external Decision cancellation signals while Decisions are pending.
+    decision_cancel_watch: Option<Task<()>>,
 }
 
 impl Shell {
@@ -162,69 +206,228 @@ impl Shell {
         chars: usize,
         cx: &mut Context<Self>,
     ) {
+        self.prune_stale_decisions(cx);
         let weak = session.downgrade();
-        if !self.activity.decisions.iter().any(|d| d.session == weak) {
+        let already_waiting = self.activity.decisions.has_matching(
+            |kind| matches!(kind, DecisionKind::Clipboard { session, .. } if *session == weak),
+        );
+        if !already_waiting {
             let who = session.read(cx).label();
+            let question = crate::clipboard::question(&who, chars);
+            let now = Instant::now();
             self.activity.messages.raise(
                 Kind::Decision,
-                crate::clipboard::question(&who, chars),
+                &question,
                 false,
                 false,
                 SystemTime::now(),
-                Instant::now(),
+                now,
             );
-            self.activity
-                .decisions
-                .push_back(Decision { session: weak, who });
+            let request = DecisionRequest::new(
+                DecisionKind::Clipboard { session: weak, who },
+                DecisionPrompt::new(question, clipboard_choices()),
+            );
+            if self.activity.decisions.enqueue(request, now).is_err() {
+                tracing::warn!("decision_queue_full");
+            }
+            self.sync_decision_tasks(cx);
         }
         cx.notify();
     }
 
-    /// The answer to the Decision in front.
-    fn answer_decision(&mut self, answer: Answer, cx: &mut Context<Self>) {
-        let Some(front) = self.activity.decisions.pop_front() else {
+    /// Enqueues a non-clipboard Decision (such as an Agent approval request) in FIFO order.
+    ///
+    /// # Errors
+    /// Returns [`QueueFull`] when the Decision queue is already at its pending limit.
+    #[allow(dead_code)] // Used by Agent broker (#61/#62/#63).
+    pub(crate) fn ask_decision(
+        &mut self,
+        tag: DecisionTag,
+        prompt: DecisionPrompt,
+        deadline: Option<Instant>,
+        cx: &mut Context<Self>,
+    ) -> Result<PendingDecision, QueueFull> {
+        self.prune_stale_decisions(cx);
+        let now = Instant::now();
+        self.activity.messages.raise(
+            Kind::Decision,
+            &prompt.question,
+            false,
+            false,
+            SystemTime::now(),
+            now,
+        );
+        let mut request = DecisionRequest::new(DecisionKind::External { tag }, prompt);
+        if let Some(deadline) = deadline {
+            request = request.with_deadline(deadline);
+        }
+        let pending = self.activity.decisions.enqueue(request, now)?;
+        self.sync_decision_tasks(cx);
+        cx.notify();
+        Ok(pending)
+    }
+
+    /// Cancels a single pending Decision by ID, dismissing it immediately if still waiting.
+    #[allow(dead_code)] // Used by Agent cancellation paths (#62).
+    pub(crate) fn cancel_decision(&mut self, id: DecisionId, cx: &mut Context<Self>) -> bool {
+        let cancelled = self.activity.decisions.cancel(id);
+        if cancelled {
+            self.sync_decision_tasks(cx);
+            cx.notify();
+        }
+        cancelled
+    }
+
+    /// Cancels every pending external Decision matching `tag` (e.g., all Agent Decisions on
+    /// sleep, screen lock, or Pause agents) without disturbing clipboard Decisions.
+    #[allow(dead_code)] // Used by Agent Grant/pause clearing (#63).
+    pub(crate) fn cancel_decisions_for(
+        &mut self,
+        tag: &DecisionTag,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let cancelled = self.activity.decisions.cancel_where(
+            |kind| matches!(kind, DecisionKind::External { tag: entry_tag } if entry_tag == tag),
+        );
+        if cancelled > 0 {
+            self.sync_decision_tasks(cx);
+            cx.notify();
+        }
+        cancelled
+    }
+
+    /// The person clicked one of the front Decision's choices. Late or mismatched clicks are
+    /// ignored by [`DecisionQueue::answer`].
+    fn answer_decision(&mut self, id: DecisionId, choice: &str, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        self.prune_stale_decisions(cx);
+        let resolved = self.activity.decisions.answer(id, choice, now);
+        if let Some(DecisionKind::Clipboard { session, .. }) = resolved {
+            let answer = match choice {
+                CLIPBOARD_ONCE => Some(Answer::Once),
+                CLIPBOARD_ALWAYS => Some(Answer::Always),
+                CLIPBOARD_DENY => Some(Answer::Deny),
+                _ => None,
+            };
+            if let (Some(answer), Some(session)) = (answer, session.upgrade()) {
+                session.update(cx, |s, cx| s.answer_clipboard(answer, cx));
+            }
+        }
+        self.sync_decision_tasks(cx);
+        cx.notify();
+    }
+
+    /// Drops the clipboard Decisions of `alias`'s sessions: their writes went through or are gone.
+    /// Non-clipboard Decisions for `alias` stay queued.
+    pub(super) fn forget_decisions_of(&mut self, alias: &str, cx: &mut Context<Self>) {
+        let removed = self.activity.decisions.cancel_where(|kind| match kind {
+            DecisionKind::Clipboard { session, .. } => session
+                .upgrade()
+                .is_none_or(|s| s.read(cx).alias() == alias),
+            DecisionKind::External { .. } => false,
+        });
+        if removed > 0 {
+            self.sync_decision_tasks(cx);
+        }
+    }
+
+    /// Removes expired, externally cancelled, and stale clipboard Decisions across the whole queue
+    /// so the `1 of N` count stays accurate.
+    fn prune_stale_decisions(&mut self, cx: &App) -> usize {
+        let swept = self.activity.decisions.sweep(Instant::now());
+        let stale = self.activity.decisions.cancel_where(|kind| match kind {
+            DecisionKind::Clipboard { session, .. } => session
+                .upgrade()
+                .and_then(|s| s.read(cx).clipboard_waiting())
+                .is_none(),
+            DecisionKind::External { .. } => false,
+        });
+        swept + stale
+    }
+
+    fn on_decision_wake(&mut self, cx: &mut Context<Self>) {
+        self.prune_stale_decisions(cx);
+        self.schedule_decision_timer(cx);
+        cx.notify();
+    }
+
+    fn on_decision_tick(&mut self, cx: &mut Context<Self>) {
+        self.prune_stale_decisions(cx);
+        self.sync_decision_tasks(cx);
+        cx.notify();
+    }
+
+    /// Keeps background Decision tasks strictly idle when nothing needs a timer or cancel watch.
+    fn sync_decision_tasks(&mut self, cx: &mut Context<Self>) {
+        self.schedule_decision_timer(cx);
+        if self.activity.decisions.is_empty() {
+            self.activity.decision_cancel_watch = None;
+            return;
+        }
+        if self.activity.decision_cancel_watch.is_none() {
+            let wake_rx = self.activity.decisions.cancel_wake();
+            self.activity.decision_cancel_watch = Some(cx.spawn(async move |this, cx| {
+                while wake_rx.recv().await.is_ok() {
+                    let keep = this
+                        .update(cx, |shell, cx| {
+                            shell.on_decision_wake(cx);
+                            if shell.activity.decisions.is_empty() {
+                                shell.activity.decision_cancel_watch = None;
+                                false
+                            } else {
+                                true
+                            }
+                        })
+                        .unwrap_or(false);
+                    if !keep {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    fn schedule_decision_timer(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        self.activity.decisions.sweep(now);
+        let Some(wake_at) = self.activity.decisions.next_wake(now) else {
+            self.activity.decision_timer = None;
             return;
         };
-        if let Some(session) = front.session.upgrade() {
-            session.update(cx, |s, cx| s.answer_clipboard(answer, cx));
-        }
-        cx.notify();
+        let wait = wake_at
+            .saturating_duration_since(now)
+            .max(Duration::from_millis(1));
+        self.activity.decision_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.on_decision_tick(cx);
+            });
+        }));
     }
 
-    /// Drops the Decisions of `alias`'s sessions: their writes went through or are gone.
-    pub(super) fn forget_decisions_of(&mut self, alias: &str, cx: &App) {
-        self.activity.decisions.retain(|d| {
-            d.session
-                .upgrade()
-                .is_some_and(|s| s.read(cx).alias() != alias)
-        });
-    }
-
-    /// The front Decision's card, while its session still holds the write. Card as the
-    /// Activity list's (tern's port forwards popover: 340 wide, 12 radius, 13 pt), inset and
-    /// gap `SPACE_SM`; buttons are the connection form's, 6 apart as in that popover's input
-    /// row.
+    /// The front Decision's card (click-only; never bound to bare Enter or Space). Card geometry
+    /// matches the Activity list (340 wide, 12 radius, 13 pt, inset and gap `SPACE_SM`); buttons
+    /// match the connection form's, 6 apart.
     fn decision_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        while let Some(front) = self.activity.decisions.front() {
-            let waiting = front
-                .session
-                .upgrade()
-                .and_then(|s| s.read(cx).clipboard_waiting());
-            if waiting.is_some() {
-                break;
+        self.prune_stale_decisions(cx);
+        let front = self.activity.decisions.front(Instant::now())?;
+        let id = front.id;
+        let queue_label = front.position.label();
+        let countdown = front.remaining_secs.map(|s| format!("{s}s"));
+        let question = match front.kind {
+            DecisionKind::Clipboard { session, who } => {
+                let chars = session
+                    .upgrade()
+                    .and_then(|s| s.read(cx).clipboard_waiting())?;
+                crate::clipboard::question(who, chars)
             }
-            self.activity.decisions.pop_front();
-        }
-        let front = self.activity.decisions.front()?;
-        let chars = front
-            .session
-            .upgrade()
-            .and_then(|s| s.read(cx).clipboard_waiting())?;
-        let t = self.theme;
-        let button = |id: &'static str, label: &'static str, primary: bool, answer: Answer| {
-            super::connections_ui::button(id, label, primary, &t)
-                .on_click(cx.listener(move |s, _, _, cx| s.answer_decision(answer, cx)))
+            DecisionKind::External { .. } => front.prompt.question.clone(),
         };
+        let details = front.prompt.details.clone();
+        let command = front.prompt.command.clone();
+        let choices = front.prompt.choices.clone();
+        let t = self.theme;
+        let show_meta = queue_label.is_some() || countdown.is_some();
         Some(
             div()
                 .id("decision")
@@ -241,23 +444,72 @@ impl Shell {
                 .shadow_lg()
                 .text_size(px(13.))
                 .text_color(t.text)
-                .child(SharedString::from(crate::clipboard::question(
-                    &front.who, chars,
-                )))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .child(button("decision-once", "Allow once", true, Answer::Once))
-                        .child(button(
-                            "decision-always",
-                            "Always for this host",
-                            false,
-                            Answer::Always,
+                .when(show_meta, |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_size(px(11.))
+                            .text_color(t.muted)
+                            .child(SharedString::from(queue_label.unwrap_or_default()))
+                            .children(countdown.map(SharedString::from)),
+                    )
+                })
+                .child(SharedString::from(question))
+                .when(!details.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .text_size(px(12.))
+                            .children(details.into_iter().map(|d| {
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(t.muted)
+                                            .child(SharedString::from(format!("{}:", d.label))),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_color(t.text)
+                                            .child(SharedString::from(d.value)),
+                                    )
+                            })),
+                    )
+                })
+                .when_some(command, |el, cmd| {
+                    el.child(
+                        div()
+                            .px(px(8.))
+                            .py(px(6.))
+                            .rounded(px(6.))
+                            .bg(t.row_hover)
+                            .border_1()
+                            .border_color(t.hairline)
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.))
+                            .text_color(t.text)
+                            .child(SharedString::from(cmd)),
+                    )
+                })
+                .child(div().flex().flex_wrap().gap(px(6.)).children(
+                    choices.into_iter().enumerate().map(|(ix, choice)| {
+                        let choice_id = choice.id;
+                        decision_button(ix, choice.label, choice.primary, &t).on_click(cx.listener(
+                            move |s, _, _, cx| {
+                                s.answer_decision(id, &choice_id, cx);
+                            },
                         ))
-                        .child(button("decision-deny", "Deny", false, Answer::Deny)),
-                )
+                    }),
+                ))
                 .into_any_element(),
         )
     }

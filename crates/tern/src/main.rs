@@ -6,6 +6,7 @@ mod chrome;
 mod clipboard;
 mod command_history;
 mod connections;
+mod decisions;
 #[cfg(any(debug_assertions, feature = "dev-keys"))]
 mod devkeys;
 mod drawables;
