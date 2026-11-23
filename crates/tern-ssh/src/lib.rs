@@ -9,6 +9,7 @@
 
 mod authn;
 mod config;
+mod connect;
 mod error;
 mod files;
 mod files_local;
