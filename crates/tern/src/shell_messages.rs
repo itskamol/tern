@@ -413,6 +413,7 @@ impl Shell {
         let front = self.activity.decisions.front(Instant::now())?;
         let id = front.id;
         let queue_label = front.position.label();
+        let urgent = front.remaining_secs.is_some_and(|s| s <= 10);
         let countdown = front.remaining_secs.map(|s| format!("{s}s"));
         let question = match front.kind {
             DecisionKind::Clipboard { session, who } => {
@@ -445,24 +446,46 @@ impl Shell {
                 .text_size(px(13.))
                 .text_color(t.text)
                 .when(show_meta, |el| {
+                    let left = match queue_label {
+                        Some(label) => div()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(t.row_hover)
+                            .text_color(t.text)
+                            .child(SharedString::from(label)),
+                        None => div().text_color(t.muted).child("Decision"),
+                    };
                     el.child(
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
                             .text_size(px(11.))
-                            .text_color(t.muted)
-                            .child(SharedString::from(queue_label.unwrap_or_default()))
-                            .children(countdown.map(SharedString::from)),
+                            .child(left)
+                            .when_some(countdown, |row, text| {
+                                row.child(
+                                    div()
+                                        .font_family(MONO_FONT)
+                                        .text_color(if urgent { t.danger } else { t.muted })
+                                        .child(SharedString::from(text)),
+                                )
+                            }),
                     )
                 })
-                .child(SharedString::from(question))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(SharedString::from(question)),
+                )
                 .when(!details.is_empty(), |el| {
                     el.child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
+                            .gap(px(3.))
                             .text_size(px(12.))
                             .children(details.into_iter().map(|d| {
                                 div()
@@ -472,6 +495,7 @@ impl Shell {
                                     .child(
                                         div()
                                             .flex_none()
+                                            .min_w(px(54.))
                                             .text_color(t.muted)
                                             .child(SharedString::from(format!("{}:", d.label))),
                                     )
@@ -479,6 +503,7 @@ impl Shell {
                                         div()
                                             .flex_1()
                                             .min_w_0()
+                                            .overflow_hidden()
                                             .text_color(t.text)
                                             .child(SharedString::from(d.value)),
                                     )
@@ -488,6 +513,9 @@ impl Shell {
                 .when_some(command, |el, cmd| {
                     el.child(
                         div()
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
                             .px(px(8.))
                             .py(px(6.))
                             .rounded(px(6.))
@@ -496,6 +524,7 @@ impl Shell {
                             .border_color(t.hairline)
                             .font_family(MONO_FONT)
                             .text_size(px(11.))
+                            .line_height(px(16.))
                             .text_color(t.text)
                             .child(SharedString::from(cmd)),
                     )

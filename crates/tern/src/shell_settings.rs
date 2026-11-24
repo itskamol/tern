@@ -10,6 +10,8 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+#[path = "shell_settings_agents.rs"]
+mod agents_page;
 #[path = "shell_settings_nav.rs"]
 mod nav;
 #[path = "shell_settings_search.rs"]
@@ -33,11 +35,12 @@ pub(crate) enum Section {
     Vault,
     History,
     Sync,
+    Agents,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 9] = [
+    const ALL: [Section; 10] = [
         Section::Appearance,
         Section::Terminal,
         Section::Shortcuts,
@@ -46,6 +49,7 @@ impl Section {
         Section::Vault,
         Section::History,
         Section::Sync,
+        Section::Agents,
         Section::About,
     ];
 
@@ -59,6 +63,7 @@ impl Section {
             Section::Vault => "Vault",
             Section::History => "Command history",
             Section::Sync => "Sync",
+            Section::Agents => "Agents",
             Section::About => "About",
         }
     }
@@ -73,6 +78,7 @@ impl Section {
             Section::Vault => crate::icons::KEY,
             Section::History => crate::icons::RESTART,
             Section::Sync => crate::icons::CLOUD,
+            Section::Agents => crate::icons::SETTINGS,
             Section::About => crate::icons::INFO,
         }
     }
@@ -87,6 +93,7 @@ impl Section {
             Section::Vault => "nav-vault",
             Section::History => "nav-history",
             Section::Sync => "nav-sync",
+            Section::Agents => "nav-agents",
             Section::About => "nav-about",
         }
     }
@@ -212,6 +219,7 @@ impl Shell {
             Section::Vault => self.vault_page(cx),
             Section::History => self.history_page(cx),
             Section::Sync => self.sync_page(cx),
+            Section::Agents => self.agents_page(cx),
             Section::About => self.about_page(cx),
         }
     }
@@ -551,17 +559,22 @@ impl Shell {
             list = list.child(w::row(
                 &t,
                 true,
-                "No connections yet",
-                Some("Hosts from ~/.ssh/config are listed in the sidebar".into()),
+                "No Saved connections yet",
+                Some("Import Hosts from ~/.ssh/config or add a Saved connection".into()),
                 div(),
             ));
         }
         for (ix, c) in self.connections.iter().enumerate() {
-            let address = if c.port == 22 {
+            let mut address = if c.port == 22 {
                 format!("{}@{}", c.user, c.host)
             } else {
                 format!("{}@{}:{}", c.user, c.host, c.port)
             };
+            let allowed = self.agent_allowed_services(&c.name).len();
+            if allowed > 0 {
+                let noun = if allowed == 1 { "service" } else { "services" };
+                address.push_str(&format!(" · {allowed} Agent {noun}"));
+            }
             let confirming = self.confirm_delete == Some(ix);
             let actions = div()
                 .flex()

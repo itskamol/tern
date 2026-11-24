@@ -125,21 +125,41 @@ impl Shell {
 
     /// Whether local MCP Agent access is enabled in `agents.json`.
     #[must_use]
-    #[allow(dead_code)] // Consumed by Settings UI (#65).
     pub(crate) fn agents_enabled(&self) -> bool {
         self.agents.config.enabled
     }
 
     /// Whether the `Pause agents` kill switch is active.
     #[must_use]
-    #[allow(dead_code)] // Consumed by Settings UI (#65).
     pub(crate) fn agents_paused(&self) -> bool {
         self.agents.config.paused
     }
 
-    /// Read-only snapshot of active in-memory Grants for Settings UI (#65).
+    /// Error recorded when `agents.json` could not be loaded (corrupt or newer schema).
     #[must_use]
-    #[allow(dead_code)] // Consumed by Settings UI (#65).
+    pub(crate) fn agent_store_error(&self) -> Option<&str> {
+        self.agents.store_error.as_deref()
+    }
+
+    /// Configured allowed systemd service unit names for Saved connection `host`.
+    #[must_use]
+    pub(crate) fn agent_allowed_services(&self, host: &str) -> Vec<String> {
+        self.agents
+            .config
+            .hosts
+            .get(host)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Saved connections that currently have at least one valid allowed service unit.
+    #[must_use]
+    pub(crate) fn agent_allowed_hosts(&self) -> Vec<(String, Vec<String>)> {
+        self.agents.config.allowed_hosts(&self.connections)
+    }
+
+    /// Read-only snapshot of active in-memory Grants for Settings → Agents.
+    #[must_use]
     pub(crate) fn active_agent_grants(&self) -> Vec<Grant> {
         self.agents.grants.active()
     }
@@ -149,25 +169,23 @@ impl Shell {
     ///
     /// # Errors
     /// Returns [`StoreError`] if `agents.json` cannot be saved (or is unreadable on disk).
-    #[allow(dead_code)] // Consumed by Settings UI (#65).
     pub(crate) fn set_agents_enabled(
         &mut self,
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), StoreError> {
-        self.agents.config.enabled = enabled;
+        if let Some(err) = &self.agents.store_error {
+            return Err(StoreError::Unreadable(err.clone()));
+        }
+        let mut next = self.agents.config.clone();
+        next.enabled = enabled;
+        if let Some(dir) = settings::dir() {
+            persist_config(&dir, &next, &self.connections, None)?;
+        }
+        self.agents.config = next;
         self.reconcile_agent_broker(cx);
-        let res = match settings::dir() {
-            Some(dir) => persist_config(
-                &dir,
-                &self.agents.config,
-                &self.connections,
-                self.agents.store_error.as_deref(),
-            ),
-            None => Ok(()),
-        };
         cx.notify();
-        res
+        Ok(())
     }
 
     /// Enables or disables the `Pause agents` kill switch and persists `paused` in `agents.json`
@@ -179,13 +197,20 @@ impl Shell {
     ///
     /// # Errors
     /// Returns [`StoreError`] if `agents.json` cannot be saved (or is unreadable on disk).
-    #[allow(dead_code)] // Consumed by Settings UI (#65).
     pub(crate) fn set_agents_paused(
         &mut self,
         paused: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), StoreError> {
-        self.agents.config.paused = paused;
+        if let Some(err) = &self.agents.store_error {
+            return Err(StoreError::Unreadable(err.clone()));
+        }
+        let mut next = self.agents.config.clone();
+        next.paused = paused;
+        if let Some(dir) = settings::dir() {
+            persist_config(&dir, &next, &self.connections, None)?;
+        }
+        self.agents.config = next;
         if paused {
             let grants = self.agents.grants.revoke_all();
             let decisions = self.cancel_decisions_for(&DecisionTag::Agent, cx);
@@ -193,17 +218,8 @@ impl Shell {
         } else {
             tracing::info!("agents_resumed");
         }
-        let res = match settings::dir() {
-            Some(dir) => persist_config(
-                &dir,
-                &self.agents.config,
-                &self.connections,
-                self.agents.store_error.as_deref(),
-            ),
-            None => Ok(()),
-        };
         cx.notify();
-        res
+        Ok(())
     }
 
     /// Replaces the allowlisted systemd service units for Saved connection `host`, immediately
@@ -212,7 +228,6 @@ impl Shell {
     /// # Errors
     /// Returns [`StoreError`] if `host` is not a Saved connection, any unit name is invalid, or
     /// `agents.json` cannot be saved.
-    #[allow(dead_code)] // Consumed by Settings / Saved connection UI (#65).
     pub(crate) fn set_agent_allowed_services(
         &mut self,
         host: &str,
@@ -238,7 +253,6 @@ impl Shell {
     /// Clears every active in-memory Grant and cancels all pending Agent Decisions while keeping
     /// `agents.json` allowlists and clipboard Decisions intact. Returns how many Grants were
     /// revoked.
-    #[allow(dead_code)] // Consumed by Settings UI "Revoke active Grants" button (#65).
     pub(crate) fn revoke_all_agent_grants(&mut self, cx: &mut Context<Self>) -> usize {
         let grants = self.agents.grants.revoke_all();
         let decisions = self.cancel_decisions_for(&DecisionTag::Agent, cx);
@@ -250,7 +264,6 @@ impl Shell {
     }
 
     /// Revokes one active in-memory Grant by `(host, service)` while keeping `agents.json` intact.
-    #[allow(dead_code)] // Consumed by Settings UI (#65).
     pub(crate) fn revoke_agent_grant(
         &mut self,
         host: &str,

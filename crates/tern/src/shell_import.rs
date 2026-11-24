@@ -238,7 +238,7 @@ impl Shell {
                     .gap(px(2.))
                     .child(div().text_size(px(14.)).child("Import from ~/.ssh/config"))
                     .child(note(
-                        "Copies the checked hosts into tern once. The file is never read again or changed.",
+                        "Copies the checked Hosts into tern as Saved connections; ~/.ssh/config is never changed. Edit a Saved connection afterwards to allow systemd services for Agents.",
                         t,
                     )),
             )
