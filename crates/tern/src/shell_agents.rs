@@ -4,13 +4,12 @@
 //! switch, `lock_on_sleep` Grant/Decision clearing, and [`AgentHost`] implementation out of
 //! `shell.rs` so `shell.rs` stays below the 800-line ceiling.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
-use gpui::Context;
+use gpui::{Context, WeakEntity};
 
 use super::Shell;
 use crate::agents::attention::{self, AgentAttention, AttentionCue};
@@ -57,29 +56,176 @@ impl Default for AgentsUi {
     }
 }
 
-/// Persists `config` to `agents.json` after dropping any host keys no longer in `connections` so
-/// deleting a Saved connection never blocks saving `enabled` or `paused`.
+/// Drops any host keys no longer in `connections`, persists the pruned config to `agents.json`
+/// when `dir` is available, and returns the pruned [`AgentConfig`] so callers never keep stale
+/// host entries in memory.
 fn persist_config(
-    dir: &Path,
+    dir: Option<&Path>,
     config: &AgentConfig,
     connections: &[Connection],
     store_error: Option<&str>,
-) -> Result<(), StoreError> {
+) -> Result<AgentConfig, StoreError> {
     if let Some(err) = store_error {
         return Err(StoreError::Unreadable(err.to_owned()));
     }
-    let hosts: BTreeMap<String, Vec<String>> = config
-        .hosts
-        .iter()
-        .filter(|(host, _)| connections.iter().any(|c| c.name == **host))
-        .map(|(h, svcs)| (h.clone(), svcs.clone()))
-        .collect();
-    let clean = AgentConfig {
-        enabled: config.enabled,
-        paused: config.paused,
-        hosts,
-    };
-    store::save(dir, &clean, connections)
+    let mut clean = config.clone();
+    clean.prune_unknown_hosts(connections);
+    if let Some(dir) = dir {
+        store::save(dir, &clean, connections)?;
+    }
+    Ok(clean)
+}
+
+impl AgentsUi {
+    /// Loads `agents.json`, prunes any hosts removed from Saved connections, and starts the local
+    /// `agent.sock` broker when `enabled = true`.
+    ///
+    /// # Errors
+    /// Returns a user-facing error message if `enabled = true` and binding `agent.sock` fails.
+    fn load_and_start<H: AgentHost>(
+        &mut self,
+        dir: &Path,
+        connections: &[Connection],
+        hosts_store_error: bool,
+        host: WeakEntity<H>,
+        cx: &mut Context<H>,
+    ) -> Result<(), String> {
+        match store::load(dir) {
+            Ok(config) => {
+                self.config = config;
+                self.store_error = None;
+                self.prune_orphaned_hosts(Some(dir), connections, hosts_store_error);
+                if self.config.enabled && self.broker.is_none() {
+                    let sock = socket_path(dir);
+                    match BrokerHandle::start(sock, host, cx) {
+                        Ok(handle) => self.broker = Some(handle),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "agent_broker_start_failed");
+                            // Reflect the actual non-listening state in memory without clobbering
+                            // `agents.json` so toggling Enable MCP retries binding cleanly.
+                            self.config.enabled = false;
+                            return Err(format!("Could not start local Agent broker: {e}"));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "agents_json_unreadable");
+                self.store_error = Some(e.to_string());
+                self.broker = None;
+                Ok(())
+            }
+        }
+    }
+
+    /// Drops any allowlisted host entries whose Saved connection no longer exists and persists the
+    /// pruned `agents.json` when both `hosts.json` and `agents.json` are readable.
+    fn prune_orphaned_hosts(
+        &mut self,
+        dir: Option<&Path>,
+        connections: &[Connection],
+        hosts_store_error: bool,
+    ) -> usize {
+        if hosts_store_error {
+            return 0;
+        }
+        let removed = self.config.prune_unknown_hosts(connections);
+        if removed > 0 {
+            if self.store_error.is_none()
+                && let Some(dir) = dir
+                && let Err(e) = persist_config(Some(dir), &self.config, connections, None)
+            {
+                tracing::warn!(error = %e, removed, "agent_orphaned_hosts_save_failed");
+            }
+            tracing::info!(removed, "agent_orphaned_hosts_pruned");
+        }
+        removed
+    }
+
+    /// Enables or disables local MCP Agent access. When enabling, binds `agent.sock` before
+    /// persisting `enabled = true` and rolls back on failure so `enabled` never pretends the
+    /// broker is listening. Returns `Ok(true)` when disabled so the caller can cancel pending
+    /// Agent Decisions.
+    ///
+    /// # Errors
+    /// Returns a user-facing error message if `agents.json` is unreadable, binding `agent.sock`
+    /// fails, or saving `agents.json` fails.
+    fn set_enabled<H: AgentHost>(
+        &mut self,
+        dir: Option<&Path>,
+        enabled: bool,
+        connections: &[Connection],
+        host: WeakEntity<H>,
+        cx: &mut Context<H>,
+    ) -> Result<bool, String> {
+        let mut next = self.config.clone();
+        next.enabled = enabled;
+        if enabled {
+            if let Some(err) = &self.store_error {
+                return Err(StoreError::Unreadable(err.clone()).to_string());
+            }
+            if self.broker.is_none() {
+                let Some(dir_path) = dir else {
+                    return Err("settings directory is unavailable".to_owned());
+                };
+                let handle = BrokerHandle::start(socket_path(dir_path), host, cx).map_err(|e| {
+                    tracing::warn!(error = %e, "agent_broker_start_failed");
+                    format!("Could not start local Agent broker: {e}")
+                })?;
+                match persist_config(dir, &next, connections, self.store_error.as_deref()) {
+                    Ok(clean) => {
+                        self.config = clean;
+                        self.broker = Some(handle);
+                        return Ok(false);
+                    }
+                    Err(e) => {
+                        drop(handle);
+                        return Err(e.to_string());
+                    }
+                }
+            }
+            let clean = persist_config(dir, &next, connections, self.store_error.as_deref())
+                .map_err(|e| e.to_string())?;
+            self.config = clean;
+            Ok(false)
+        } else {
+            let clean = persist_config(dir, &next, connections, self.store_error.as_deref())
+                .map_err(|e| e.to_string())?;
+            self.config = clean;
+            self.broker = None;
+            self.grants.revoke_all();
+            Ok(true)
+        }
+    }
+
+    fn set_paused(
+        &mut self,
+        dir: Option<&Path>,
+        paused: bool,
+        connections: &[Connection],
+    ) -> Result<usize, StoreError> {
+        let mut next = self.config.clone();
+        next.paused = paused;
+        let clean = persist_config(dir, &next, connections, self.store_error.as_deref())?;
+        self.config = clean;
+        Ok(if paused { self.grants.revoke_all() } else { 0 })
+    }
+
+    fn set_allowed_services(
+        &mut self,
+        dir: Option<&Path>,
+        host: &str,
+        services: Vec<String>,
+        connections: &[Connection],
+    ) -> Result<(), StoreError> {
+        let mut next = self.config.clone();
+        next.set_allowed_services(host, services, connections)?;
+        let clean = persist_config(dir, &next, connections, self.store_error.as_deref())?;
+        self.config = clean;
+        self.grants.prune_stale(&self.config, connections);
+        Ok(())
+    }
 }
 
 impl Shell {
@@ -88,38 +234,14 @@ impl Shell {
         let Some(dir) = settings::dir() else {
             return;
         };
-        match store::load(&dir) {
-            Ok(config) => {
-                self.agents.config = config;
-                self.agents.store_error = None;
-                self.reconcile_agent_broker(cx);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "agents_json_unreadable");
-                self.agents.store_error = Some(e.to_string());
-                self.agents.broker = None;
-            }
-        }
-    }
-
-    /// Ensures `agent.sock` is bound if and only if `agents.json` has `enabled = true`.
-    pub(super) fn reconcile_agent_broker(&mut self, cx: &mut Context<Self>) {
-        if !self.agents.config.enabled {
-            self.agents.broker = None;
-            self.agents.grants.revoke_all();
-            self.cancel_decisions_for(&DecisionTag::Agent, cx);
-            return;
-        }
-        if self.agents.broker.is_some() {
-            return;
-        }
-        let Some(dir) = settings::dir() else {
-            return;
-        };
-        let sock = socket_path(&dir);
-        match BrokerHandle::start(sock, cx.entity().downgrade(), cx) {
-            Ok(handle) => self.agents.broker = Some(handle),
-            Err(e) => tracing::warn!(error = %e, "agent_broker_start_failed"),
+        if let Err(msg) = self.agents.load_and_start(
+            &dir,
+            &self.connections,
+            self.store_error.is_some(),
+            cx.entity().downgrade(),
+            cx,
+        ) {
+            self.alert_failed(msg, cx);
         }
     }
 
@@ -168,22 +290,24 @@ impl Shell {
     /// active Grants and pending Agent Decisions when disabled, and persisting `agents.json`.
     ///
     /// # Errors
-    /// Returns [`StoreError`] if `agents.json` cannot be saved (or is unreadable on disk).
+    /// Returns an error message if `agents.json` cannot be saved (or is unreadable on disk) or
+    /// binding `agent.sock` fails.
     pub(crate) fn set_agents_enabled(
         &mut self,
         enabled: bool,
         cx: &mut Context<Self>,
-    ) -> Result<(), StoreError> {
-        if let Some(err) = &self.agents.store_error {
-            return Err(StoreError::Unreadable(err.clone()));
+    ) -> Result<(), String> {
+        let dir = settings::dir();
+        let disabled = self.agents.set_enabled(
+            dir.as_deref(),
+            enabled,
+            &self.connections,
+            cx.entity().downgrade(),
+            cx,
+        )?;
+        if disabled {
+            self.cancel_decisions_for(&DecisionTag::Agent, cx);
         }
-        let mut next = self.agents.config.clone();
-        next.enabled = enabled;
-        if let Some(dir) = settings::dir() {
-            persist_config(&dir, &next, &self.connections, None)?;
-        }
-        self.agents.config = next;
-        self.reconcile_agent_broker(cx);
         cx.notify();
         Ok(())
     }
@@ -202,17 +326,11 @@ impl Shell {
         paused: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), StoreError> {
-        if let Some(err) = &self.agents.store_error {
-            return Err(StoreError::Unreadable(err.clone()));
-        }
-        let mut next = self.agents.config.clone();
-        next.paused = paused;
-        if let Some(dir) = settings::dir() {
-            persist_config(&dir, &next, &self.connections, None)?;
-        }
-        self.agents.config = next;
+        let dir = settings::dir();
+        let grants = self
+            .agents
+            .set_paused(dir.as_deref(), paused, &self.connections)?;
         if paused {
-            let grants = self.agents.grants.revoke_all();
             let decisions = self.cancel_decisions_for(&DecisionTag::Agent, cx);
             tracing::info!(grants, decisions, "agents_paused");
         } else {
@@ -234,18 +352,9 @@ impl Shell {
         services: Vec<String>,
         cx: &mut Context<Self>,
     ) -> Result<(), StoreError> {
-        let mut next = self.agents.config.clone();
-        next.set_allowed_services(host, services, &self.connections)?;
-        if let Some(dir) = settings::dir() {
-            persist_config(
-                &dir,
-                &next,
-                &self.connections,
-                self.agents.store_error.as_deref(),
-            )?;
-        }
-        self.agents.config = next;
-        self.prune_stale_agent_grants();
+        let dir = settings::dir();
+        self.agents
+            .set_allowed_services(dir.as_deref(), host, services, &self.connections)?;
         cx.notify();
         Ok(())
     }
@@ -276,6 +385,17 @@ impl Shell {
             cx.notify();
         }
         removed
+    }
+
+    /// Drops any allowlisted host entries whose Saved connection was deleted or renamed and
+    /// persists the pruned `agents.json`.
+    pub(super) fn prune_orphaned_agent_hosts(&mut self) -> usize {
+        let dir = settings::dir();
+        self.agents.prune_orphaned_hosts(
+            dir.as_deref(),
+            &self.connections,
+            self.store_error.is_some(),
+        )
     }
 
     /// Drops any active Grants whose Saved connection or allowlisted service changed.
@@ -372,51 +492,5 @@ impl AgentHost for Shell {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use super::*;
-
-    fn conn(name: &str) -> Connection {
-        Connection {
-            name: name.into(),
-            host: "10.0.0.1".into(),
-            port: 22,
-            user: "deploy".into(),
-            ..Connection::default()
-        }
-    }
-
-    #[test]
-    fn persist_config_drops_orphaned_deleted_hosts_and_refuses_when_store_error_set() {
-        let dir = tempfile::tempdir().unwrap();
-        let connections = vec![conn("staging")];
-        let mut cfg = AgentConfig {
-            enabled: true,
-            paused: true,
-            hosts: BTreeMap::new(),
-        };
-        cfg.hosts
-            .insert("staging".into(), vec!["api.service".into()]);
-        cfg.hosts
-            .insert("deleted-host".into(), vec!["old.service".into()]);
-
-        // Refuses to clobber disk when store_error is present.
-        assert!(matches!(
-            persist_config(dir.path(), &cfg, &connections, Some("corrupt")),
-            Err(StoreError::Unreadable(_))
-        ));
-        assert!(!dir.path().join(store::FILE_NAME).exists());
-
-        // Drops orphaned deleted host so toggling paused succeeds while keeping live hosts intact.
-        persist_config(dir.path(), &cfg, &connections, None).unwrap();
-        let loaded = store::load(dir.path()).unwrap();
-        assert!(loaded.enabled);
-        assert!(loaded.paused);
-        assert_eq!(loaded.hosts.len(), 1);
-        assert_eq!(
-            loaded.hosts.get("staging").map(Vec::as_slice),
-            Some(&["api.service".to_owned()][..])
-        );
-    }
-}
+#[path = "shell_agents_tests.rs"]
+mod tests;

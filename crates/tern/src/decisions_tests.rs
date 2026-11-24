@@ -337,8 +337,7 @@ fn external_cancel_handle_dismisses_front_decision_and_wakes_queue() {
         )
         .unwrap();
 
-    let (id1, waiter1, cancel1) = p1.into_parts();
-    assert_eq!(cancel1.id(), id1);
+    let (_, waiter1, cancel1) = p1.into_parts();
     assert!(!cancel1.is_resolved());
     assert!(cancel1.cancel());
     assert!(cancel1.is_resolved());
@@ -402,8 +401,11 @@ fn cancelling_a_queued_decision_shrinks_count_without_disturbing_front() {
         Some("1 of 2")
     );
 
-    // Cancel p3 directly on the queue while queued behind p1.
-    assert!(q.cancel(p3.id()));
+    // Cancel p3 via cancel_where while queued behind p1.
+    assert_eq!(
+        q.cancel_where(|k| matches!(k, Kind::Agent { host: "prod", .. })),
+        1
+    );
     assert_eq!(p3.try_outcome(), Some(DecisionOutcome::Cancelled));
     assert_eq!(q.front(t0).unwrap().id, p1.id());
     assert_eq!(q.front(t0).unwrap().position.label(), None);
@@ -535,7 +537,6 @@ fn single_resolution_ignores_duplicate_answers_and_late_cancels() {
     // Late cancels after answer must be ignored and deliver no second outcome.
     assert!(!cancel1.cancel());
     assert!(!cancel1_clone.cancel());
-    assert!(!q.cancel(p1.id()));
     assert_eq!(p1.try_outcome(), None);
 }
 
@@ -573,10 +574,6 @@ fn late_click_after_external_cancel_is_ignored_and_preserves_next_decision() {
     let c1 = p1.cancel_handle();
     assert!(c1.cancel());
     assert!(!c1.cancel(), "duplicate external cancel returns false");
-    assert!(
-        !q.cancel(p1.id()),
-        "queue cancel after external cancel returns false"
-    );
 
     // User's click lands for p1's stale ID: ignored, p2 remains untouched.
     assert_eq!(q.answer(p1.id(), "allow_once", t0), None);

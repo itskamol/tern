@@ -34,8 +34,8 @@ pub struct HeadlessExec {
 /// Runs `req` strictly headlessly on `SshRuntime`, never opening UI or unlocking Keychain.
 ///
 /// Calls `on_dispatched` with the [`ExecCancel`] handle at the moment `tern_ssh::exec` is
-/// spawned so callers (including #62) can distinguish pre-dispatch cancellation from
-/// post-dispatch disconnect (`unknown_outcome`).
+/// spawned so callers can distinguish pre-dispatch cancellation from post-dispatch disconnect
+/// (`unknown_outcome`).
 ///
 /// # Errors
 /// Returns [`AgentError`] with:
@@ -104,59 +104,50 @@ pub async fn run(
     let mut exec = tern_ssh::exec(spec, command, options, &rt);
     on_dispatched(exec.cancel_handle());
 
+    let prompt_ctx = PromptContext {
+        host: &host,
+        port,
+        password_command: auth.password_command.as_deref(),
+        approvals: &approvals,
+        deadline,
+    };
     let mut ladder = Ladder::default();
     let mut prompt_failure: Option<AgentError> = None;
 
     while let Some(event) = exec.next().await {
         match event {
             ExecEvent::Prompt(prompt) => {
-                if let Some(err) = handle_prompt(
-                    prompt,
-                    &mut ladder,
-                    &host,
-                    port,
-                    auth.password_command.as_deref(),
-                    &approvals,
-                    deadline,
-                    cx,
-                )
-                .await
-                {
-                    prompt_failure.get_or_insert(err);
-                }
+                // Keep only the latest prompt failure; if a later prompt succeeds (returns None),
+                // clear any earlier skipped-key failure so it cannot leak into later outcomes.
+                prompt_failure = handle_prompt(prompt, &mut ladder, &prompt_ctx, cx).await;
             }
             ExecEvent::Finished(result) => {
                 return match result {
                     Ok(output) => Ok(output),
-                    Err(exec_err) => {
-                        if let Some(err) = prompt_failure {
-                            Err(err)
-                        } else {
-                            Err(map_exec_error(&exec_err))
-                        }
-                    }
+                    Err(exec_err) => Err(resolve_exec_error(&exec_err, prompt_failure)),
                 };
             }
         }
     }
 
-    Err(prompt_failure.unwrap_or_else(|| {
-        AgentError::new(
-            AgentErrorCode::SshError,
-            "ssh exec channel ended unexpectedly",
-        )
-    }))
+    Err(AgentError::new(
+        AgentErrorCode::SshError,
+        "ssh exec channel ended unexpectedly",
+    ))
 }
 
-#[allow(clippy::too_many_arguments)]
+struct PromptContext<'a> {
+    host: &'a str,
+    port: u16,
+    password_command: Option<&'a str>,
+    approvals: &'a Approvals,
+    deadline: Instant,
+}
+
 async fn handle_prompt(
     mut prompt: Prompt,
     ladder: &mut Ladder,
-    host: &str,
-    port: u16,
-    password_command: Option<&str>,
-    approvals: &Approvals,
-    deadline: Instant,
+    ctx: &PromptContext<'_>,
     cx: &mut AsyncApp,
 ) -> Option<AgentError> {
     match &prompt {
@@ -186,10 +177,12 @@ async fn handle_prompt(
 
     loop {
         let facts = Facts {
-            host,
-            port,
-            command: password_command,
-            approval: password_command.and_then(|c| approvals.ask(Purpose::Login, c)),
+            host: ctx.host,
+            port: ctx.port,
+            command: ctx.password_command,
+            approval: ctx
+                .password_command
+                .and_then(|c| ctx.approvals.ask(Purpose::Login, c)),
             vault_skipped: false,
         };
         let next = ladder.next(&prompt, facts, |key| {
@@ -210,7 +203,7 @@ async fn handle_prompt(
                 ));
             }
             Next::RunCommand(cmd) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
+                let remaining = ctx.deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     drop(prompt);
                     return Some(AgentError::new(
@@ -263,6 +256,24 @@ async fn handle_prompt(
     }
 }
 
+/// Only consults `prompt_failure` when `exec_err` itself is an authentication or unknown-host-key
+/// error so a declined passphrase for a skipped key can never mask `Timeout`, `HostKeyChanged`,
+/// `Cancelled`, `Refused`, or transport errors.
+fn resolve_exec_error(exec_err: &ExecError, prompt_failure: Option<AgentError>) -> AgentError {
+    match exec_err {
+        ExecError::InteractiveAuthRequired { .. }
+        | ExecError::AuthFailed { .. }
+        | ExecError::UnknownHostKey { .. } => {
+            prompt_failure.unwrap_or_else(|| map_exec_error(exec_err))
+        }
+        ExecError::HostKeyChanged { .. }
+        | ExecError::Timeout { .. }
+        | ExecError::Cancelled
+        | ExecError::Refused
+        | ExecError::Ssh(_) => map_exec_error(exec_err),
+    }
+}
+
 fn map_exec_error(err: &ExecError) -> AgentError {
     match err {
         ExecError::UnknownHostKey { .. } => {
@@ -278,5 +289,73 @@ fn map_exec_error(err: &ExecError) -> AgentError {
         | ExecError::Refused
         | ExecError::Ssh(_)
         | ExecError::Cancelled => AgentError::new(AgentErrorCode::SshError, err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn resolve_exec_error_never_lets_stale_prompt_failure_mask_non_auth_failures() {
+        let stale = AgentError::user_action_required(
+            UserActionReason::InteractiveAuthRequired,
+            "declined encrypted key",
+        );
+
+        let timeout = resolve_exec_error(
+            &ExecError::Timeout {
+                timeout: Duration::from_secs(1),
+            },
+            Some(stale.clone()),
+        );
+        assert_eq!(timeout.error, AgentErrorCode::TimedOut);
+        assert_eq!(timeout.reason, None);
+
+        let changed = resolve_exec_error(
+            &ExecError::HostKeyChanged { line: 4, hop: None },
+            Some(stale.clone()),
+        );
+        assert_eq!(changed.error, AgentErrorCode::SshError);
+        assert_eq!(changed.reason, None);
+        assert!(changed.message.contains("host key changed"));
+
+        let refused = resolve_exec_error(&ExecError::Refused, Some(stale.clone()));
+        assert_eq!(refused.error, AgentErrorCode::SshError);
+        assert_eq!(refused.reason, None);
+
+        let cancelled = resolve_exec_error(&ExecError::Cancelled, Some(stale.clone()));
+        assert_eq!(cancelled.error, AgentErrorCode::SshError);
+
+        let ssh = resolve_exec_error(&ExecError::Ssh("reset".into()), Some(stale.clone()));
+        assert_eq!(ssh.error, AgentErrorCode::SshError);
+        assert_eq!(ssh.message, "reset");
+
+        // Auth / unknown-host-key failures still preserve the specific prompt failure reason.
+        let vault_locked =
+            AgentError::user_action_required(UserActionReason::VaultLocked, "unlock vault");
+        let auth = resolve_exec_error(
+            &ExecError::InteractiveAuthRequired { hop: None },
+            Some(vault_locked.clone()),
+        );
+        assert_eq!(auth, vault_locked);
+
+        let auth_failed = resolve_exec_error(
+            &ExecError::AuthFailed { hop: None },
+            Some(vault_locked.clone()),
+        );
+        assert_eq!(auth_failed, vault_locked);
+
+        let unknown = resolve_exec_error(
+            &ExecError::UnknownHostKey { hop: None },
+            Some(AgentError::user_action_required(
+                UserActionReason::UnknownHostKey,
+                "unknown key",
+            )),
+        );
+        assert_eq!(unknown.error, AgentErrorCode::UserActionRequired);
+        assert_eq!(unknown.reason, Some(UserActionReason::UnknownHostKey));
     }
 }

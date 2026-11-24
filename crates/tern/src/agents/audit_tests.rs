@@ -39,9 +39,6 @@ fn outcome(
         caller: caller.into(),
         host: host.into(),
         service: service.into(),
-        command: Some(
-            "systemctl show -p LoadState,ActiveState,SubState --value -- api.service".into(),
-        ),
         decision,
         result,
     }
@@ -49,7 +46,7 @@ fn outcome(
 
 #[test]
 fn from_outcome_maps_decisions_outcomes_reasons_and_sanitizes_without_leaking_secrets() {
-    // Expired maps to "timed_out" in audit JSON per #64 vocabulary.
+    // Expired maps to "timed_out" in audit JSON.
     let expired = AuditRecord::from_outcome(
         &outcome(
             "Cursor",

@@ -74,13 +74,6 @@ impl GrantFingerprint {
         write_str(&mut h, service);
         Self(h.finalize().into())
     }
-
-    /// Raw 32-byte SHA-256 digest.
-    #[must_use]
-    #[allow(dead_code)] // Useful for tests and diagnostics.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
 }
 
 fn write_u16(h: &mut Sha256, v: u16) {
@@ -128,8 +121,8 @@ pub struct GrantStore {
 }
 
 impl GrantStore {
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)] // Constructed directly in tests and `AgentsUi`.
     pub fn new() -> Self {
         Self::default()
     }
@@ -204,20 +197,20 @@ impl GrantStore {
         count
     }
 
-    /// Read-only sorted snapshot of active Grants for Settings UI (#65) and inspection.
+    /// Read-only sorted snapshot of active Grants for Settings → Agents.
     #[must_use]
     pub fn active(&self) -> Vec<Grant> {
         self.grants.values().cloned().collect()
     }
 
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)] // Used in tests and Settings UI (#65).
     pub fn len(&self) -> usize {
         self.grants.len()
     }
 
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)] // Used in tests and Settings UI (#65).
     pub fn is_empty(&self) -> bool {
         self.grants.is_empty()
     }

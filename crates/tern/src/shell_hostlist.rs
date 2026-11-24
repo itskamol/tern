@@ -168,14 +168,16 @@ impl Shell {
 }
 
 impl Shell {
-    /// Rebuilds resolved `HostEntry` list from Saved connections and immediately drops any Agent
-    /// Grants whose Saved connection was edited, renamed, or deleted.
+    /// Rebuilds resolved `HostEntry` list from Saved connections and immediately drops any
+    /// orphaned Agent allowlist entries or stale Grants whose Saved connection was edited,
+    /// renamed, or deleted.
     pub(super) fn refresh_hosts(&mut self) {
         self.hosts = self
             .connections
             .iter()
             .map(|c| c.entry_in(&self.connections))
             .collect();
+        self.prune_orphaned_agent_hosts();
         self.prune_stale_agent_grants();
     }
 
