@@ -168,6 +168,17 @@ impl Shell {
 }
 
 impl Shell {
+    /// Rebuilds resolved `HostEntry` list from Saved connections and immediately drops any Agent
+    /// Grants whose Saved connection was edited, renamed, or deleted.
+    pub(super) fn refresh_hosts(&mut self) {
+        self.hosts = self
+            .connections
+            .iter()
+            .map(|c| c.entry_in(&self.connections))
+            .collect();
+        self.prune_stale_agent_grants();
+    }
+
     /// Adds or replaces a connection and writes `hosts.json`.
     pub(super) fn store_connection(
         &mut self,

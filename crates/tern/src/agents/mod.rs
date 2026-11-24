@@ -5,6 +5,8 @@
 //! `0o600` local Unix socket (`agent.sock`).
 
 pub mod broker;
+mod broker_socket;
+pub mod grants;
 pub mod headless_login;
 pub mod mcp;
 pub mod protocol;
