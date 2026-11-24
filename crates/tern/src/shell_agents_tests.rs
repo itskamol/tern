@@ -170,7 +170,14 @@ fn list_hosts_exposes_all_saved_connections_and_reflects_edits_and_deletes() {
         });
     });
 
-    let res = send_broker_request(&sock, BrokerRequest::ListHosts { caller: None }, &app);
+    let res = send_broker_request(
+        &sock,
+        BrokerRequest::ListHosts {
+            caller: None,
+            query: None,
+        },
+        &app,
+    );
     let BrokerResult::Ok { data } = res else {
         panic!("expected list_hosts Ok, got {res:?}");
     };
@@ -189,7 +196,14 @@ fn list_hosts_exposes_all_saved_connections_and_reflects_edits_and_deletes() {
         });
     });
 
-    let after = send_broker_request(&sock, BrokerRequest::ListHosts { caller: None }, &app);
+    let after = send_broker_request(
+        &sock,
+        BrokerRequest::ListHosts {
+            caller: None,
+            query: None,
+        },
+        &app,
+    );
     let BrokerResult::Ok { data } = after else {
         panic!("expected list_hosts Ok, got {after:?}");
     };

@@ -457,9 +457,10 @@ fn list_hosts_output_schema() -> Value {
                         "alias": { "type": "string", "description": "Exact Saved connection alias to pass to run_command." },
                         "host": { "type": "string", "description": "Remote hostname or IP address." },
                         "user": { "type": "string", "description": "SSH login username." },
-                        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "SSH port." }
+                        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "SSH port." },
+                        "grant_active": { "type": "boolean", "description": "Point-in-time hint whether an active Host Grant covers this connection; run_command still re-verifies authorization." }
                     },
-                    "required": ["alias", "host", "user", "port"],
+                    "required": ["alias", "host", "user", "port", "grant_active"],
                     "additionalProperties": false
                 }
             },
@@ -498,10 +499,15 @@ fn run_command_output_schema() -> Value {
 fn tools_list_payload_for_version(protocol_version: &str) -> Value {
     let mut list_hosts = json!({
         "name": "list_hosts",
-        "description": "List Saved connections in tern available to Agents.",
+        "description": "List Saved connections in tern available to Agents, optionally filtered by query (exact alias match ranked first). Each entry includes grant_active as a point-in-time hint; run_command still verifies authorization.",
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional case-insensitive filter matched against alias (exact match first, then prefix and substring), host, or user."
+                }
+            },
             "additionalProperties": false
         }
     });
@@ -567,7 +573,17 @@ fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<ParsedToolC
     let progress_token = extract_progress_token(params);
 
     let request = match name {
-        "list_hosts" => BrokerRequest::ListHosts { caller },
+        "list_hosts" => {
+            let query = match args.get("query") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_str()
+                        .ok_or_else(|| "argument 'query' must be a string".to_owned())?
+                        .to_owned(),
+                ),
+            };
+            BrokerRequest::ListHosts { caller, query }
+        }
         "run_command" => {
             let host = args
                 .get("host")

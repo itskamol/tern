@@ -1029,3 +1029,128 @@ fn headless_login_fails_closed_on_locked_vault_unknown_host_key_and_2fa() {
         serde_json::to_value(UserActionReason::InteractiveAuthRequired).unwrap()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn list_hosts_query_ranks_exact_match_first_and_reports_grant_active() {
+    let dir = tempfile::tempdir().unwrap();
+    let known_hosts = dir.path().join("known_hosts");
+    let make_conn = |name: &str, host: &str, user: &str| Connection {
+        name: name.into(),
+        host: host.into(),
+        port: 22,
+        user: user.into(),
+        ..Connection::default()
+    };
+
+    let connections = vec![
+        make_conn("alpha-public", "10.0.0.1", "ops"),
+        make_conn("gamma", "10.0.0.9", "ops"),
+        make_conn("prod-alpha", "10.0.0.3", "ops"),
+        make_conn("alpha public", "10.0.0.2", "ops"),
+        make_conn("beta", "alpha.internal", "ops"),
+        make_conn("alpha", "10.0.0.5", "deploy"),
+    ];
+
+    let mut app = TestApp::new();
+    app.update(|cx| SshRuntime::install(cx).unwrap());
+    let host = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = FakeHost::new(dir.path().to_path_buf(), known_hosts, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+    let mcp = McpHarness::start(socket_path(dir.path()), &app);
+
+    // 1. Query ranks exact alias match first, then prefix, substring, host/user, excluding misses.
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "q-1",
+        "method": "tools/call",
+        "params": { "name": "list_hosts", "arguments": { "query": "alpha" } }
+    }));
+    let q1 = mcp.recv_id("q-1", &app);
+    assert_eq!(q1["result"]["isError"], false);
+    let hosts = q1["result"]["structuredContent"]["hosts"]
+        .as_array()
+        .unwrap();
+    let aliases: Vec<&str> = hosts.iter().map(|h| h["alias"].as_str().unwrap()).collect();
+    assert_eq!(
+        aliases,
+        vec![
+            "alpha",
+            "alpha-public",
+            "alpha public",
+            "prod-alpha",
+            "beta"
+        ]
+    );
+    assert!(hosts.iter().all(|h| h["grant_active"] == json!(false)));
+
+    // 2. Granting "alpha" sets grant_active = true only for "alpha".
+    app.update(|cx| {
+        host.update(cx, |h, _| {
+            let alpha = h
+                .connections
+                .iter()
+                .find(|c| c.name == "alpha")
+                .unwrap()
+                .clone();
+            let fp = GrantFingerprint::for_connection(&alpha, &h.connections);
+            h.grants.insert("alpha", fp, SystemTime::now());
+        });
+    });
+
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "q-2",
+        "method": "tools/call",
+        "params": { "name": "list_hosts", "arguments": { "query": "alpha" } }
+    }));
+    let q2 = mcp.recv_id("q-2", &app);
+    let hosts = q2["result"]["structuredContent"]["hosts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hosts[0]["alias"], "alpha");
+    assert_eq!(hosts[0]["grant_active"], true);
+    assert!(hosts[1..].iter().all(|h| h["grant_active"] == json!(false)));
+
+    // 3. Editing "alpha" invalidates its fingerprint so grant_active drops back to false.
+    app.update(|cx| {
+        host.update(cx, |h, _| {
+            let alpha = h
+                .connections
+                .iter_mut()
+                .find(|c| c.name == "alpha")
+                .unwrap();
+            alpha.host = "10.0.0.99".into();
+        });
+    });
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "q-3",
+        "method": "tools/call",
+        "params": { "name": "list_hosts", "arguments": { "query": "alpha" } }
+    }));
+    let q3 = mcp.recv_id("q-3", &app);
+    let hosts = q3["result"]["structuredContent"]["hosts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hosts[0]["alias"], "alpha");
+    assert_eq!(hosts[0]["grant_active"], false);
+
+    // 4. run_command still requires an exact alias (prefix "alph" is rejected).
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "run-prefix",
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": { "host": "alph", "command": "uptime" }
+        }
+    }));
+    let prefix_res = mcp.recv_id("run-prefix", &app);
+    assert_eq!(prefix_res["result"]["isError"], true);
+    assert_eq!(prefix_res["result"]["structuredContent"]["error"], "denied");
+}

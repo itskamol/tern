@@ -190,7 +190,7 @@ async fn handle_incoming<H: AgentHost>(
 ) {
     let IncomingRequest { request, responder } = incoming;
     let result = match request {
-        BrokerRequest::ListHosts { .. } => handle_list_hosts(&host, cx),
+        BrokerRequest::ListHosts { query, .. } => handle_list_hosts(&host, query.as_deref(), cx),
         BrokerRequest::RunCommand {
             caller,
             host: target_host,
@@ -220,36 +220,88 @@ async fn handle_incoming<H: AgentHost>(
     responder.finish(result).await;
 }
 
-fn handle_list_hosts<H: AgentHost>(host: &WeakEntity<H>, cx: &mut AsyncApp) -> BrokerResult {
-    let Ok(snapshot) = host.update(cx, |h, _| h.agent_snapshot()) else {
+fn match_host_query(conn: &Connection, query: &str, query_lower: &str) -> Option<u8> {
+    if conn.name == query {
+        return Some(0);
+    }
+    let alias_lower = conn.name.to_lowercase();
+    if alias_lower == query_lower {
+        return Some(1);
+    }
+    if alias_lower.starts_with(query_lower) {
+        return Some(2);
+    }
+    if alias_lower.contains(query_lower) {
+        return Some(3);
+    }
+    if conn.host.to_lowercase().contains(query_lower)
+        || conn.user.to_lowercase().contains(query_lower)
+    {
+        return Some(4);
+    }
+    None
+}
+
+fn handle_list_hosts<H: AgentHost>(
+    host: &WeakEntity<H>,
+    query: Option<&str>,
+    cx: &mut AsyncApp,
+) -> BrokerResult {
+    let trimmed = query.map(str::trim).filter(|q| !q.is_empty());
+    let Ok(outcome) = host.update(cx, |h, cx| {
+        let snapshot = h.agent_snapshot();
+        if snapshot.config.paused {
+            return Err(AgentError::new(
+                AgentErrorCode::AgentsPaused,
+                "agents are paused in tern",
+            ));
+        }
+
+        let selected: Vec<&Connection> = match trimmed {
+            None => snapshot.connections.iter().collect(),
+            Some(q) => {
+                let q_lower = q.to_lowercase();
+                let mut ranked: Vec<(u8, &Connection)> = snapshot
+                    .connections
+                    .iter()
+                    .filter_map(|c| match_host_query(c, q, &q_lower).map(|rank| (rank, c)))
+                    .collect();
+                ranked.sort_by_key(|(rank, _)| *rank);
+                ranked.into_iter().map(|(_, c)| c).collect()
+            }
+        };
+
+        let hosts = selected
+            .into_iter()
+            .map(|c| {
+                let fingerprint = GrantFingerprint::for_connection(c, &snapshot.connections);
+                let grant_active = h.verify_agent_grant(&c.name, fingerprint, cx);
+                HostSummary {
+                    alias: c.name.clone(),
+                    host: c.host.clone(),
+                    user: c.user.clone(),
+                    port: c.port,
+                    grant_active,
+                }
+            })
+            .collect();
+        Ok(ListHostsResponse {
+            hosts,
+            usage: LIST_HOSTS_USAGE.to_owned(),
+        })
+    }) else {
         return BrokerResult::Error(AgentError::new(
             AgentErrorCode::TernNotRunning,
             "tern window is no longer available",
         ));
     };
-    if snapshot.config.paused {
-        return BrokerResult::Error(AgentError::new(
-            AgentErrorCode::AgentsPaused,
-            "agents are paused in tern",
-        ));
-    }
-    let hosts = snapshot
-        .connections
-        .iter()
-        .map(|c| HostSummary {
-            alias: c.name.clone(),
-            host: c.host.clone(),
-            user: c.user.clone(),
-            port: c.port,
-        })
-        .collect();
-    let payload = ListHostsResponse {
-        hosts,
-        usage: LIST_HOSTS_USAGE.to_owned(),
-    };
-    match serde_json::to_value(payload) {
-        Ok(data) => BrokerResult::Ok { data },
-        Err(e) => BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string())),
+
+    match outcome {
+        Ok(payload) => match serde_json::to_value(payload) {
+            Ok(data) => BrokerResult::Ok { data },
+            Err(e) => BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string())),
+        },
+        Err(err) => BrokerResult::Error(err),
     }
 }
 

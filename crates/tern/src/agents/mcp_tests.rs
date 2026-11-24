@@ -117,7 +117,8 @@ async fn initialize_ping_tools_list_and_closed_tern_recovery_work_without_restar
             assert_eq!(
                 req,
                 BrokerRequest::ListHosts {
-                    caller: Some("Cursor".into())
+                    caller: Some("Cursor".into()),
+                    query: None,
                 }
             );
             // Progress frames without a client progressToken are ignored cleanly.
@@ -133,7 +134,7 @@ async fn initialize_ping_tools_list_and_closed_tern_recovery_work_without_restar
                 &mut w,
                 &BrokerMessage::Result(BrokerResult::Ok {
                     data: json!({
-                        "hosts": [{ "alias": "staging", "host": "10.0.0.10", "user": "deploy", "port": 22 }],
+                        "hosts": [{ "alias": "staging", "host": "10.0.0.10", "user": "deploy", "port": 22, "grant_active": false }],
                         "usage": "call run_command"
                     }),
                 }),
@@ -454,6 +455,7 @@ async fn output_schema_matches_ok_nonzero_exit_and_preserves_vault_locked_reason
                     host: "10.0.0.5".into(),
                     user: "deploy".into(),
                     port: 22,
+                    grant_active: true,
                 }],
                 usage: "call run_command".into(),
             })
@@ -611,6 +613,82 @@ async fn output_schema_matches_ok_nonzero_exit_and_preserves_vault_locked_reason
     assert_eq!(text_json["reason"], "vault_locked");
 
     fake_broker.await.unwrap();
+    drop(client_tx);
+    server.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn list_hosts_forwards_query_and_rejects_non_string_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("agent.sock");
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+
+    let fake_broker = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut r = BufReader::new(r);
+        let line = read_line_bounded(&mut r, MAX_FRAME_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        let req: BrokerRequest = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            req,
+            BrokerRequest::ListHosts {
+                caller: None,
+                query: Some("alpha".into()),
+            }
+        );
+        write_json_line(
+            &mut w,
+            &BrokerMessage::Result(BrokerResult::Ok {
+                data: json!({
+                    "hosts": [{ "alias": "alpha", "host": "10.0.0.5", "user": "deploy", "port": 22, "grant_active": true }],
+                    "usage": "call run_command"
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+    });
+
+    let (mut client_tx, server_rx) = tokio::io::duplex(64 * 1024);
+    let (server_tx, client_rx) = tokio::io::duplex(64 * 1024);
+    let mut client_rx = BufReader::new(client_rx);
+    let server = tokio::spawn(serve_stdio(BufReader::new(server_rx), server_tx, sock));
+
+    let res = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_hosts", "arguments": { "query": "alpha" } }
+        }),
+    )
+    .await;
+    fake_broker.await.unwrap();
+    assert_eq!(res["result"]["isError"], false);
+    assert_eq!(
+        res["result"]["structuredContent"]["hosts"][0]["grant_active"],
+        true
+    );
+
+    let bad = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "list_hosts", "arguments": { "query": 42 } }
+        }),
+    )
+    .await;
+    assert_eq!(bad["error"]["code"], ERR_INVALID_PARAMS);
+
     drop(client_tx);
     server.await.unwrap().unwrap();
 }

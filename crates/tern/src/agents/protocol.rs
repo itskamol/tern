@@ -74,6 +74,8 @@ pub struct HostSummary {
     pub host: String,
     pub user: String,
     pub port: u16,
+    #[serde(default)]
+    pub grant_active: bool,
 }
 
 /// Structured response from the `list_hosts` tool.
@@ -109,6 +111,8 @@ pub enum BrokerRequest {
     ListHosts {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
     },
     RunCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
