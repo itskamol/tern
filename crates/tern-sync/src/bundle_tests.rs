@@ -581,3 +581,57 @@ fn the_change_watcher_sees_the_local_hash_and_the_last_synced_one() {
         "in step after a push"
     );
 }
+
+#[test]
+fn agents_files_are_strictly_excluded_from_sync() {
+    let root = tempfile::tempdir().unwrap();
+    let (a, b) = (root.path().join("a"), root.path().join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let remote = Mem::default();
+    let none = Resolutions::new();
+    let vault = fake("pw");
+
+    std::fs::write(a.join(HOSTS_FILE), hosts(&[("staging", "10.0.0.1")])).unwrap();
+    let hash_before = snapshot(&a).unwrap().local;
+
+    // Local-only Agent state must neither travel nor perturb the synced snapshot hash.
+    std::fs::write(
+        a.join("agents.json"),
+        r#"{"version":1,"enabled":true,"hosts":{"staging":["api.service"]}}"#,
+    )
+    .unwrap();
+    std::fs::write(a.join("agent-audit.jsonl"), "{\"event\":\"test\"}\n").unwrap();
+    std::fs::write(a.join("agent-audit.jsonl.1"), "{\"event\":\"rotated-1\"}\n").unwrap();
+    std::fs::write(a.join("agent-audit.jsonl.2"), "{\"event\":\"rotated-2\"}\n").unwrap();
+    assert_eq!(snapshot(&a).unwrap().local, hash_before);
+    assert!(!read_local(&a).unwrap().contains_key("agents.json"));
+    assert!(!read_local(&a).unwrap().contains_key("agent-audit.jsonl"));
+    assert!(!read_local(&a).unwrap().contains_key("agent-audit.jsonl.1"));
+    assert!(!read_local(&a).unwrap().contains_key("agent-audit.jsonl.2"));
+
+    // Sync A -> B: B receives hosts.json, never agents.json or agent-audit.jsonl(.N).
+    sync(&a, &remote, &vault, None, None, &none).unwrap();
+    sync(&b, &remote, &vault, Some("pw"), None, &none).unwrap();
+    assert!(b.join(HOSTS_FILE).exists());
+    assert!(!b.join("agents.json").exists());
+    assert!(!b.join("agent-audit.jsonl").exists());
+    assert!(!b.join("agent-audit.jsonl.1").exists());
+    assert!(!b.join("agent-audit.jsonl.2").exists());
+
+    // Even if a hostile remote payload includes agents.json or audit logs, decode strips them.
+    let mut injected = bundle(&[
+        (HOSTS_FILE, b"[]"),
+        ("agents.json", b"{\"enabled\":true}"),
+        ("agent-audit.jsonl", b"{\"outcome\":\"active\"}\n"),
+        ("agent-audit.jsonl.1", b"{\"outcome\":\"active\"}\n"),
+    ]);
+    let decoded = decode(&encode(&injected).unwrap()).unwrap();
+    assert!(!decoded.contains_key("agents.json"));
+    assert!(!decoded.contains_key("agent-audit.jsonl"));
+    assert!(!decoded.contains_key("agent-audit.jsonl.1"));
+    injected.remove("agents.json");
+    injected.remove("agent-audit.jsonl");
+    injected.remove("agent-audit.jsonl.1");
+    assert_eq!(decoded, injected);
+}

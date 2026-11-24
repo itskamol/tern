@@ -1,11 +1,13 @@
 //! tern: a fast, low-memory SSH terminal.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod agents;
 mod alloc;
 mod chrome;
 mod clipboard;
 mod command_history;
 mod connections;
+mod decisions;
 #[cfg(any(debug_assertions, feature = "dev-keys"))]
 mod devkeys;
 mod drawables;
@@ -79,26 +81,33 @@ enum Cli {
     Print(String),
     Refuse(String),
     VaultInit,
+    Mcp,
 }
 
-fn parse_cli(arg: Option<String>) -> Cli {
-    let usage = "usage: tern [alias | user@host[:port]]\n       tern vault init   (passphrase, then PIN, on standard input)";
-    match arg.as_deref() {
+fn parse_cli(args: &[String]) -> Cli {
+    let usage = "usage: tern [alias | user@host[:port]]\n       tern mcp\n       tern vault init   (passphrase, then PIN, on standard input)";
+    match args.first().map(String::as_str) {
         None => Cli::Open(None),
         Some("-V" | "--version") => Cli::Print(format!("tern {}", env!("CARGO_PKG_VERSION"))),
         Some("-h" | "--help") => Cli::Print(usage.to_owned()),
-        Some("vault") if std::env::args().nth(2).as_deref() == Some("init") => Cli::VaultInit,
+        Some("vault") if args.get(1).map(String::as_str) == Some("init") => Cli::VaultInit,
+        Some("mcp") => match args.get(1..) {
+            Some([]) | None => Cli::Mcp,
+            Some([flag]) if flag == "-h" || flag == "--help" => Cli::Print(usage.to_owned()),
+            _ => Cli::Refuse(format!("invalid arguments for mcp\n{usage}")),
+        },
         Some(flag) if flag.starts_with('-') => {
             Cli::Refuse(format!("unknown option {flag}\n{usage}"))
         }
-        Some(_) => Cli::Open(arg),
+        Some(target) => Cli::Open(Some(target.to_owned())),
     }
 }
 
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn main() {
     alloc::init();
-    let target = match parse_cli(std::env::args().nth(1)) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let target = match parse_cli(&args) {
         Cli::Open(target) => target,
         Cli::Print(text) => {
             println!("{text}");
@@ -118,6 +127,13 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Cli::Mcp => {
+            if let Err(e) = agents::mcp::run() {
+                eprintln!("tern mcp failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
     };
     let _log_guard = init_logging();
     // One tern per settings folder: a second launch hands its host to the first and exits.
@@ -184,7 +200,7 @@ fn main() {
                 });
             }
             lock_on_sleep::start(cx, move |cause, cx| {
-                let _ = window.update(cx, |shell, _, cx| shell.lock_vault_for(cause, cx));
+                let _ = window.update(cx, |shell, _, cx| shell.on_sleep_or_lock(cause, cx));
             });
             #[cfg(any(debug_assertions, feature = "dev-keys"))]
             devkeys::replay(window, cx);
@@ -292,16 +308,36 @@ fn env() -> &'static str {
 mod cli_tests {
     use super::{Cli, parse_cli};
 
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
     #[test]
     fn flags_never_become_hosts() {
-        let arg = |s: &str| Some(s.to_owned());
-        assert!(matches!(parse_cli(arg("--version")), Cli::Print(v) if v.starts_with("tern ")));
-        assert!(matches!(parse_cli(arg("-h")), Cli::Print(_)));
-        assert!(matches!(parse_cli(arg("--verbose")), Cli::Refuse(_)));
-        assert_eq!(
-            parse_cli(arg("deploy@10.0.0.5:2222")),
-            Cli::Open(arg("deploy@10.0.0.5:2222"))
+        assert!(
+            matches!(parse_cli(&args(&["--version"])), Cli::Print(v) if v.starts_with("tern "))
         );
-        assert_eq!(parse_cli(None), Cli::Open(None));
+        assert!(matches!(parse_cli(&args(&["-h"])), Cli::Print(_)));
+        assert!(matches!(parse_cli(&args(&["--verbose"])), Cli::Refuse(_)));
+        assert_eq!(
+            parse_cli(&args(&["deploy@10.0.0.5:2222"])),
+            Cli::Open(Some("deploy@10.0.0.5:2222".to_owned()))
+        );
+        assert_eq!(parse_cli(&[]), Cli::Open(None));
+    }
+
+    #[test]
+    fn mcp_and_vault_subcommands_parse_before_gui_startup() {
+        assert_eq!(parse_cli(&args(&["mcp"])), Cli::Mcp);
+        assert!(matches!(parse_cli(&args(&["mcp", "-h"])), Cli::Print(_)));
+        assert!(matches!(
+            parse_cli(&args(&["mcp", "--socket", "/tmp/agent.sock"])),
+            Cli::Refuse(_)
+        ));
+        assert!(matches!(
+            parse_cli(&args(&["mcp", "--bogus"])),
+            Cli::Refuse(_)
+        ));
+        assert_eq!(parse_cli(&args(&["vault", "init"])), Cli::VaultInit);
     }
 }

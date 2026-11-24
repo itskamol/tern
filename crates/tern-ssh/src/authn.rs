@@ -36,6 +36,8 @@ pub(crate) struct Authenticator<'a> {
     remaining: MethodSet,
     /// The last failure said one step of a multi-step login passed (`partial_success`).
     progressed: bool,
+    /// A key passphrase prompt was declined and no later password/challenge attempt superseded it.
+    declined_passphrase: bool,
 }
 
 impl<'a> Authenticator<'a> {
@@ -55,6 +57,7 @@ impl<'a> Authenticator<'a> {
             memory_keys: Vec::new(),
             remaining: MethodSet::client_supported(),
             progressed: false,
+            declined_passphrase: false,
         }
     }
 
@@ -105,6 +108,9 @@ impl<'a> Authenticator<'a> {
         }
         if self.try_interactive_or_password().await? {
             return Ok(());
+        }
+        if self.declined_passphrase {
+            return Err(Failure::AuthCancelled);
         }
         Err(Failure::AuthFailed)
     }
@@ -231,7 +237,7 @@ impl<'a> Authenticator<'a> {
 
     /// Loads a private key, asking for its passphrase (up to 3 times) if it is encrypted.
     /// `None` means "skip this key".
-    async fn load_key(&self, path: &Path) -> Result<Option<russh::keys::PrivateKey>, Failure> {
+    async fn load_key(&mut self, path: &Path) -> Result<Option<russh::keys::PrivateKey>, Failure> {
         match load_secret_key(path, None) {
             Ok(k) => return Ok(Some(k)),
             Err(russh::keys::Error::KeyIsEncrypted) => {}
@@ -251,6 +257,7 @@ impl<'a> Authenticator<'a> {
             })
             .await?;
             let Some(pass) = reply else {
+                self.declined_passphrase = true;
                 return Ok(None);
             };
             match load_secret_key(path, Some(pass.expose_secret())) {
@@ -272,6 +279,9 @@ impl<'a> Authenticator<'a> {
                         return Ok(true);
                     }
                     Kbd::Rejected { prompted } => {
+                        if prompted {
+                            self.declined_passphrase = false;
+                        }
                         if !prompted || !self.allows(MethodKind::KeyboardInteractive) {
                             kbd = false;
                         } else {
@@ -283,6 +293,7 @@ impl<'a> Authenticator<'a> {
                 let Some(pass) = self.ask_password().await? else {
                     return Err(Failure::AuthCancelled);
                 };
+                self.declined_passphrase = false;
                 let r = self
                     .session
                     .authenticate_password(self.user, pass.expose_secret())

@@ -15,6 +15,7 @@ gpui = { package = "gpui-pre", version = "=0.3.8" }
 nucleo-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = { version = "0.11", default-features = false }
 thiserror = "2"
 unicode-segmentation = "1"
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "runtime_shaders"] }
@@ -25,7 +26,7 @@ tern-vault.workspace = true
 base64 = "0.23"
 chrono.workspace = true
 ureq.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "io-util", "io-std", "sync", "time"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "registry"] }
@@ -36,13 +37,15 @@ security-framework.workspace = true
 # libmalloc keeps a freed 256 MiB scrypt block resident; mimalloc hands it back to the OS.
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSAccessibility", "NSView", "NSResponder", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSWorkspace", "NSAccessibility", "NSView", "NSResponder", "objc2-quartz-core"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
 raw-window-handle = { version = "0.6", default-features = false }
-# The sleep and screen-lock notifications (lock_on_sleep.rs). Already in Cargo.lock through gpui.
+# The sleep and screen-lock notifications (lock_on_sleep.rs) and background Agent attention cues
+# (agents/attention.rs). Already in Cargo.lock through gpui / objc2.
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSString", "NSNotification", "NSOperation", "NSDistributedNotificationCenter"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSBundle", "NSString", "NSNotification", "NSOperation", "NSDistributedNotificationCenter"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger"] }
 
 [features]
 # Compiles the TERN_DEV_KEYS replay (devkeys.rs) into a release build. Off by default and never

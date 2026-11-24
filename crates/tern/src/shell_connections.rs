@@ -21,6 +21,8 @@ use crate::theme::Theme;
 
 #[path = "shell_connection_advanced.rs"]
 mod advanced;
+#[path = "shell_connection_services.rs"]
+mod services;
 
 /// Space kept free around the form sheet, per side.
 const FORM_MARGIN: f32 = 24.;
@@ -50,6 +52,7 @@ pub(super) struct ConnectionForm {
     /// One input per port forward, as `-L`/`-R`/`-D` text; blank rows are ignored on save.
     forwards: Vec<Entity<TextInput>>,
     password: Entity<TextInput>,
+    allowed_services: services::AllowedServicesField,
     vault_pass: Entity<TextInput>,
     vault_repeat: Entity<TextInput>,
     error: Option<String>,
@@ -81,6 +84,7 @@ impl ConnectionForm {
             &self.password_command,
             &self.sudo_password_command,
             &self.password,
+            &self.allowed_services.input,
             &self.vault_pass,
             &self.vault_repeat,
         ];
@@ -102,6 +106,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (allowed_services, services_sub) = self.new_allowed_services_field(editing, cx);
         let t = self.theme;
         let colors = t.input_colors();
         let mut field = |placeholder: &str, masked: bool, value: String| {
@@ -177,6 +182,7 @@ impl Shell {
                 .map(|f| field(FORWARD_HINT, false, f.clone()))
                 .collect(),
             password: field(password_hint, true, String::new()),
+            allowed_services,
             vault_pass: field("Vault passphrase", true, String::new()),
             vault_repeat: field("Repeat vault passphrase", true, String::new()),
             error: None,
@@ -195,6 +201,7 @@ impl Shell {
                 shell.unlock_from_keychain(cx);
             }
         }));
+        repaint.push(services_sub);
         let first = form.name.focus_handle(cx);
         self.form = Some(ConnectionForm {
             _repaint: repaint,
@@ -202,29 +209,6 @@ impl Shell {
         });
         self.picker = None;
         window.focus(&first, cx);
-        cx.notify();
-    }
-
-    /// A blank port-forward row, focused.
-    fn add_forward_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let t = self.theme;
-        let colors = t.input_colors();
-        let input = cx.new(|cx| TextInput::new(FORWARD_HINT.to_owned(), false, colors, cx));
-        window.focus(&input.focus_handle(cx), cx);
-        if let Some(form) = self.form.as_mut() {
-            form._repaint
-                .push(cx.observe(&input, |_, _, cx| cx.notify()));
-            form.forwards.push(input);
-        }
-        cx.notify();
-    }
-
-    fn remove_forward_row(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(form) = self.form.as_mut()
-            && ix < form.forwards.len()
-        {
-            form.forwards.remove(ix);
-        }
         cx.notify();
     }
 
@@ -267,6 +251,7 @@ impl Shell {
             &form.group,
             &form.tags,
             &form.password,
+            &form.allowed_services.input,
         ];
         // A collapsed section is skipped; its fields are not on screen to land on.
         if form.advanced_open {
@@ -290,7 +275,11 @@ impl Shell {
     fn on_form_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_form(window, cx),
-            "enter" => self.submit_form(window, cx),
+            "enter" => {
+                if !self.try_enter_allowed_service(window, cx) {
+                    self.submit_form(window, cx);
+                }
+            }
             "tab" => {
                 let fields = self.visible_fields(cx);
                 let at = fields
@@ -372,14 +361,32 @@ impl Shell {
             form.error = Some("The vault passphrases differ.".into());
             return cx.notify();
         }
+        let saved_name = connection.name.clone();
         let key = Key::Password {
             user: connection.user.clone(),
             host: connection.host.clone(),
             port: connection.port,
         };
+        let services_to_save = match self.validate_form_allowed_services(&saved_name, cx) {
+            Ok(svcs) => svcs,
+            Err(e) => {
+                if let Some(form) = self.form.as_mut() {
+                    form.error = Some(e);
+                }
+                return cx.notify();
+            }
+        };
         if let Err(e) = self.store_connection(editing, connection) {
             if let Some(form) = self.form.as_mut() {
                 form.error = Some(e);
+            }
+            return cx.notify();
+        }
+        if let Some(svcs) = services_to_save
+            && let Err(e) = self.set_agent_allowed_services(&saved_name, svcs, cx)
+        {
+            if let Some(form) = self.form.as_mut() {
+                form.error = Some(e.to_string());
             }
             return cx.notify();
         }
@@ -595,6 +602,7 @@ impl Shell {
             .child(groups)
             .child(row("Tags", &form.tags, t))
             .child(row("Password", &form.password, t))
+            .child(self.allowed_services_section(form, cx))
             .child(self.advanced_section(form, cx));
         match step {
             VaultStep::None => {}

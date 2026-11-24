@@ -11,6 +11,7 @@ mod authn;
 mod config;
 mod connect;
 mod error;
+mod exec;
 mod files;
 mod files_local;
 mod files_sftp;
@@ -31,6 +32,10 @@ use tokio::sync::mpsc;
 
 pub use config::load_ssh_config_hosts;
 pub use error::{Disconnect, Error, ForwardError, InputError, Result};
+pub use exec::{
+    DEFAULT_EXEC_TIMEOUT, EXEC_OUTPUT_CAP, Exec, ExecCancel, ExecError, ExecEvent, ExecOptions,
+    ExecOutput, MAX_EXEC_TIMEOUT, MIN_EXEC_TIMEOUT, exec,
+};
 pub use files::{
     Call, FileEntry, FileError, FileSource, LocalFs, PART_SUFFIX, Reader, SftpFiles, Writer,
     file_name, join, keep_both, parent,

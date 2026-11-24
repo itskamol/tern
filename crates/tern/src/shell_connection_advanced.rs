@@ -6,12 +6,14 @@ use gpui::{
     Transformation, div, percentage, px,
 };
 
-use super::{ConnectionForm, row};
+use super::{ConnectionForm, FORWARD_HINT, row};
 use crate::connections::{Connection, DEFAULT_KEEP_ALIVE};
 use crate::hover::HoverFade as _;
 use crate::icons::{self, icon};
 use crate::settings_widgets::toggle;
 use crate::shell::Shell;
+use crate::text_input::TextInput;
+use gpui::{AppContext as _, Focusable as _, Window};
 
 /// True when a connection has any advanced value set, so editing it never hides one.
 pub(super) fn in_use(c: &Connection) -> bool {
@@ -26,6 +28,28 @@ pub(super) fn in_use(c: &Connection) -> bool {
 }
 
 impl Shell {
+    /// A blank port-forward row, focused.
+    pub(super) fn add_forward_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let colors = self.theme.input_colors();
+        let input = cx.new(|cx| TextInput::new(FORWARD_HINT.to_owned(), false, colors, cx));
+        window.focus(&input.focus_handle(cx), cx);
+        if let Some(form) = self.form.as_mut() {
+            form._repaint
+                .push(cx.observe(&input, |_, _, cx| cx.notify()));
+            form.forwards.push(input);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn remove_forward_row(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(form) = self.form.as_mut()
+            && ix < form.forwards.len()
+        {
+            form.forwards.remove(ix);
+        }
+        cx.notify();
+    }
+
     /// The disclosure row (chevron like the sidebar group headers) and, when open, its fields.
     pub(super) fn advanced_section(
         &self,

@@ -61,16 +61,28 @@ impl Keeper {
     /// session scenario test starts from.
     #[cfg(test)]
     pub(crate) fn install_at(path: PathBuf, cx: &mut App) {
+        Self::install_at_with_keychain(path, false, cx);
+    }
+
+    /// Like [`Self::install_at`], allowing a test to turn the Keychain opt-in flag on without
+    /// touching the real macOS Keychain unless code mistakenly invokes `need_vault`.
+    #[cfg(test)]
+    pub(crate) fn install_at_with_keychain(path: PathBuf, keychain: bool, cx: &mut App) {
         cx.set_global(Self {
             path: Some(path),
             open: None,
-            keychain: false,
+            keychain,
             gate: Gate::default(),
             keychain_current: false,
             ticket: 0,
             pin: false,
             locks: 0,
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keychain_attempted(cx: &App) -> bool {
+        cx.global::<Self>().gate.tried()
     }
 
     pub fn install(keychain: bool, cx: &mut App) {
