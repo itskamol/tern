@@ -602,21 +602,36 @@ fn agents_files_are_strictly_excluded_from_sync() {
     )
     .unwrap();
     std::fs::write(a.join("agent-audit.jsonl"), "{\"event\":\"test\"}\n").unwrap();
+    std::fs::write(a.join("agent-audit.jsonl.1"), "{\"event\":\"rotated-1\"}\n").unwrap();
+    std::fs::write(a.join("agent-audit.jsonl.2"), "{\"event\":\"rotated-2\"}\n").unwrap();
     assert_eq!(snapshot(&a).unwrap().local, hash_before);
     assert!(!read_local(&a).unwrap().contains_key("agents.json"));
     assert!(!read_local(&a).unwrap().contains_key("agent-audit.jsonl"));
+    assert!(!read_local(&a).unwrap().contains_key("agent-audit.jsonl.1"));
+    assert!(!read_local(&a).unwrap().contains_key("agent-audit.jsonl.2"));
 
-    // Sync A -> B: B receives hosts.json, never agents.json or agent-audit.jsonl.
+    // Sync A -> B: B receives hosts.json, never agents.json or agent-audit.jsonl(.N).
     sync(&a, &remote, &vault, None, None, &none).unwrap();
     sync(&b, &remote, &vault, Some("pw"), None, &none).unwrap();
     assert!(b.join(HOSTS_FILE).exists());
     assert!(!b.join("agents.json").exists());
     assert!(!b.join("agent-audit.jsonl").exists());
+    assert!(!b.join("agent-audit.jsonl.1").exists());
+    assert!(!b.join("agent-audit.jsonl.2").exists());
 
-    // Even if a hostile remote payload includes agents.json, decode strips non-allowlisted files.
-    let mut injected = bundle(&[(HOSTS_FILE, b"[]"), ("agents.json", b"{\"enabled\":true}")]);
+    // Even if a hostile remote payload includes agents.json or audit logs, decode strips them.
+    let mut injected = bundle(&[
+        (HOSTS_FILE, b"[]"),
+        ("agents.json", b"{\"enabled\":true}"),
+        ("agent-audit.jsonl", b"{\"outcome\":\"active\"}\n"),
+        ("agent-audit.jsonl.1", b"{\"outcome\":\"active\"}\n"),
+    ]);
     let decoded = decode(&encode(&injected).unwrap()).unwrap();
     assert!(!decoded.contains_key("agents.json"));
+    assert!(!decoded.contains_key("agent-audit.jsonl"));
+    assert!(!decoded.contains_key("agent-audit.jsonl.1"));
     injected.remove("agents.json");
+    injected.remove("agent-audit.jsonl");
+    injected.remove("agent-audit.jsonl.1");
     assert_eq!(decoded, injected);
 }

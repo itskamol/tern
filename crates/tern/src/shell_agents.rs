@@ -9,11 +9,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use chrono::Utc;
 use gpui::Context;
 
 use super::Shell;
 use crate::agents::attention::{self, AgentAttention, AttentionCue};
-use crate::agents::broker::{AgentHost, BrokerHandle, BrokerSnapshot, DEFAULT_DECISION_TIMEOUT};
+use crate::agents::audit::{self, AuditRetention};
+use crate::agents::broker::{
+    AgentHost, AgentOutcome, BrokerHandle, BrokerSnapshot, DEFAULT_DECISION_TIMEOUT,
+};
 use crate::agents::grants::{Grant, GrantFingerprint, GrantStore};
 use crate::agents::socket_path;
 use crate::agents::store::{self, AgentConfig, StoreError};
@@ -34,6 +38,8 @@ pub(super) struct AgentsUi {
     decision_timeout: Duration,
     /// Non-focus-stealing background attention cue boundary (Dock bounce + macOS notification).
     attention: Arc<dyn AgentAttention>,
+    /// Bounded size/backup retention policy for local `agent-audit.jsonl`.
+    audit_retention: AuditRetention,
     broker: Option<BrokerHandle>,
 }
 
@@ -45,6 +51,7 @@ impl Default for AgentsUi {
             grants: GrantStore::default(),
             decision_timeout: DEFAULT_DECISION_TIMEOUT,
             attention: attention::default_attention(),
+            audit_retention: AuditRetention::default(),
             broker: None,
         }
     }
@@ -337,6 +344,17 @@ impl AgentHost for Shell {
 
     fn notify_agent_attention(&mut self, cue: &AttentionCue, _cx: &mut Context<Self>) {
         attention::notify_if_inactive(self.agents.attention.as_ref(), cue);
+    }
+
+    fn on_agent_outcome(&mut self, outcome: &AgentOutcome, cx: &mut Context<Self>) {
+        let dir = settings::dir();
+        let text = audit::record_outcome(
+            dir.as_deref(),
+            self.agents.audit_retention,
+            outcome,
+            Utc::now(),
+        );
+        self.activity(text, cx);
     }
 }
 

@@ -28,13 +28,16 @@ use tern_vault::{Key, Vault};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 use super::attention::{self, AgentAttention, AttentionCue};
+use super::audit::{
+    self, AuditDecision, AuditOutcome, AuditRecord, AuditRetention, audit_path, rotated_path,
+};
 use super::broker::{
     AgentDecision, AgentHost, AgentOutcome, BrokerHandle, BrokerSnapshot, CHOICE_ALLOW_ONCE,
     CHOICE_ALLOW_UNTIL_LOCK, CHOICE_DENY, DEFAULT_DECISION_TIMEOUT,
 };
 use super::grants::{Grant, GrantFingerprint, GrantStore};
 use super::mcp;
-use super::protocol::{AgentErrorCode, BrokerResult};
+use super::protocol::{AgentErrorCode, BrokerResult, UserActionReason};
 use super::socket_path;
 use super::store::{self, AgentConfig};
 use crate::connections::Connection;
@@ -44,6 +47,7 @@ use crate::decisions::{
 };
 use crate::keeper::Keeper;
 use crate::lock_on_sleep::{self, Cause};
+use crate::messages::{Entry as MessageEntry, Kind as MessageKind, Messages};
 use crate::password_command::Approved;
 use crate::platform::SshRuntime;
 
@@ -356,6 +360,8 @@ struct TestHost {
     decision_cancel_watch: Option<gpui::Task<()>>,
     decision_timeout: Duration,
     attention: Arc<SpyAttention>,
+    audit_retention: AuditRetention,
+    messages: Messages,
     outcomes: Vec<AgentOutcome>,
     broker: Option<BrokerHandle>,
 }
@@ -378,6 +384,8 @@ impl TestHost {
             decision_cancel_watch: None,
             decision_timeout: DEFAULT_DECISION_TIMEOUT,
             attention: SpyAttention::new(true),
+            audit_retention: AuditRetention::default(),
+            messages: Messages::default(),
             outcomes: Vec::new(),
             broker: None,
         }
@@ -389,6 +397,14 @@ impl TestHost {
 
     fn set_decision_timeout(&mut self, timeout: Duration) {
         self.decision_timeout = timeout;
+    }
+
+    fn set_audit_retention(&mut self, retention: AuditRetention) {
+        self.audit_retention = retention;
+    }
+
+    fn activity_entries(&self) -> Vec<MessageEntry> {
+        self.messages.list().cloned().collect()
     }
 
     fn sync_decision_tasks(&mut self, cx: &mut Context<Self>) {
@@ -598,6 +614,20 @@ impl AgentHost for TestHost {
     }
 
     fn on_agent_outcome(&mut self, outcome: &AgentOutcome, _cx: &mut Context<Self>) {
+        let text = audit::record_outcome(
+            Some(&self.dir),
+            self.audit_retention,
+            outcome,
+            chrono::Utc::now(),
+        );
+        self.messages.raise(
+            MessageKind::Activity,
+            text,
+            false,
+            false,
+            SystemTime::now(),
+            Instant::now(),
+        );
         self.outcomes.push(outcome.clone());
     }
 }
@@ -3134,4 +3164,630 @@ fn end_to_end_background_decision_triggers_attention_cue_without_focus_steal() {
     );
     assert_eq!(resp_paused["result"]["isError"], true);
     assert!(spy.take_cues().is_empty());
+}
+
+fn read_audit_records(path: &Path) -> Vec<AuditRecord> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<AuditRecord>(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn end_to_end_audit_log_and_activity_cover_every_decision_and_service_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let sock = socket_path(dir.path());
+
+    let ssh = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), |cmd| {
+        if cmd.ends_with("api.service") {
+            ExecReply::ok("loaded\nactive\nrunning\n")
+        } else if cmd.ends_with("worker.service") {
+            ExecReply::ok("loaded\nfailed\nfailed\n")
+        } else if cmd.ends_with("ghost.service") {
+            ExecReply::ok("not-found\ninactive\n\n")
+        } else if cmd.ends_with("bsd.service") {
+            ExecReply {
+                stdout: Vec::new(),
+                stderr: b"sh: 1: systemctl: not found\n".to_vec(),
+                exit_status: 127,
+                delay: Duration::ZERO,
+            }
+        } else if cmd.ends_with("broken.service") {
+            ExecReply {
+                stdout: Vec::new(),
+                stderr: b"Permission denied\n".to_vec(),
+                exit_status: 1,
+                delay: Duration::ZERO,
+            }
+        } else if cmd.ends_with("slow.service") {
+            ExecReply {
+                stdout: b"loaded\nactive\nrunning\n".to_vec(),
+                stderr: Vec::new(),
+                exit_status: 0,
+                delay: Duration::from_secs(3),
+            }
+        } else {
+            ExecReply::ok("loaded\ninactive\ndead\n")
+        }
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(
+        &vault_path,
+        vec![(
+            Key::Password {
+                user: "deploy".into(),
+                host: "127.0.0.1".into(),
+                port: ssh.port,
+            },
+            TEST_PASSWORD,
+        )],
+    );
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let mut hosts_map = BTreeMap::new();
+    hosts_map.insert(
+        "staging".to_owned(),
+        vec![
+            "api.service".to_owned(),
+            "worker.service".to_owned(),
+            "ghost.service".to_owned(),
+            "bsd.service".to_owned(),
+            "broken.service".to_owned(),
+            "slow.service".to_owned(),
+        ],
+    );
+    let config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: hosts_map,
+    };
+    let connections = vec![make_conn("staging", ssh.port)];
+
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh.clone(), config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    let mut mcp = McpClient::start(sock);
+    mcp.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Cursor" }
+        }),
+        &mut app,
+    );
+
+    // 1. Allowlist denial (unlisted host).
+    let r = mcp.call_sync(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "prod", "service": "api.service" }
+        }),
+        &mut app,
+    );
+    assert_eq!(r["result"]["isError"], true);
+
+    // 2. Allowlist denial (unlisted service on allowed host).
+    let r = mcp.call_sync(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "secret.service" }
+        }),
+        &mut app,
+    );
+    assert_eq!(r["result"]["isError"], true);
+
+    // 3. Allow once -> active.
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(r["result"]["isError"], false);
+
+    // 4. Allow until lock -> failed, then Grant reuse -> failed without a Decision.
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "worker.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(r["result"]["isError"], false);
+    let r = mcp.call_sync(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "worker.service" }
+        }),
+        &mut app,
+    );
+    assert_eq!(r["result"]["isError"], false);
+
+    // 5. Allow once -> not_found (LoadState::NotFound takes precedence over ActiveState::Inactive).
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "ghost.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(r["result"]["isError"], false);
+
+    // 6. Allow once -> unsupported_host.
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "bsd.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(r["result"]["isError"], true);
+
+    // 7. Allow once -> ssh_error.
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "broken.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(r["result"]["isError"], true);
+
+    // 8. Allow once -> exec timed_out.
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "slow.service",
+        Some(1),
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(r["result"]["isError"], true);
+
+    // 9. Explicit Deny.
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_DENY,
+    );
+    assert_eq!(r["result"]["isError"], true);
+
+    // 10. Decision expiry -> decision = timed_out, outcome = timed_out.
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.set_decision_timeout(Duration::from_millis(80));
+        });
+    });
+    let id_exp = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let _ = wait_for_decision(&host_entity, &mut app);
+    let exp_resp = mcp.recv_pumping(&mut app);
+    assert_eq!(exp_resp["id"], id_exp);
+    assert_eq!(exp_resp["result"]["isError"], true);
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.set_decision_timeout(DEFAULT_DECISION_TIMEOUT);
+        });
+    });
+
+    // 11. Headless Login ladder failure (vault locked) -> user_action_required (vault_locked).
+    app.update(Keeper::lock);
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(r["result"]["isError"], true);
+
+    // 12. Paused -> decision = paused, outcome = agents_paused.
+    app.update(|cx| host_entity.update(cx, |h, _| h.set_agents_paused(true)));
+    let r = mcp.call_sync(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+        &mut app,
+    );
+    assert_eq!(r["result"]["isError"], true);
+
+    // Verify agent-audit.jsonl mode (0o600), zero secrets, and exact records.
+    let path = audit_path(dir.path());
+    assert!(path.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "agent-audit.jsonl must be mode 0o600");
+    }
+    let raw_log = std::fs::read_to_string(&path).unwrap();
+    assert!(!raw_log.contains(TEST_PASSWORD));
+    assert!(!raw_log.contains("vp1"));
+    assert!(!raw_log.contains("Permission denied"));
+
+    let records = read_audit_records(&path);
+    let summary: Vec<_> = records
+        .iter()
+        .map(|r| {
+            assert_eq!(r.caller, "Cursor");
+            assert!(chrono::DateTime::parse_from_rfc3339(&r.timestamp).is_ok());
+            (
+                r.host.as_str(),
+                r.service.as_str(),
+                r.decision,
+                r.outcome,
+                r.reason,
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "prod",
+                "api.service",
+                AuditDecision::Denied,
+                AuditOutcome::Denied,
+                None
+            ),
+            (
+                "staging",
+                "secret.service",
+                AuditDecision::Denied,
+                AuditOutcome::Denied,
+                None
+            ),
+            (
+                "staging",
+                "api.service",
+                AuditDecision::AllowOnce,
+                AuditOutcome::Active,
+                None
+            ),
+            (
+                "staging",
+                "worker.service",
+                AuditDecision::AllowUntilLock,
+                AuditOutcome::Failed,
+                None
+            ),
+            (
+                "staging",
+                "worker.service",
+                AuditDecision::GrantReused,
+                AuditOutcome::Failed,
+                None
+            ),
+            (
+                "staging",
+                "ghost.service",
+                AuditDecision::AllowOnce,
+                AuditOutcome::NotFound,
+                None
+            ),
+            (
+                "staging",
+                "bsd.service",
+                AuditDecision::AllowOnce,
+                AuditOutcome::UnsupportedHost,
+                None
+            ),
+            (
+                "staging",
+                "broken.service",
+                AuditDecision::AllowOnce,
+                AuditOutcome::SshError,
+                None
+            ),
+            (
+                "staging",
+                "slow.service",
+                AuditDecision::AllowOnce,
+                AuditOutcome::TimedOut,
+                None
+            ),
+            (
+                "staging",
+                "api.service",
+                AuditDecision::Denied,
+                AuditOutcome::Denied,
+                None
+            ),
+            (
+                "staging",
+                "api.service",
+                AuditDecision::TimedOut,
+                AuditOutcome::TimedOut,
+                None
+            ),
+            (
+                "staging",
+                "api.service",
+                AuditDecision::AllowOnce,
+                AuditOutcome::UserActionRequired,
+                Some(UserActionReason::VaultLocked),
+            ),
+            (
+                "staging",
+                "api.service",
+                AuditDecision::Paused,
+                AuditOutcome::AgentsPaused,
+                None
+            ),
+        ]
+    );
+
+    // Verify every outcome emitted a quiet Activity (never an Alert) with GLOSSARY.md wording.
+    let entries = app.update(|cx| host_entity.read(cx).activity_entries());
+    assert_eq!(entries.len(), records.len());
+    for entry in &entries {
+        assert_eq!(entry.kind, MessageKind::Activity);
+        assert!(!entry.failed);
+    }
+    let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "Denied api.service check on prod for Cursor",
+            "Denied secret.service check on staging for Cursor",
+            "Agent checked api.service on staging: active",
+            "Agent checked worker.service on staging: failed",
+            "Agent checked worker.service on staging: failed",
+            "Agent checked ghost.service on staging: not found",
+            "Agent check failed for bsd.service on staging (unsupported host)",
+            "Agent check failed for broken.service on staging (SSH error)",
+            "Agent check timed out for slow.service on staging",
+            "Denied api.service check on staging for Cursor",
+            "Agent request timed out for api.service on staging",
+            "Agent check failed for api.service on staging (vault locked)",
+            "Agent check paused for api.service on staging",
+        ]
+    );
+}
+
+#[test]
+fn end_to_end_audit_log_and_activity_cover_pre_dispatch_cancel_and_post_dispatch_unknown_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let sock = socket_path(dir.path());
+
+    let (started_tx, started_rx) = async_channel::bounded::<()>(4);
+    let ssh = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), move |_| {
+        let _ = started_tx.try_send(());
+        ExecReply {
+            stdout: b"loaded\nactive\nrunning\n".to_vec(),
+            stderr: Vec::new(),
+            exit_status: 0,
+            delay: Duration::from_secs(5),
+        }
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(
+        &vault_path,
+        vec![(
+            Key::Password {
+                user: "deploy".into(),
+                host: "127.0.0.1".into(),
+                port: ssh.port,
+            },
+            TEST_PASSWORD,
+        )],
+    );
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let mut hosts_map = BTreeMap::new();
+    hosts_map.insert("staging".to_owned(), vec!["api.service".to_owned()]);
+    let config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: hosts_map,
+    };
+    let connections = vec![make_conn("staging", ssh.port)];
+
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh.clone(), config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    // 1. Pre-dispatch cancel via MCP notifications/cancelled while Decision is waiting.
+    let mut mcp = McpClient::start(sock.clone());
+    mcp.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Claude Code" }
+        }),
+        &mut app,
+    );
+    let id_cancel = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let _ = wait_for_decision(&host_entity, &mut app);
+    mcp.notify_with_params(
+        "notifications/cancelled",
+        &json!({ "requestId": id_cancel }),
+    );
+    wait_for_outcomes(&host_entity, 1, &mut app);
+
+    // 2. Post-dispatch disconnect while SSH exec is running -> unknown_outcome.
+    let _ = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let (dec_id, _) = wait_for_decision(&host_entity, &mut app);
+    assert!(app.update(|cx| host_entity.update(cx, |h, _| h.answer(dec_id, CHOICE_ALLOW_ONCE))));
+    wait_for_signal(&started_rx, &mut app);
+    mcp.close_stdin();
+    wait_for_outcomes(&host_entity, 1, &mut app);
+
+    let records = read_audit_records(&audit_path(dir.path()));
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].caller, "Claude Code");
+    assert_eq!(records[0].decision, AuditDecision::Cancelled);
+    assert_eq!(records[0].outcome, AuditOutcome::Denied);
+
+    assert_eq!(records[1].caller, "Claude Code");
+    assert_eq!(records[1].decision, AuditDecision::AllowOnce);
+    assert_eq!(records[1].outcome, AuditOutcome::UnknownOutcome);
+
+    let entries = app.update(|cx| host_entity.read(cx).activity_entries());
+    let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "Agent check cancelled for api.service on staging",
+            "Agent check outcome unknown for api.service on staging",
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn end_to_end_audit_log_rotates_with_0600_mode_under_live_broker_traffic() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let sock = socket_path(dir.path());
+
+    let ssh = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(
+        &vault_path,
+        vec![(
+            Key::Password {
+                user: "deploy".into(),
+                host: "127.0.0.1".into(),
+                port: ssh.port,
+            },
+            TEST_PASSWORD,
+        )],
+    );
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let mut hosts_map = BTreeMap::new();
+    hosts_map.insert("staging".to_owned(), vec!["api.service".to_owned()]);
+    let config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: hosts_map,
+    };
+    let connections = vec![make_conn("staging", ssh.port)];
+
+    // ~165 bytes per record; max_bytes = 360 fits 2 records per file and keeps 2 backups (.1, .2).
+    let retention = AuditRetention {
+        max_bytes: 360,
+        max_backups: 2,
+    };
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh.clone(), config, connections);
+            h.set_audit_retention(retention);
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    let mut mcp = McpClient::start(sock);
+    mcp.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Cursor" }
+        }),
+        &mut app,
+    );
+
+    let first = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(first["result"]["isError"], false);
+
+    for _ in 0..6 {
+        let resp = mcp.call_sync(
+            "tools/call",
+            &json!({
+                "name": "service_status",
+                "arguments": { "host": "staging", "service": "api.service" }
+            }),
+            &mut app,
+        );
+        assert_eq!(resp["result"]["isError"], false);
+    }
+
+    let primary = audit_path(dir.path());
+    let b1 = rotated_path(dir.path(), 1);
+    let b2 = rotated_path(dir.path(), 2);
+    let b3 = rotated_path(dir.path(), 3);
+
+    assert!(primary.exists());
+    assert!(b1.exists());
+    assert!(b2.exists());
+    assert!(!b3.exists());
+
+    for p in [&primary, &b1, &b2] {
+        let meta = std::fs::metadata(p).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert!(meta.len() <= retention.max_bytes);
+        assert!(!read_audit_records(p).is_empty());
+    }
+
+    // All 7 live outcomes also recorded in the Activity list.
+    let entries = app.update(|cx| host_entity.read(cx).activity_entries());
+    assert_eq!(entries.len(), 7);
+    assert!(entries.iter().all(|e| e.kind == MessageKind::Activity
+        && e.text == "Agent checked api.service on staging: active"));
 }
