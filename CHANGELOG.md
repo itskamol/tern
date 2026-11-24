@@ -4,6 +4,21 @@ All notable changes to tern are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-24
+
+### Added
+
+- Local MCP broker for **Agents** (`tern mcp`): let local coding Agents check allowlisted systemd services on **Saved connections** without receiving SSH keys, passwords, shell access or terminal **Fill**. Enable it in Settings → Agents and copy the ready-to-paste MCP config JSON (embedding tern's full executable path, so Homebrew cask installs work without `tern` on `PATH`). `tern mcp` stays alive when tern is closed, returns `tern_not_running` immediately, and recovers automatically once tern opens.
+- Per-**Saved connection** **Allowed services** list (Settings → Connections → Edit connection): allowlist specific systemd unit names (`[A-Za-z0-9:_@.-]`, never starting with `-`) stored locally in `agents.json` (`0o600`, never synced via `tern-sync`). `~/.ssh/config` Hosts cannot allow services directly; import or save them as a Saved connection first.
+- Isolated, strictly headless SSH `exec` for Agent `service_status` checks: each check dials its own short-lived non-PTY SSH connection (`forward_agent = false`, zero port forwards, immediate stdin EOF, 64 KiB stdout/stderr caps, `1..=60` s timeout) and runs `systemctl show -p LoadState,ActiveState,SubState --value -- <unit>`, returning structured state cleanly separated from transport or authorization errors. Login reuses the **Login ladder** in strict headless mode without popping prompts or unlocking Keychain silently.
+- Click-only Agent **Decision** cards in a generalised FIFO **Decision** queue (`1 of N`, live 60 s countdown, sanitized command text, returned fields summary, `Allow once` / `Allow until lock` / `Deny`). Background requests notify via macOS notification and Dock informational bounce without stealing focus, emit MCP `notifications/progress` when requested, dismiss immediately on pre-dispatch cancel/disconnect, and record `unknown_outcome` on post-dispatch disconnect.
+- In-memory **Grants** (`Allow until lock`) bound to a SHA-256 fingerprint of resolved Host settings and service name: cleared automatically on Mac sleep, screen lock or session switch (`lock_on_sleep`), app quit, Host/service edits, manual **Revoke active Grants**, or toggling **Pause agents**.
+- Bounded, rotating local audit log (`agent-audit.jsonl`, `0o600`, excluded from `tern-sync`) and quiet **Activity** entries for every Agent decision and outcome.
+
+### Security
+
+- Updated `url` to 2.5.9 (fixes RUSTSEC-2026-0592 in `Url::origin()`).
+
 ## [0.4.1] - 2026-11-16
 
 ### Changed
@@ -250,7 +265,8 @@ The first release: a daily-driver SSH client for macOS.
 - Secrets are held as zeroizing `SecretString`s and never logged; session output is redacted from `Debug`.
 - RUSTSEC-2023-0071 in `rsa` (via russh) is accepted for now; see [SECURITY.md](SECURITY.md) and #16.
 
-[Unreleased]: https://github.com/itskamol/tern/compare/v0.4.1...main
+[Unreleased]: https://github.com/itskamol/tern/compare/v0.5.0...main
+[0.5.0]: https://github.com/itskamol/tern/releases/tag/v0.5.0
 [0.4.1]: https://github.com/itskamol/tern/releases/tag/v0.4.1
 [0.4.0]: https://github.com/itskamol/tern/releases/tag/v0.4.0
 [0.3.1]: https://github.com/itskamol/tern/releases/tag/v0.3.1
