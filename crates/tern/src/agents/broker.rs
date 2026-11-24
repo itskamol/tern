@@ -21,7 +21,7 @@ use super::broker_socket::{IncomingRequest, Responder, bind_and_serve};
 use super::grants::GrantFingerprint;
 use super::protocol::{
     AgentError, AgentErrorCode, BrokerRequest, BrokerResult, HostSummary, ListHostsResponse,
-    MAX_COMMAND_BYTES,
+    MAX_COMMAND_BYTES, TimeoutPhase,
 };
 use super::store::AgentConfig;
 use crate::connections::Connection;
@@ -522,12 +522,12 @@ async fn handle_run_command<H: AgentHost>(
             AgentDecision::AllowUntilLock
         }
         DecisionOutcome::Expired => {
-            return req.fail(
-                AgentDecision::Expired,
-                AgentErrorCode::TimedOut,
+            let res = BrokerResult::Error(AgentError::timed_out(
+                TimeoutPhase::NotDispatched,
                 "approval decision expired",
-                cx,
-            );
+            ));
+            req.report(AgentDecision::Expired, &res, cx);
+            return res;
         }
         DecisionOutcome::Cancelled => {
             let Ok(paused) = host.update(cx, |h, _| h.agent_snapshot().config.paused) else {

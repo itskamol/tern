@@ -38,12 +38,39 @@ pub enum UserActionReason {
     InteractiveAuthRequired,
 }
 
+/// Machine-readable execution phase reached when [`AgentErrorCode::TimedOut`] occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutPhase {
+    /// Timed out before the SSH `exec` request was sent (e.g. approval wait, connect, auth, or
+    /// session channel open). Safe to retry.
+    NotDispatched,
+    /// Timed out after handing the `exec` request to SSH transport but before the server confirmed
+    /// acceptance. Do not blindly retry side-effecting commands.
+    DispatchUncertain,
+    /// Server accepted the `exec` request and the command was running when the timeout fired. Do
+    /// not blindly retry side-effecting commands; inspect partial `stdout`/`stderr`.
+    Running,
+}
+
 /// Structured error returned from the broker and surfaced by `tern mcp`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentError {
     pub error: AgentErrorCode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<UserActionReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<TimeoutPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     pub message: String,
 }
 
@@ -53,6 +80,12 @@ impl AgentError {
         Self {
             error,
             reason: None,
+            phase: None,
+            stdout: None,
+            stderr: None,
+            stdout_truncated: None,
+            stderr_truncated: None,
+            duration_ms: None,
             message: message.into(),
         }
     }
@@ -62,8 +95,50 @@ impl AgentError {
         Self {
             error: AgentErrorCode::UserActionRequired,
             reason: Some(reason),
+            phase: None,
+            stdout: None,
+            stderr: None,
+            stdout_truncated: None,
+            stderr_truncated: None,
+            duration_ms: None,
             message: message.into(),
         }
+    }
+
+    #[must_use]
+    pub fn timed_out(phase: TimeoutPhase, message: impl Into<String>) -> Self {
+        Self {
+            error: AgentErrorCode::TimedOut,
+            reason: None,
+            phase: Some(phase),
+            stdout: Some(String::new()),
+            stderr: Some(String::new()),
+            stdout_truncated: Some(false),
+            stderr_truncated: Some(false),
+            duration_ms: None,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_partial_output(
+        mut self,
+        stdout: String,
+        stderr: String,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    ) -> Self {
+        self.stdout = Some(stdout);
+        self.stderr = Some(stderr);
+        self.stdout_truncated = Some(stdout_truncated);
+        self.stderr_truncated = Some(stderr_truncated);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = Some(duration_ms);
+        self
     }
 }
 
@@ -341,7 +416,31 @@ mod tests {
         assert_eq!(json["status"], "error");
         assert_eq!(json["error"], "user_action_required");
         assert_eq!(json["reason"], "vault_locked");
+        assert!(json.get("phase").is_none());
+        assert!(json.get("stdout").is_none());
         assert_eq!(serde_json::from_value::<BrokerMessage>(json).unwrap(), msg);
+
+        for (phase, label) in [
+            (TimeoutPhase::NotDispatched, "not_dispatched"),
+            (TimeoutPhase::DispatchUncertain, "dispatch_uncertain"),
+            (TimeoutPhase::Running, "running"),
+        ] {
+            let timed = AgentError::timed_out(phase, "command timed out after 1s")
+                .with_partial_output("out\n".into(), "err\n".into(), false, true)
+                .with_duration_ms(1002);
+            let encoded = serde_json::to_value(&timed).unwrap();
+            assert_eq!(encoded["error"], "timed_out");
+            assert_eq!(encoded["phase"], label);
+            assert_eq!(encoded["stdout"], "out\n");
+            assert_eq!(encoded["stderr"], "err\n");
+            assert_eq!(encoded["stdout_truncated"], false);
+            assert_eq!(encoded["stderr_truncated"], true);
+            assert_eq!(encoded["duration_ms"], 1002);
+            assert_eq!(
+                serde_json::from_value::<AgentError>(encoded).unwrap(),
+                timed
+            );
+        }
 
         let progress = BrokerMessage::Progress {
             message: "Waiting for approval in tern...".into(),

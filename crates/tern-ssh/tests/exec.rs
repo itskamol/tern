@@ -17,8 +17,9 @@ use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Msg, Response, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig};
 use tern_ssh::{
-    DEFAULT_EXEC_TIMEOUT, EXEC_OUTPUT_CAP, ExecError, ExecOptions, Forward, JumpHop,
-    MAX_EXEC_TIMEOUT, MIN_EXEC_TIMEOUT, MemoryKey, Prompt, SecretString, SessionEvent, exec,
+    DEFAULT_EXEC_TIMEOUT, EXEC_OUTPUT_CAP, ExecError, ExecOptions, ExecPartialOutput,
+    ExecTimeoutPhase, Forward, JumpHop, MAX_EXEC_TIMEOUT, MIN_EXEC_TIMEOUT, MemoryKey, Prompt,
+    SecretString, SessionEvent, exec,
 };
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -344,6 +345,8 @@ async fn timeout_aborts_hanging_command_and_tears_down_connection() {
         err,
         ExecError::Timeout {
             timeout: Duration::from_secs(1),
+            phase: ExecTimeoutPhase::Running,
+            partial: ExecPartialOutput::default(),
         }
     );
     assert!(
@@ -354,6 +357,91 @@ async fn timeout_aborts_hanging_command_and_tears_down_connection() {
         elapsed < Duration::from_secs(5),
         "1s timeout took too long: {elapsed:?}"
     );
+    wait_active(&server.active, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timeout_before_server_acknowledges_exec_reports_dispatch_uncertain() {
+    let server = serve_exec(|ctx: ExecCtx| async move {
+        // Deliberately do not send channel_success: client sent exec on the wire, but never
+        // received server confirmation before the timeout expires.
+        let _keep_alive = ctx;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    })
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = known_spec(&server, &dir);
+
+    let err = exec(
+        s,
+        "deploy --apply",
+        ExecOptions::with_timeout(Duration::from_secs(1)),
+        &rt(),
+    )
+    .run_headless()
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        ExecError::Timeout {
+            timeout: Duration::from_secs(1),
+            phase: ExecTimeoutPhase::DispatchUncertain,
+            partial: ExecPartialOutput::default(),
+        }
+    );
+    wait_active(&server.active, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timeout_while_running_preserves_bounded_partial_stdout_and_stderr() {
+    let server = serve_exec(|ctx: ExecCtx| async move {
+        let _ = ctx.handle.channel_success(ctx.channel).await;
+        let _ = ctx.stdin_eof.await;
+        send_chunked(
+            &ctx.handle,
+            ctx.channel,
+            None,
+            &patterned_bytes(EXEC_OUTPUT_CAP + 512, 9),
+        )
+        .await;
+        let _ = ctx
+            .handle
+            .extended_data(ctx.channel, 1, b"waiting for lock\n".to_vec())
+            .await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    })
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = known_spec(&server, &dir);
+
+    let err = exec(
+        s,
+        "long-build",
+        ExecOptions::with_timeout(Duration::from_secs(1)),
+        &rt(),
+    )
+    .run_headless()
+    .await
+    .unwrap_err();
+
+    let ExecError::Timeout {
+        timeout,
+        phase,
+        partial,
+    } = err
+    else {
+        panic!("expected ExecError::Timeout, got {err:?}");
+    };
+    assert_eq!(timeout, Duration::from_secs(1));
+    assert_eq!(phase, ExecTimeoutPhase::Running);
+    assert_eq!(partial.stdout.len(), EXEC_OUTPUT_CAP);
+    assert_eq!(partial.stdout, patterned_bytes(EXEC_OUTPUT_CAP, 9));
+    assert!(partial.stdout_truncated);
+    assert_eq!(partial.stderr, b"waiting for lock\n");
+    assert!(!partial.stderr_truncated);
     wait_active(&server.active, 0).await;
 }
 
@@ -390,6 +478,8 @@ async fn timeout_aborts_stalled_connection_setup() {
         err,
         ExecError::Timeout {
             timeout: Duration::from_secs(1),
+            phase: ExecTimeoutPhase::NotDispatched,
+            partial: ExecPartialOutput::default(),
         }
     );
     assert!(
@@ -1071,6 +1161,8 @@ async fn proxy_jump_executes_checks_hop_keys_and_tears_down_on_complete_timeout_
         err,
         ExecError::Timeout {
             timeout: Duration::from_secs(1),
+            phase: ExecTimeoutPhase::Running,
+            partial: ExecPartialOutput::default(),
         }
     );
     wait_active(&target.active, 0).await;
@@ -1287,6 +1379,8 @@ async fn proxy_command_executes_and_kills_child_on_complete_timeout_and_cancel()
         err,
         ExecError::Timeout {
             timeout: Duration::from_secs(1),
+            phase: ExecTimeoutPhase::Running,
+            partial: ExecPartialOutput::default(),
         }
     );
     let pid_to = read_pid(&pidfile_to).await;

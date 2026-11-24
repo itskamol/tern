@@ -62,6 +62,8 @@ struct ExecReply {
     stderr: Vec<u8>,
     exit_status: u32,
     delay: Duration,
+    ack: bool,
+    delay_after_output: Duration,
 }
 
 impl ExecReply {
@@ -71,6 +73,8 @@ impl ExecReply {
             stderr: Vec::new(),
             exit_status: 0,
             delay: Duration::ZERO,
+            ack: true,
+            delay_after_output: Duration::ZERO,
         }
     }
 }
@@ -259,7 +263,9 @@ impl server::Handler for PeerHandler {
         let cmd = String::from_utf8_lossy(data).into_owned();
         self.commands.lock().unwrap().push(cmd.clone());
         let reply = (self.on_exec)(&cmd);
-        session.channel_success(channel)?;
+        if reply.ack {
+            session.channel_success(channel)?;
+        }
         let handle = session.handle();
         tokio::spawn(async move {
             if !reply.delay.is_zero() {
@@ -270,6 +276,9 @@ impl server::Handler for PeerHandler {
             }
             if !reply.stderr.is_empty() {
                 let _ = handle.extended_data(channel, 1, reply.stderr).await;
+            }
+            if !reply.delay_after_output.is_zero() {
+                tokio::time::sleep(reply.delay_after_output).await;
             }
             let _ = handle.exit_status_request(channel, reply.exit_status).await;
             let _ = handle.eof(channel).await;
@@ -558,6 +567,8 @@ fn end_to_end_run_command_grant_reuse_invalidation_and_activity() {
                 stderr: b"boom\n".to_vec(),
                 exit_status: 2,
                 delay: Duration::ZERO,
+                ack: true,
+                delay_after_output: Duration::ZERO,
             }
         } else {
             ExecReply::ok(&format!("ran: {cmd}\n"))
@@ -798,6 +809,8 @@ fn decision_expiry_pre_dispatch_cancel_and_post_dispatch_unknown_outcome() {
         stderr: Vec::new(),
         exit_status: 0,
         delay: Duration::from_secs(5),
+        ack: true,
+        delay_after_output: Duration::ZERO,
     });
     let known_hosts = server.write_known_hosts(dir.path());
     let staging = saved_password_conn("staging", server.port);
@@ -834,6 +847,12 @@ fn decision_expiry_pre_dispatch_cancel_and_post_dispatch_unknown_outcome() {
     });
     let exp = mcp.recv_id("exp-1", &app);
     assert_eq!(exp["result"]["structuredContent"]["error"], "timed_out");
+    assert_eq!(
+        exp["result"]["structuredContent"]["phase"],
+        "not_dispatched"
+    );
+    assert_eq!(exp["result"]["structuredContent"]["stdout"], "");
+    assert_eq!(exp["result"]["structuredContent"]["stderr"], "");
     assert_eq!(server.connections.load(Ordering::SeqCst), 0);
 
     // 2. Pre-dispatch notifications/cancelled dismisses pending Decision cleanly.
@@ -1153,4 +1172,161 @@ fn list_hosts_query_ranks_exact_match_first_and_reports_grant_active() {
     let prefix_res = mcp.recv_id("run-prefix", &app);
     assert_eq!(prefix_res["result"]["isError"], true);
     assert_eq!(prefix_res["result"]["structuredContent"]["error"], "denied");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_command_timeout_reports_all_three_phases_and_partial_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), |cmd| {
+        if cmd == "no-ack" {
+            ExecReply {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                exit_status: 0,
+                delay: Duration::from_secs(5),
+                ack: false,
+                delay_after_output: Duration::ZERO,
+            }
+        } else {
+            ExecReply {
+                stdout: b"step 1 done\n".to_vec(),
+                stderr: b"still waiting\n".to_vec(),
+                exit_status: 0,
+                delay: Duration::ZERO,
+                ack: true,
+                delay_after_output: Duration::from_secs(5),
+            }
+        }
+    });
+    let known_hosts = server.write_known_hosts(dir.path());
+
+    // Blackhole TCP listener for not_dispatched timeout during connection setup.
+    let blackhole = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let blackhole_port = blackhole.local_addr().unwrap().port();
+    let blackhole_thread = std::thread::spawn(move || {
+        if let Ok((stream, _)) = blackhole.accept() {
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        }
+    });
+
+    let live = saved_password_conn("live", server.port);
+    let stalled = saved_password_conn("stalled", blackhole_port);
+    approve_password_cmd(dir.path(), &live);
+    approve_password_cmd(dir.path(), &stalled);
+
+    let mut app = TestApp::new();
+    app.update(|cx| SshRuntime::install(cx).unwrap());
+    let host = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = FakeHost::new(
+                dir.path().to_path_buf(),
+                known_hosts,
+                vec![live.clone(), stalled.clone()],
+            );
+            for conn in [&live, &stalled] {
+                let fp = GrantFingerprint::for_connection(conn, &h.connections);
+                h.grants.insert(conn.name.clone(), fp, SystemTime::now());
+            }
+            h.start_broker(cx);
+            h
+        })
+    });
+    let mcp = McpHarness::start(socket_path(dir.path()), &app);
+
+    // 1. Stalled TCP handshake -> timed_out with phase = not_dispatched.
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "to-connect",
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": { "host": "stalled", "command": "uptime", "timeout_secs": 1 }
+        }
+    }));
+    let r_connect = mcp.recv_id("to-connect", &app);
+    assert_eq!(r_connect["result"]["isError"], true);
+    assert_eq!(
+        r_connect["result"]["structuredContent"]["error"],
+        "timed_out"
+    );
+    assert_eq!(
+        r_connect["result"]["structuredContent"]["phase"],
+        "not_dispatched"
+    );
+    assert_eq!(r_connect["result"]["structuredContent"]["stdout"], "");
+    assert_eq!(r_connect["result"]["structuredContent"]["stderr"], "");
+    assert!(
+        r_connect["result"]["structuredContent"]["duration_ms"]
+            .as_u64()
+            .unwrap()
+            >= 900
+    );
+
+    // 2. Exec sent on wire without server channel_success -> phase = dispatch_uncertain.
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "to-uncertain",
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": { "host": "live", "command": "no-ack", "timeout_secs": 1 }
+        }
+    }));
+    let r_uncertain = mcp.recv_id("to-uncertain", &app);
+    assert_eq!(r_uncertain["result"]["isError"], true);
+    assert_eq!(
+        r_uncertain["result"]["structuredContent"]["error"],
+        "timed_out"
+    );
+    assert_eq!(
+        r_uncertain["result"]["structuredContent"]["phase"],
+        "dispatch_uncertain"
+    );
+    assert_eq!(r_uncertain["result"]["structuredContent"]["stdout"], "");
+    assert_eq!(r_uncertain["result"]["structuredContent"]["stderr"], "");
+
+    // 3. Server accepted and streamed partial output before timing out -> phase = running.
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "to-running",
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": { "host": "live", "command": "slow-partial", "timeout_secs": 1 }
+        }
+    }));
+    let r_running = mcp.recv_id("to-running", &app);
+    assert_eq!(r_running["result"]["isError"], true);
+    assert_eq!(
+        r_running["result"]["structuredContent"]["error"],
+        "timed_out"
+    );
+    assert_eq!(r_running["result"]["structuredContent"]["phase"], "running");
+    assert_eq!(
+        r_running["result"]["structuredContent"]["stdout"],
+        "step 1 done\n"
+    );
+    assert_eq!(
+        r_running["result"]["structuredContent"]["stderr"],
+        "still waiting\n"
+    );
+    assert_eq!(
+        r_running["result"]["structuredContent"]["stdout_truncated"],
+        false
+    );
+    assert_eq!(
+        r_running["result"]["structuredContent"]["stderr_truncated"],
+        false
+    );
+    assert!(
+        r_running["result"]["structuredContent"]["duration_ms"]
+            .as_u64()
+            .unwrap()
+            >= 900
+    );
+
+    let _ = host;
+    let _ = blackhole_thread.join();
 }

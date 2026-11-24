@@ -11,11 +11,12 @@ use std::time::Instant;
 
 use gpui::AsyncApp;
 use tern_ssh::{
-    ConnectSpec, ExecCancel, ExecError, ExecEvent, ExecOptions, ExecOutput, MemoryKey, Prompt,
+    ConnectSpec, ExecCancel, ExecError, ExecEvent, ExecOptions, ExecOutput, ExecTimeoutPhase,
+    MemoryKey, Prompt,
 };
 use tern_vault::Key;
 
-use super::protocol::{AgentError, AgentErrorCode, UserActionReason};
+use super::protocol::{AgentError, AgentErrorCode, TimeoutPhase, UserActionReason};
 use crate::keeper::Keeper;
 use crate::login_ladder::{Facts, InVault, Ladder, Next};
 use crate::password_command::{self as pc, Approvals, Auth, Purpose};
@@ -206,8 +207,8 @@ async fn handle_prompt(
                 let remaining = ctx.deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     drop(prompt);
-                    return Some(AgentError::new(
-                        AgentErrorCode::TimedOut,
+                    return Some(AgentError::timed_out(
+                        TimeoutPhase::NotDispatched,
                         "command timed out before password command ran",
                     ));
                 }
@@ -283,7 +284,19 @@ fn map_exec_error(err: &ExecError) -> AgentError {
             UserActionReason::InteractiveAuthRequired,
             err.to_string(),
         ),
-        ExecError::Timeout { .. } => AgentError::new(AgentErrorCode::TimedOut, err.to_string()),
+        ExecError::Timeout { phase, partial, .. } => {
+            let phase = match phase {
+                ExecTimeoutPhase::NotDispatched => TimeoutPhase::NotDispatched,
+                ExecTimeoutPhase::DispatchUncertain => TimeoutPhase::DispatchUncertain,
+                ExecTimeoutPhase::Running => TimeoutPhase::Running,
+            };
+            AgentError::timed_out(phase, err.to_string()).with_partial_output(
+                String::from_utf8_lossy(&partial.stdout).into_owned(),
+                String::from_utf8_lossy(&partial.stderr).into_owned(),
+                partial.stdout_truncated,
+                partial.stderr_truncated,
+            )
+        }
         ExecError::HostKeyChanged { .. }
         | ExecError::AuthFailed { .. }
         | ExecError::Refused
@@ -308,11 +321,23 @@ mod tests {
         let timeout = resolve_exec_error(
             &ExecError::Timeout {
                 timeout: Duration::from_secs(1),
+                phase: ExecTimeoutPhase::Running,
+                partial: tern_ssh::ExecPartialOutput {
+                    stdout: b"line 1\n".to_vec(),
+                    stderr: b"warn\n".to_vec(),
+                    stdout_truncated: false,
+                    stderr_truncated: true,
+                },
             },
             Some(stale.clone()),
         );
         assert_eq!(timeout.error, AgentErrorCode::TimedOut);
         assert_eq!(timeout.reason, None);
+        assert_eq!(timeout.phase, Some(TimeoutPhase::Running));
+        assert_eq!(timeout.stdout.as_deref(), Some("line 1\n"));
+        assert_eq!(timeout.stderr.as_deref(), Some("warn\n"));
+        assert_eq!(timeout.stdout_truncated, Some(false));
+        assert_eq!(timeout.stderr_truncated, Some(true));
 
         let changed = resolve_exec_error(
             &ExecError::HostKeyChanged { line: 4, hop: None },

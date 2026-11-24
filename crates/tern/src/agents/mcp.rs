@@ -513,7 +513,7 @@ fn tools_list_payload_for_version(protocol_version: &str) -> Value {
     });
     let mut run_command = json!({
         "name": "run_command",
-        "description": "Run a shell command or inline script on a Saved connection in tern over an isolated non-PTY, non-interactive SSH exec channel. The session PATH and environment may differ from an interactive terminal. Command text is limited to 64 KiB; stdout and stderr are each capped at 64 KiB (check stdout_truncated and stderr_truncated). MCP isError reflects broker or SSH call failure, not the remote exit status: a completed remote command returns isError: false even when exit_code is non-zero (inspect exit_code or signal). Requires approval in tern unless an active Host Grant exists.",
+        "description": "Run a shell command or inline script on a Saved connection in tern over an isolated non-PTY, non-interactive SSH exec channel. The session PATH and environment may differ from an interactive terminal. Command text is limited to 64 KiB; stdout and stderr are each capped at 64 KiB (check stdout_truncated and stderr_truncated). MCP isError reflects broker or SSH call failure, not the remote exit status: a completed remote command returns isError: false even when exit_code is non-zero (inspect exit_code or signal). On timed_out, structuredContent includes phase (not_dispatched, dispatch_uncertain, or running) plus any partial stdout/stderr; only not_dispatched is safe to retry blindly. Requires approval in tern unless an active Host Grant exists.",
         "inputSchema": {
             "type": "object",
             "properties": {

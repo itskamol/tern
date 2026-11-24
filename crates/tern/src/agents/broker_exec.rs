@@ -170,7 +170,14 @@ pub(super) async fn execute_run_command(
                 }
             }
         }
-        Err(err) => BrokerResult::Error(err),
+        Err(err) => {
+            let err = if err.error == AgentErrorCode::TimedOut {
+                err.with_duration_ms(duration_ms)
+            } else {
+                err
+            };
+            BrokerResult::Error(err)
+        }
     }
 }
 
