@@ -542,8 +542,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let decision = self.decision_card(cx);
+        let vault_unlock = self.agent_vault_unlock_card(window, cx);
         let snackbar = self.render_snackbar(window, cx);
-        if decision.is_none() && snackbar.is_none() {
+        if decision.is_none() && vault_unlock.is_none() && snackbar.is_none() {
             return None;
         }
         Some(
@@ -559,6 +560,7 @@ impl Shell {
                             .items_end()
                             .gap(px(SPACE_SM))
                             .children(decision)
+                            .children(vault_unlock)
                             .children(snackbar),
                     ),
             )

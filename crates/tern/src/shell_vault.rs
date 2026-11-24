@@ -208,6 +208,7 @@ impl Shell {
                     Tried::Opened => {
                         s.clear_inputs(&[&input], cx);
                         s.activity("Vault unlocked", cx);
+                        s.on_vault_unlocked(cx);
                     }
                     Tried::Again { message, .. } | Tried::Failed(message) => {
                         s.vault_message(false, message, cx);

@@ -12,12 +12,17 @@ use gpui::AsyncApp;
 use tern_ssh::{ConnectSpec, DEFAULT_EXEC_TIMEOUT, ExecOptions};
 
 use super::broker::{
-    AgentDecision, AgentOutcome, BrokerSnapshot, CHOICE_ALLOW_ONCE, CHOICE_ALLOW_UNTIL_LOCK,
-    CHOICE_DENY,
+    AgentDecision, AgentHost, AgentOutcome, BrokerSnapshot, CHOICE_ALLOW_ONCE,
+    CHOICE_ALLOW_UNTIL_LOCK, CHOICE_DENY, CommandRequest, Postcheck,
+    WAITING_FOR_VAULT_UNLOCK_MESSAGE, saved_connection,
 };
 use super::broker_socket::Responder;
+use super::grants::GrantFingerprint;
 use super::headless_login::{self, HeadlessExec};
-use super::protocol::{AgentError, AgentErrorCode, BrokerResult, RunCommandResponse};
+use super::protocol::{
+    AgentError, AgentErrorCode, BrokerResult, RunCommandResponse, UserActionReason,
+};
+use super::vault_wait::VaultUnlockOutcome;
 use crate::connections::Connection;
 use crate::decisions::{DecisionChoice, DecisionPrompt, sanitize_display_text};
 use crate::password_command::{Approvals, Auth};
@@ -74,6 +79,145 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         format!("{head}…")
     } else {
         head
+    }
+}
+
+fn is_vault_locked(result: &BrokerResult) -> bool {
+    matches!(
+        result,
+        BrokerResult::Error(err)
+            if err.error == AgentErrorCode::UserActionRequired
+                && err.reason == Some(UserActionReason::VaultLocked)
+    )
+}
+
+/// Runs `command` via [`execute_run_command`]; if the host requires a locked Vault and the host UI
+/// supports bounded Vault unlock waiting, waits once for the human to unlock the Vault and retries
+/// execution strictly once (re-checking pause and target fingerprint first).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_with_vault_wait<H: AgentHost>(
+    req: &CommandRequest<'_, H>,
+    conn: &Connection,
+    snapshot: &BrokerSnapshot,
+    command: &str,
+    timeout_secs: Option<u64>,
+    wants_progress: bool,
+    responder: &Responder,
+    cx: &mut AsyncApp,
+) -> BrokerResult {
+    let first = execute_run_command(conn, snapshot, command, timeout_secs, responder, cx).await;
+    if !is_vault_locked(&first) || responder.is_cancelled() {
+        return first;
+    }
+
+    let original_fp = GrantFingerprint::for_connection(conn, &snapshot.connections);
+    let pending = match req.host.update(cx, |h, cx| {
+        let deadline = Instant::now() + h.agent_decision_timeout();
+        h.wait_for_vault_unlock(&req.caller, &conn.name, deadline, cx)
+    }) {
+        Ok(Some(pending)) => pending,
+        Ok(None) => return first,
+        Err(_) => {
+            return BrokerResult::Error(AgentError::new(
+                AgentErrorCode::TernNotRunning,
+                "tern window is no longer available",
+            ));
+        }
+    };
+
+    let vault_cancel = pending.cancel_handle();
+    let rt = cx.update(|cx| SshRuntime::handle(cx));
+    let mut cancel_rx = responder.cancel_receiver();
+    let cancel_bridge = AbortOnDrop(rt.spawn(async move {
+        if cancel_rx.wait_for(|&c| c).await.is_ok() {
+            vault_cancel.cancel();
+        }
+    }));
+
+    if wants_progress && !responder.is_cancelled() {
+        responder
+            .send_progress(WAITING_FOR_VAULT_UNLOCK_MESSAGE)
+            .await;
+    }
+
+    let outcome = pending.wait().await;
+    drop(cancel_bridge);
+
+    match outcome {
+        VaultUnlockOutcome::Expired => BrokerResult::Error(AgentError::user_action_required(
+            UserActionReason::VaultLocked,
+            "timed out waiting for vault unlock in tern",
+        )),
+        VaultUnlockOutcome::Cancelled => {
+            let Ok(paused) = req.host.update(cx, |h, _| h.agent_snapshot().config.paused) else {
+                return BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::TernNotRunning,
+                    "tern window is no longer available",
+                ));
+            };
+            if paused {
+                BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::AgentsPaused,
+                    "agents are paused in tern",
+                ))
+            } else if responder.is_cancelled() {
+                BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::Denied,
+                    "request cancelled by agent",
+                ))
+            } else {
+                BrokerResult::Error(AgentError::user_action_required(
+                    UserActionReason::VaultLocked,
+                    "vault unlock cancelled in tern",
+                ))
+            }
+        }
+        VaultUnlockOutcome::Unlocked => {
+            if responder.is_cancelled() {
+                return BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::Denied,
+                    "request cancelled by agent",
+                ));
+            }
+            let Ok(recheck) = req.host.update(cx, |h, _| {
+                let fresh = h.agent_snapshot();
+                if fresh.config.paused {
+                    return Postcheck::Paused;
+                }
+                let Some(fresh_conn) = saved_connection(&fresh, &req.target_host) else {
+                    return Postcheck::UnknownHost;
+                };
+                if GrantFingerprint::for_connection(&fresh_conn, &fresh.connections) != original_fp
+                {
+                    return Postcheck::Changed;
+                }
+                Postcheck::Ready(Box::new((fresh, fresh_conn)))
+            }) else {
+                return BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::TernNotRunning,
+                    "tern window is no longer available",
+                ));
+            };
+            match recheck {
+                Postcheck::Paused => BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::AgentsPaused,
+                    "agents are paused in tern",
+                )),
+                Postcheck::UnknownHost => BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::Denied,
+                    "saved connection is no longer available in tern",
+                )),
+                Postcheck::Changed => BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::Denied,
+                    "saved connection changed while waiting for vault unlock",
+                )),
+                Postcheck::Ready(ready) => {
+                    let (fresh, fresh_conn) = *ready;
+                    execute_run_command(&fresh_conn, &fresh, command, timeout_secs, responder, cx)
+                        .await
+                }
+            }
+        }
     }
 }
 

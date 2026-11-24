@@ -35,6 +35,18 @@ impl AttentionCue {
             body,
         }
     }
+
+    /// Builds a sanitized attention cue when an approved Agent request is waiting for the Vault
+    /// to be unlocked in tern.
+    #[must_use]
+    pub fn for_vault_unlock(caller: &str, host: &str) -> Self {
+        let caller = sanitize_display_text(caller);
+        let host = sanitize_display_text(host);
+        Self {
+            title: format!("Unlock vault for {host}"),
+            body: format!("{caller} is waiting for the vault to unlock to connect to {host}"),
+        }
+    }
 }
 
 /// Platform attention seam invoked when a new Agent Decision enters the queue.

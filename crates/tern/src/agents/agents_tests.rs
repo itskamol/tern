@@ -37,6 +37,7 @@ use super::mcp;
 use super::protocol::{AgentErrorCode, MAX_COMMAND_BYTES, UserActionReason};
 use super::socket_path;
 use super::store::AgentConfig;
+use super::vault_wait::{PendingVaultUnlock, VaultWaitQueue};
 use crate::connections::Connection;
 use crate::decisions::{
     DecisionId, DecisionPrompt, DecisionQueue, DecisionRequest, DecisionTag, PendingDecision,
@@ -320,6 +321,8 @@ struct FakeHost {
     connections: Vec<Connection>,
     grants: GrantStore,
     decisions: DecisionQueue<DecisionTag>,
+    vault_waits: VaultWaitQueue,
+    enable_vault_wait: bool,
     decision_timeout: Duration,
     attention: Arc<SpyAttention>,
     outcomes: Vec<AgentOutcome>,
@@ -339,6 +342,8 @@ impl FakeHost {
             connections,
             grants: GrantStore::default(),
             decisions: DecisionQueue::new(),
+            vault_waits: VaultWaitQueue::default(),
+            enable_vault_wait: false,
             decision_timeout: DEFAULT_DECISION_TIMEOUT,
             attention: SpyAttention::new(false),
             outcomes: Vec::new(),
@@ -356,6 +361,7 @@ impl FakeHost {
     fn simulate_lock(&mut self, _cause: Cause) {
         self.grants.revoke_all();
         self.decisions.cancel_where(|k| *k == DecisionTag::Agent);
+        self.vault_waits.cancel_all();
     }
 
     fn set_paused(&mut self, paused: bool) {
@@ -363,6 +369,7 @@ impl FakeHost {
         if paused {
             self.grants.revoke_all();
             self.decisions.cancel_where(|k| *k == DecisionTag::Agent);
+            self.vault_waits.cancel_all();
         }
     }
 }
@@ -414,6 +421,25 @@ impl AgentHost for FakeHost {
 
     fn notify_agent_attention(&mut self, cue: &AttentionCue, _cx: &mut Context<Self>) {
         attention::notify_if_inactive(self.attention.as_ref(), cue);
+    }
+
+    fn wait_for_vault_unlock(
+        &mut self,
+        caller: &str,
+        host: &str,
+        deadline: Instant,
+        _cx: &mut Context<Self>,
+    ) -> Option<PendingVaultUnlock> {
+        if !self.enable_vault_wait {
+            return None;
+        }
+        let pending = self
+            .vault_waits
+            .enqueue(caller, host, deadline, Instant::now())
+            .ok()?;
+        let cue = AttentionCue::for_vault_unlock(caller, host);
+        attention::notify_if_inactive(self.attention.as_ref(), &cue);
+        Some(pending)
     }
 
     fn on_agent_outcome(&mut self, outcome: &AgentOutcome, _cx: &mut Context<Self>) {
@@ -1329,4 +1355,201 @@ fn run_command_timeout_reports_all_three_phases_and_partial_output() {
 
     let _ = host;
     let _ = blackhole_thread.join();
+}
+
+#[cfg(unix)]
+#[test]
+fn vault_unlock_wait_resumes_once_and_never_runs_expired_or_cancelled_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let user_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+    let pem = user_key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .unwrap()
+        .to_string();
+    let server = TestSshServer::start(
+        ServerAuth::PublicKey(user_key.public_key().clone()),
+        |cmd| ExecReply::ok(&format!("unlocked:{cmd}\n")),
+    );
+    let known_hosts = server.write_known_hosts(dir.path());
+    let vault_conn = Connection {
+        name: "alpha".into(),
+        host: "127.0.0.1".into(),
+        port: server.port,
+        user: "deploy".into(),
+        vault_key: Some("deploy-key".into()),
+        ..Connection::default()
+    };
+
+    let make_vault = || {
+        let mut vault = Vault::new(SecretString::from("master-pass"));
+        vault.set(
+            Key::SshKey {
+                name: "deploy-key".into(),
+            },
+            SecretString::from(pem.clone()),
+        );
+        vault
+    };
+
+    let mut app = TestApp::new();
+    app.update(|cx| {
+        SshRuntime::install(cx).unwrap();
+        Keeper::install(true, cx);
+        Keeper::adopt(make_vault(), cx);
+        Keeper::lock(cx);
+    });
+
+    let host = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = FakeHost::new(
+                dir.path().to_path_buf(),
+                known_hosts,
+                vec![vault_conn.clone()],
+            );
+            h.enable_vault_wait = true;
+            h.start_broker(cx);
+            h
+        })
+    });
+    let mcp = McpHarness::start(socket_path(dir.path()), &app);
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "init",
+        "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18", "clientInfo": { "name": "Codex" } }
+    }));
+    let _ = mcp.recv_id("init", &app);
+
+    // 1. Approval gate runs FIRST; vault wait starts only after approval and resumes once unlocked.
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "vw-1",
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": { "host": "alpha", "command": "uptime" },
+            "_meta": { "progressToken": "p-vw-1" }
+        }
+    }));
+    let (dec_id, _) = wait_for_decision(&mut app, &host);
+    // While approval is pending, no vault unlock waiter may exist yet.
+    app.update(|cx| {
+        assert!(host.read(cx).vault_waits.is_empty());
+        host.update(cx, |h, _| {
+            assert!(
+                h.decisions
+                    .answer(dec_id, CHOICE_ALLOW_UNTIL_LOCK, Instant::now())
+                    .is_some()
+            );
+        });
+    });
+
+    // Vault waiter appears + background attention cue fires; zero SSH dials or Keychain attempts yet.
+    wait_until(&mut app, |app| {
+        app.update(|cx| !host.read(cx).vault_waits.is_empty())
+    });
+    assert_eq!(server.connections.load(Ordering::SeqCst), 0);
+    app.update(|cx| {
+        assert!(!Keeper::keychain_attempted(cx));
+        {
+            let cues = host.read(cx).attention.cues.lock().unwrap();
+            assert!(cues.iter().any(|c| c.title.contains("Unlock vault")));
+        }
+        // Human unlocks the vault -> waiting request resumes once and succeeds.
+        Keeper::adopt(make_vault(), cx);
+        host.update(cx, |h, _| {
+            assert_eq!(h.vault_waits.resolve_unlocked(Instant::now()), 1);
+        });
+    });
+
+    let mut saw_vault_progress = false;
+    let res1 = loop {
+        let msg = mcp.recv_next(&app);
+        if msg.get("method").and_then(Value::as_str) == Some("notifications/progress")
+            && msg["params"]["message"] == super::broker::WAITING_FOR_VAULT_UNLOCK_MESSAGE
+        {
+            saw_vault_progress = true;
+            continue;
+        }
+        if msg.get("id") == Some(&json!("vw-1")) {
+            break msg;
+        }
+    };
+    assert!(saw_vault_progress);
+    assert_eq!(res1["result"]["isError"], false);
+    assert_eq!(
+        res1["result"]["structuredContent"]["stdout"],
+        "unlocked:uptime\n"
+    );
+    assert_eq!(server.connections.load(Ordering::SeqCst), 1);
+
+    // 2. Lock vault again (grant stays active in FakeHost unless lock_on_sleep); wait expires ->
+    //    returns vault_locked, and unlocking later MUST NOT execute the expired command.
+    app.update(Keeper::lock);
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "vw-exp",
+        "method": "tools/call",
+        "params": { "name": "run_command", "arguments": { "host": "alpha", "command": "stale-cmd" } }
+    }));
+    wait_until(&mut app, |app| {
+        app.update(|cx| !host.read(cx).vault_waits.is_empty())
+    });
+    app.update(|cx| {
+        host.update(cx, |h, _| {
+            assert_eq!(
+                h.vault_waits
+                    .sweep(Instant::now() + Duration::from_secs(61)),
+                1
+            );
+        });
+    });
+    let exp_res = mcp.recv_id("vw-exp", &app);
+    assert_eq!(exp_res["result"]["isError"], true);
+    assert_eq!(
+        exp_res["result"]["structuredContent"]["error"],
+        "user_action_required"
+    );
+    assert_eq!(
+        exp_res["result"]["structuredContent"]["reason"],
+        "vault_locked"
+    );
+
+    // Unlocking the vault later must not run stale-cmd.
+    app.update(|cx| {
+        Keeper::adopt(make_vault(), cx);
+        host.update(cx, |h, _| {
+            assert_eq!(h.vault_waits.resolve_unlocked(Instant::now()), 0);
+        });
+    });
+    assert_eq!(server.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(*server.commands.lock().unwrap(), vec!["uptime".to_owned()]);
+
+    // 3. Human clicks Cancel while waiting -> returns vault_locked immediately.
+    app.update(Keeper::lock);
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "vw-cancel",
+        "method": "tools/call",
+        "params": { "name": "run_command", "arguments": { "host": "alpha", "command": "cancelled-cmd" } }
+    }));
+    wait_until(&mut app, |app| {
+        app.update(|cx| !host.read(cx).vault_waits.is_empty())
+    });
+    app.update(|cx| {
+        host.update(cx, |h, _| {
+            assert_eq!(h.vault_waits.cancel_all(), 1);
+        });
+    });
+    let cancel_res = mcp.recv_id("vw-cancel", &app);
+    assert_eq!(cancel_res["result"]["isError"], true);
+    assert_eq!(
+        cancel_res["result"]["structuredContent"]["error"],
+        "user_action_required"
+    );
+    assert_eq!(
+        cancel_res["result"]["structuredContent"]["reason"],
+        "vault_locked"
+    );
+    assert_eq!(server.connections.load(Ordering::SeqCst), 1);
 }

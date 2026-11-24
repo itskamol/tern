@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::attention::AttentionCue;
-use super::broker_exec::{AbortOnDrop, caller_display, execute_run_command};
+use super::broker_exec::{AbortOnDrop, caller_display, execute_with_vault_wait};
 pub use super::broker_exec::{build_run_command_prompt, format_activity, summarize_command};
 use super::broker_socket::{IncomingRequest, Responder, bind_and_serve};
 use super::grants::GrantFingerprint;
@@ -24,6 +24,7 @@ use super::protocol::{
     MAX_COMMAND_BYTES, TimeoutPhase,
 };
 use super::store::AgentConfig;
+use super::vault_wait::PendingVaultUnlock;
 use crate::connections::Connection;
 use crate::decisions::{
     DecisionOutcome, DecisionPrompt, PendingDecision, QueueFull, sanitize_display_text,
@@ -41,6 +42,8 @@ pub const DEFAULT_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Progress message sent while an Agent request is waiting for human approval in tern.
 pub const WAITING_FOR_APPROVAL_MESSAGE: &str = "Waiting for approval in tern...";
+/// Progress message sent while an approved Agent request is waiting for Vault unlock in tern.
+pub const WAITING_FOR_VAULT_UNLOCK_MESSAGE: &str = "Waiting for vault unlock in tern...";
 
 const LIST_HOSTS_USAGE: &str = "Call run_command with an alias from hosts and a shell command or script (up to 64 KiB). Optional timeout_secs defaults to 30 (clamped to 1..=300).";
 const MAX_PENDING_REQUESTS: usize = 32;
@@ -117,6 +120,19 @@ pub trait AgentHost: Sized + 'static {
     /// Triggers a non-focus-stealing attention cue when a new Agent Decision is enqueued while
     /// tern is not the active app.
     fn notify_agent_attention(&mut self, _cue: &AttentionCue, _cx: &mut Context<Self>) {}
+
+    /// Registers a bounded wait for the human to unlock the Vault in tern so an approved Agent
+    /// request can resume once unlocked. Returns `None` when interactive waiting is unavailable
+    /// (causing the broker to fail closed immediately with `vault_locked`).
+    fn wait_for_vault_unlock(
+        &mut self,
+        _caller: &str,
+        _host: &str,
+        _deadline: Instant,
+        _cx: &mut Context<Self>,
+    ) -> Option<PendingVaultUnlock> {
+        None
+    }
 
     /// Hook called when a `run_command` request finishes for quiet **Activity** reporting.
     fn on_agent_outcome(&mut self, _outcome: &AgentOutcome, _cx: &mut Context<Self>) {}
@@ -305,7 +321,7 @@ fn handle_list_hosts<H: AgentHost>(
     }
 }
 
-fn saved_connection(snapshot: &BrokerSnapshot, host: &str) -> Option<Connection> {
+pub(super) fn saved_connection(snapshot: &BrokerSnapshot, host: &str) -> Option<Connection> {
     snapshot
         .connections
         .iter()
@@ -327,7 +343,7 @@ enum Precheck {
     },
 }
 
-enum Postcheck {
+pub(super) enum Postcheck {
     Paused,
     UnknownHost,
     Changed,
@@ -342,10 +358,10 @@ struct RunCommandCall {
     wants_progress: bool,
 }
 
-struct CommandRequest<'a, H> {
-    host: &'a WeakEntity<H>,
-    caller: String,
-    target_host: String,
+pub(super) struct CommandRequest<'a, H> {
+    pub(super) host: &'a WeakEntity<H>,
+    pub(super) caller: String,
+    pub(super) target_host: String,
 }
 
 impl<H: AgentHost> CommandRequest<'_, H> {
@@ -466,8 +482,17 @@ async fn handle_run_command<H: AgentHost>(
                     cx,
                 );
             }
-            let res =
-                execute_run_command(&conn, &snapshot, &command, timeout_secs, responder, cx).await;
+            let res = execute_with_vault_wait(
+                &req,
+                &conn,
+                &snapshot,
+                &command,
+                timeout_secs,
+                wants_progress,
+                responder,
+                cx,
+            )
+            .await;
             req.report(AgentDecision::GrantReused, &res, cx);
             return res;
         }
@@ -630,7 +655,17 @@ async fn handle_run_command<H: AgentHost>(
         Postcheck::Ready(ready) => *ready,
     };
 
-    let res = execute_run_command(&conn, &fresh, &command, timeout_secs, responder, cx).await;
+    let res = execute_with_vault_wait(
+        &req,
+        &conn,
+        &fresh,
+        &command,
+        timeout_secs,
+        wants_progress,
+        responder,
+        cx,
+    )
+    .await;
     req.report(decision, &res, cx);
     res
 }

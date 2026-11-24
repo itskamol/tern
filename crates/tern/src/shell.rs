@@ -54,6 +54,8 @@ actions!(
     ]
 );
 
+#[path = "shell_agent_vault.rs"]
+mod agent_vault_ui;
 #[path = "shell_agents.rs"]
 mod agents_ui;
 #[path = "shell_broadcast.rs"]

@@ -13,6 +13,7 @@ pub mod headless_login;
 pub mod mcp;
 pub mod protocol;
 pub mod store;
+pub mod vault_wait;
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]

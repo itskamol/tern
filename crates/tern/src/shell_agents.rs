@@ -8,9 +8,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use gpui::{Context, WeakEntity};
+use gpui::{Context, Task, WeakEntity};
 
 use super::Shell;
+use super::agent_vault_ui::AgentVaultPromptUi;
 use crate::agents::attention::{self, AgentAttention, AttentionCue};
 use crate::agents::broker::{
     AgentHost, AgentOutcome, BrokerHandle, BrokerSnapshot, DEFAULT_DECISION_TIMEOUT,
@@ -19,6 +20,7 @@ use crate::agents::broker::{
 use crate::agents::grants::{Grant, GrantFingerprint, GrantStore};
 use crate::agents::socket_path;
 use crate::agents::store::{self, AgentConfig, StoreError};
+use crate::agents::vault_wait::{PendingVaultUnlock, VaultWaitQueue};
 use crate::decisions::{DecisionPrompt, DecisionTag, PendingDecision, QueueFull};
 use crate::lock_on_sleep::Cause;
 use crate::settings;
@@ -34,7 +36,15 @@ pub(super) struct AgentsUi {
     /// Wall-clock deadline for unanswered Agent Decisions (60 s in production; overridable in tests).
     decision_timeout: Duration,
     /// Non-focus-stealing background attention cue boundary (Dock bounce + macOS notification).
-    attention: Arc<dyn AgentAttention>,
+    pub(super) attention: Arc<dyn AgentAttention>,
+    /// Bounded queue of approved Agent requests waiting for Vault unlock in tern.
+    pub(super) vault_waits: VaultWaitQueue,
+    /// In-window contextual `Unlock Vault` card state while `vault_waits` is non-empty.
+    pub(super) vault_prompt: Option<AgentVaultPromptUi>,
+    /// 1s countdown / expiry timer for active Agent Vault unlock waiters.
+    pub(super) vault_wait_timer: Option<Task<()>>,
+    /// Watches Agent cancel/disconnect signals while Vault unlock waiters are queued.
+    pub(super) vault_wait_cancel_watch: Option<Task<()>>,
     broker: Option<BrokerHandle>,
 }
 
@@ -46,6 +56,10 @@ impl Default for AgentsUi {
             grants: GrantStore::default(),
             decision_timeout: DEFAULT_DECISION_TIMEOUT,
             attention: attention::default_attention(),
+            vault_waits: VaultWaitQueue::default(),
+            vault_prompt: None,
+            vault_wait_timer: None,
+            vault_wait_cancel_watch: None,
             broker: None,
         }
     }
@@ -221,6 +235,7 @@ impl Shell {
                 .set_enabled(dir.as_deref(), enabled, cx.entity().downgrade(), cx)?;
         if disabled {
             self.cancel_decisions_for(&DecisionTag::Agent, cx);
+            self.cancel_agent_vault_waits(cx);
         }
         cx.notify();
         Ok(())
@@ -243,7 +258,8 @@ impl Shell {
         let grants = self.agents.set_paused(dir.as_deref(), paused)?;
         if paused {
             let decisions = self.cancel_decisions_for(&DecisionTag::Agent, cx);
-            tracing::info!(grants, decisions, "agents_paused");
+            let vault_waits = self.cancel_agent_vault_waits(cx);
+            tracing::info!(grants, decisions, vault_waits, "agents_paused");
         } else {
             tracing::info!("agents_resumed");
         }
@@ -256,8 +272,9 @@ impl Shell {
     pub(crate) fn revoke_all_agent_grants(&mut self, cx: &mut Context<Self>) -> usize {
         let grants = self.agents.grants.revoke_all();
         let decisions = self.cancel_decisions_for(&DecisionTag::Agent, cx);
-        if grants > 0 || decisions > 0 {
-            tracing::info!(grants, decisions, "agent_grants_revoked");
+        let vault_waits = self.cancel_agent_vault_waits(cx);
+        if grants > 0 || decisions > 0 || vault_waits > 0 {
+            tracing::info!(grants, decisions, vault_waits, "agent_grants_revoked");
         }
         cx.notify();
         grants
@@ -290,8 +307,15 @@ impl Shell {
         self.lock_vault_for(cause, cx);
         let grants = self.agents.grants.revoke_all();
         let decisions = self.cancel_decisions_for(&DecisionTag::Agent, cx);
-        if grants > 0 || decisions > 0 {
-            tracing::info!(?cause, grants, decisions, "agent_grants_cleared_on_lock");
+        let vault_waits = self.cancel_agent_vault_waits(cx);
+        if grants > 0 || decisions > 0 || vault_waits > 0 {
+            tracing::info!(
+                ?cause,
+                grants,
+                decisions,
+                vault_waits,
+                "agent_grants_cleared_on_lock"
+            );
         }
         cx.notify();
     }
@@ -347,6 +371,16 @@ impl AgentHost for Shell {
 
     fn notify_agent_attention(&mut self, cue: &AttentionCue, _cx: &mut Context<Self>) {
         attention::notify_if_inactive(self.agents.attention.as_ref(), cue);
+    }
+
+    fn wait_for_vault_unlock(
+        &mut self,
+        caller: &str,
+        host: &str,
+        deadline: Instant,
+        cx: &mut Context<Self>,
+    ) -> Option<PendingVaultUnlock> {
+        self.wait_for_agent_vault_unlock(caller, host, deadline, cx)
     }
 
     fn on_agent_outcome(&mut self, outcome: &AgentOutcome, cx: &mut Context<Self>) {
