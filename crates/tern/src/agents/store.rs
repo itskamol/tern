@@ -34,7 +34,6 @@ pub enum StoreError {
     #[error("invalid systemd unit name: {0}")]
     InvalidUnitName(String),
     #[error("host is not a saved connection: {0}")]
-    #[allow(dead_code)] // Constructed by save / set_allowed_services (#65).
     UnknownSavedConnection(String),
     #[error("{0}")]
     Io(#[from] io::Error),
@@ -65,6 +64,28 @@ pub fn validate_unit_name(unit: &str) -> Result<(), StoreError> {
     }
 }
 
+/// Validates that `host` is a Saved connection and returns its validated, deduplicated unit names.
+fn validate_host_services<S: AsRef<str> + Into<String>>(
+    host: &str,
+    services: impl IntoIterator<Item = S>,
+    saved_connections: &[Connection],
+) -> Result<Vec<String>, StoreError> {
+    if !saved_connections.iter().any(|c| c.name == host) {
+        return Err(StoreError::UnknownSavedConnection(host.to_owned()));
+    }
+    let mut deduped = Vec::new();
+    for service in services {
+        validate_unit_name(service.as_ref())?;
+        if !deduped
+            .iter()
+            .any(|existing: &String| existing == service.as_ref())
+        {
+            deduped.push(service.into());
+        }
+    }
+    Ok(deduped)
+}
+
 impl AgentConfig {
     /// Replaces the allowed systemd service units for Saved connection `host`.
     /// Passing an empty list removes `host` from the allowlist.
@@ -73,29 +94,29 @@ impl AgentConfig {
     /// Returns [`StoreError::UnknownSavedConnection`] if `host` is not in `saved_connections`
     /// (rejecting `~/.ssh/config`-only Hosts), or [`StoreError::InvalidUnitName`] if any service
     /// name fails [`validate_unit_name`].
-    #[allow(dead_code)] // Called by Settings UI (#65) and unit tests.
     pub fn set_allowed_services(
         &mut self,
         host: &str,
         services: Vec<String>,
         saved_connections: &[Connection],
     ) -> Result<(), StoreError> {
-        if !saved_connections.iter().any(|c| c.name == host) {
-            return Err(StoreError::UnknownSavedConnection(host.to_owned()));
-        }
-        let mut deduped = Vec::with_capacity(services.len());
-        for service in services {
-            validate_unit_name(&service)?;
-            if !deduped.contains(&service) {
-                deduped.push(service);
-            }
-        }
+        let deduped = validate_host_services(host, services, saved_connections)?;
         if deduped.is_empty() {
             self.hosts.remove(host);
         } else {
             self.hosts.insert(host.to_owned(), deduped);
         }
         Ok(())
+    }
+
+    /// Drops any allowlisted host entries whose alias no longer exists in `saved_connections` so
+    /// recreating a deleted or renamed Saved connection under the same alias never inherits stale
+    /// permissions. Returns how many host entries were removed.
+    pub fn prune_unknown_hosts(&mut self, saved_connections: &[Connection]) -> usize {
+        let before = self.hosts.len();
+        self.hosts
+            .retain(|host, _| saved_connections.iter().any(|c| c.name == *host));
+        before - self.hosts.len()
     }
 
     /// Returns only Saved connections that currently exist in `saved_connections` and have at
@@ -184,7 +205,6 @@ pub fn load(dir: &Path) -> Result<AgentConfig, StoreError> {
 /// unsupported version, [`StoreError::UnknownSavedConnection`] if any configured host is not in
 /// `saved_connections`, [`StoreError::InvalidUnitName`] if any service name is invalid, or
 /// [`StoreError::Io`] on filesystem write failure.
-#[allow(dead_code)] // Called by Settings UI (#65), Pause agents (#63), and unit tests.
 pub fn save(
     dir: &Path,
     config: &AgentConfig,
@@ -195,16 +215,8 @@ pub fn save(
 
     let mut clean_hosts = BTreeMap::new();
     for (host, services) in &config.hosts {
-        if !saved_connections.iter().any(|c| c.name == *host) {
-            return Err(StoreError::UnknownSavedConnection(host.clone()));
-        }
-        let mut deduped = Vec::with_capacity(services.len());
-        for service in services {
-            validate_unit_name(service)?;
-            if !deduped.contains(service) {
-                deduped.push(service.clone());
-            }
-        }
+        let deduped =
+            validate_host_services(host, services.iter().map(String::as_str), saved_connections)?;
         if !deduped.is_empty() {
             clean_hosts.insert(host.clone(), deduped);
         }
@@ -226,7 +238,6 @@ pub fn save(
     Ok(())
 }
 
-#[allow(dead_code)] // Called by save (#63/#65) and unit tests.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true).truncate(true);

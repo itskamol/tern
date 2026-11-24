@@ -53,7 +53,7 @@ pub struct BrokerSnapshot {
     pub connections: Vec<Connection>,
 }
 
-/// How authorization was resolved for a `service_status` request (seam for `#64` audit log).
+/// How authorization was resolved for a `service_status` request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentDecision {
@@ -73,8 +73,6 @@ pub struct AgentOutcome {
     pub caller: String,
     pub host: String,
     pub service: String,
-    #[allow(dead_code)] // Preserved on the outcome seam for diagnostics and future callers.
-    pub command: Option<String>,
     pub decision: AgentDecision,
     pub result: BrokerResult,
 }
@@ -122,7 +120,7 @@ pub trait AgentHost: Sized + 'static {
     /// tern is not the active app.
     fn notify_agent_attention(&mut self, _cue: &AttentionCue, _cx: &mut Context<Self>) {}
 
-    /// Hook called when a `service_status` request finishes (seam for #64 audit + Activity).
+    /// Hook called when a `service_status` request finishes for local audit logging and Activity.
     fn on_agent_outcome(&mut self, _outcome: &AgentOutcome, _cx: &mut Context<Self>) {}
 }
 
@@ -204,11 +202,13 @@ async fn handle_incoming<H: AgentHost>(
         } => {
             handle_service_status(
                 &host,
-                caller,
-                target_host,
-                service,
-                timeout_secs,
-                wants_progress,
+                ServiceStatusCall {
+                    caller,
+                    target_host,
+                    service,
+                    timeout_secs,
+                    wants_progress,
+                },
                 &responder,
                 cx,
             )
@@ -288,6 +288,14 @@ enum Postcheck {
     Ready(Box<(BrokerSnapshot, Connection)>),
 }
 
+struct ServiceStatusCall {
+    caller: Option<String>,
+    target_host: String,
+    service: String,
+    timeout_secs: Option<u64>,
+    wants_progress: bool,
+}
+
 struct ServiceRequest<'a, H> {
     host: &'a WeakEntity<H>,
     caller: String,
@@ -296,18 +304,11 @@ struct ServiceRequest<'a, H> {
 }
 
 impl<H: AgentHost> ServiceRequest<'_, H> {
-    fn report(
-        &self,
-        command: Option<&str>,
-        decision: AgentDecision,
-        result: &BrokerResult,
-        cx: &mut AsyncApp,
-    ) {
+    fn report(&self, decision: AgentDecision, result: &BrokerResult, cx: &mut AsyncApp) {
         let outcome = AgentOutcome {
             caller: self.caller.clone(),
             host: self.target_host.clone(),
             service: self.service.clone(),
-            command: command.map(str::to_owned),
             decision,
             result: result.clone(),
         };
@@ -318,29 +319,30 @@ impl<H: AgentHost> ServiceRequest<'_, H> {
 
     fn fail(
         &self,
-        command: Option<&str>,
         decision: AgentDecision,
         code: AgentErrorCode,
         message: impl Into<String>,
         cx: &mut AsyncApp,
     ) -> BrokerResult {
         let res = BrokerResult::Error(AgentError::new(code, message));
-        self.report(command, decision, &res, cx);
+        self.report(decision, &res, cx);
         res
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_service_status<H: AgentHost>(
     host: &WeakEntity<H>,
-    caller: Option<String>,
-    target_host: String,
-    service: String,
-    timeout_secs: Option<u64>,
-    wants_progress: bool,
+    call: ServiceStatusCall,
     responder: &Responder,
     cx: &mut AsyncApp,
 ) -> BrokerResult {
+    let ServiceStatusCall {
+        caller,
+        target_host,
+        service,
+        timeout_secs,
+        wants_progress,
+    } = call;
     let req = ServiceRequest {
         host,
         caller: caller_display(caller.as_deref()),
@@ -350,7 +352,6 @@ async fn handle_service_status<H: AgentHost>(
 
     if responder.is_cancelled() {
         return req.fail(
-            None,
             AgentDecision::Cancelled,
             AgentErrorCode::Denied,
             "request cancelled by agent",
@@ -395,7 +396,6 @@ async fn handle_service_status<H: AgentHost>(
     let (conn, command, fingerprint) = match precheck {
         Precheck::Paused => {
             return req.fail(
-                None,
                 AgentDecision::Paused,
                 AgentErrorCode::AgentsPaused,
                 "agents are paused in tern",
@@ -408,10 +408,10 @@ async fn handle_service_status<H: AgentHost>(
                 sanitize_display_text(&req.service),
                 sanitize_display_text(&req.target_host),
             );
-            return req.fail(None, AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
+            return req.fail(AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
         }
         Precheck::InvalidUnit(msg) => {
-            return req.fail(None, AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
+            return req.fail(AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
         }
         Precheck::Granted {
             snapshot,
@@ -420,7 +420,6 @@ async fn handle_service_status<H: AgentHost>(
         } => {
             if responder.is_cancelled() {
                 return req.fail(
-                    Some(&command),
                     AgentDecision::Cancelled,
                     AgentErrorCode::Denied,
                     "request cancelled by agent",
@@ -437,7 +436,7 @@ async fn handle_service_status<H: AgentHost>(
                 cx,
             )
             .await;
-            req.report(Some(&command), AgentDecision::GrantReused, &res, cx);
+            req.report(AgentDecision::GrantReused, &res, cx);
             return res;
         }
         Precheck::NeedsDecision {
@@ -459,7 +458,6 @@ async fn handle_service_status<H: AgentHost>(
         Ok(Ok(pending)) => pending,
         Ok(Err(QueueFull)) => {
             return req.fail(
-                Some(&command),
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
                 "too many pending approval decisions in tern",
@@ -497,7 +495,6 @@ async fn handle_service_status<H: AgentHost>(
         }
         DecisionOutcome::Expired => {
             return req.fail(
-                Some(&command),
                 AgentDecision::Expired,
                 AgentErrorCode::TimedOut,
                 "approval decision expired",
@@ -513,7 +510,6 @@ async fn handle_service_status<H: AgentHost>(
             };
             if paused {
                 return req.fail(
-                    Some(&command),
                     AgentDecision::Paused,
                     AgentErrorCode::AgentsPaused,
                     "agents are paused in tern",
@@ -526,7 +522,6 @@ async fn handle_service_status<H: AgentHost>(
                 "request cancelled in tern"
             };
             return req.fail(
-                Some(&command),
                 AgentDecision::Cancelled,
                 AgentErrorCode::Denied,
                 message,
@@ -535,7 +530,6 @@ async fn handle_service_status<H: AgentHost>(
         }
         DecisionOutcome::Chosen(_) => {
             return req.fail(
-                Some(&command),
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
                 "request denied in tern",
@@ -548,7 +542,6 @@ async fn handle_service_status<H: AgentHost>(
     // never record a Grant or dial SSH if the caller already cancelled or disconnected.
     if responder.is_cancelled() {
         return req.fail(
-            Some(&command),
             AgentDecision::Cancelled,
             AgentErrorCode::Denied,
             "request cancelled by agent",
@@ -584,7 +577,6 @@ async fn handle_service_status<H: AgentHost>(
     let (fresh, conn) = match postcheck {
         Postcheck::Paused => {
             return req.fail(
-                Some(&command),
                 AgentDecision::Paused,
                 AgentErrorCode::AgentsPaused,
                 "agents are paused in tern",
@@ -593,7 +585,6 @@ async fn handle_service_status<H: AgentHost>(
         }
         Postcheck::NotAllowed => {
             return req.fail(
-                Some(&command),
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
                 "host or service is no longer allowed in tern",
@@ -602,7 +593,6 @@ async fn handle_service_status<H: AgentHost>(
         }
         Postcheck::Changed => {
             return req.fail(
-                Some(&command),
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
                 "saved connection changed before approval completed",
@@ -622,6 +612,6 @@ async fn handle_service_status<H: AgentHost>(
         cx,
     )
     .await;
-    req.report(Some(&command), decision, &res, cx);
+    req.report(decision, &res, cx);
     res
 }

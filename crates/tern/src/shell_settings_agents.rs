@@ -16,7 +16,7 @@ use super::{Section, Shell};
 use crate::hover::Accessible as _;
 use crate::icons::{self, icon};
 use crate::settings_widgets as w;
-use crate::theme::MONO_FONT;
+use crate::theme::{MONO_FONT, SPACE_LG, SPACE_SM};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,7 +126,7 @@ impl Shell {
                     .on_click(cx.listener(|s, _, _, cx| {
                         let next = !s.agents_enabled();
                         if let Err(e) = s.set_agents_enabled(next, cx) {
-                            s.alert_failed(e.to_string(), cx);
+                            s.alert_failed(e, cx);
                         }
                     }))
                     .child(w::toggle(&t, enabled, "agents-enabled")),
@@ -275,19 +275,22 @@ impl Shell {
                         s.activity("Copied MCP config JSON", cx);
                     })),
             ))
+            // Code block geometry (`docs/ui.md`, Agents): `SPACE_LG` side margin matching `w::row`,
+            // 12 bottom/side inset matching `w::row`'s vertical rhythm, `SPACE_SM` top/bottom pad
+            // and corner radius, and `w::row`'s 12/16 description typography in `MONO_FONT`.
             .child(
                 div()
-                    .mx(px(16.))
-                    .mb(px(14.))
+                    .mx(px(SPACE_LG))
+                    .mb(px(12.))
                     .px(px(12.))
-                    .py(px(10.))
-                    .rounded(px(8.))
+                    .py(px(SPACE_SM))
+                    .rounded(px(SPACE_SM))
                     .bg(t.ink(0.05))
                     .border_1()
                     .border_color(t.hairline)
                     .font_family(MONO_FONT)
-                    .text_size(px(11.5))
-                    .line_height(px(17.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
                     .text_color(t.text)
                     .overflow_hidden()
                     .flex()

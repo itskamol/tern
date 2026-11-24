@@ -1589,7 +1589,7 @@ fn end_to_end_headless_login_ladder_vault_keychain_commands_hostkeys_and_2fa() {
     );
 }
 
-// ---- Ticket #63: Allow until lock Grants, fingerprint invalidation, lock_on_sleep, Pause ----
+// ---- Allow until lock Grants, fingerprint invalidation, lock_on_sleep, Pause ----
 
 fn wait_for_agent_queued(host: &Entity<TestHost>, app: &mut TestApp) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -3790,4 +3790,90 @@ fn end_to_end_audit_log_rotates_with_0600_mode_under_live_broker_traffic() {
     assert_eq!(entries.len(), 7);
     assert!(entries.iter().all(|e| e.kind == MessageKind::Activity
         && e.text == "Agent checked api.service on staging: active"));
+}
+
+fn generate_encrypted_key(dir: &Path, name: &str, passphrase: &str) -> PathBuf {
+    let priv_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
+        .unwrap()
+        .encrypt(&mut rand::rng(), passphrase)
+        .unwrap();
+    let pem = priv_key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .unwrap()
+        .to_string();
+    let path = dir.join(name);
+    std::fs::write(&path, &pem).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    path
+}
+
+#[test]
+fn headless_login_declined_passphrase_does_not_mask_post_auth_timeout() {
+    use super::headless_login::{self, HeadlessExec};
+    use crate::password_command::{Approvals, Auth as PcAuth};
+    use tern_ssh::{ConnectSpec, ExecOptions};
+
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+
+    let enc_key_path = generate_encrypted_key(dir.path(), "enc_ed25519", "key-secret");
+    let (fallback_key_path, fallback_pub_key, _) =
+        generate_unencrypted_key(dir.path(), "fallback_ed25519");
+
+    let slow_ssh = TestSshServer::start(ServerAuth::PublicKey(fallback_pub_key), |_| ExecReply {
+        stdout: b"loaded\nactive\nrunning\n".to_vec(),
+        stderr: Vec::new(),
+        exit_status: 0,
+        delay: Duration::from_secs(3),
+    });
+    slow_ssh.write_known_hosts(&kh);
+
+    let app = setup_test_app(vault_path, false);
+
+    let mut spec =
+        ConnectSpec::from_host_entry(&make_conn("slow", slow_ssh.port).entry_in(&[])).unwrap();
+    spec.known_hosts = Some(kh);
+    // Encrypted key comes first (declined headless -> latches prompt_failure), followed by
+    // unencrypted fallback key that authenticates cleanly, then the remote exec times out.
+    spec.identity_files = vec![enc_key_path, fallback_key_path];
+
+    let req = HeadlessExec {
+        spec,
+        auth: PcAuth::default(),
+        approvals: Approvals::in_dir(Some(dir.path().to_path_buf())),
+        command: "systemctl show -p LoadState,ActiveState,SubState --value -- api.service".into(),
+        options: ExecOptions::with_timeout(Duration::from_secs(1)),
+    };
+
+    let (tx, rx) = async_channel::bounded(1);
+    app.spawn(async move |mut cx| {
+        let res = headless_login::run(req, |_| {}, &mut cx).await;
+        let _ = tx.send(res).await;
+    })
+    .detach();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let err = loop {
+        app.run_until_parked();
+        if let Ok(res) = rx.try_recv() {
+            break res.unwrap_err();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for headless_login"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(
+        err.error,
+        AgentErrorCode::TimedOut,
+        "declined key passphrase must not mask post-auth timeout; got {err:?}"
+    );
+    assert_eq!(err.reason, None);
 }

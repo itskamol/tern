@@ -11,11 +11,12 @@ use gpui::{
 
 use super::ConnectionForm;
 use crate::agents::store::{MAX_UNIT_NAME_LEN, validate_unit_name};
+#[cfg(test)]
 use crate::connections::Connection;
 use crate::hover::HoverFade as _;
 use crate::shell::Shell;
 use crate::text_input::TextInput;
-use crate::theme::MONO_FONT;
+use crate::theme::{CONTROL_RADIUS, MONO_FONT, SPACE_SM};
 
 /// Placeholder text for the Saved connection's allowed-service input.
 pub(super) const SERVICE_HINT: &str = "e.g. api.service or worker@1.service";
@@ -85,8 +86,8 @@ pub(super) fn finalize_services(
 
 /// Returns `true` only when `host` is a Saved connection (`hosts.json`), never a `~/.ssh/config`
 /// entry that has not been imported or saved first.
+#[cfg(test)]
 #[must_use]
-#[allow(dead_code)] // Pure gating helper tested alongside store::AgentConfig checks.
 pub(super) fn host_is_saved_connection(host: &str, saved: &[Connection]) -> bool {
     saved.iter().any(|c| c.name == host)
 }
@@ -118,14 +119,38 @@ impl AllowedServicesField {
     }
 
     /// Whether saving `final_services` under `saved_name` needs an `agents.json` write.
-    pub(super) fn needs_save(&self, final_services: &[String], saved_name: &str) -> bool {
-        if self.initial != final_services {
-            return true;
-        }
-        self.original_host
-            .as_deref()
-            .is_some_and(|old| old != saved_name && !self.initial.is_empty())
+    pub(super) fn needs_save(
+        &self,
+        final_services: &[String],
+        saved_name: &str,
+        has_existing_allowlist: bool,
+    ) -> bool {
+        should_save_services(
+            self.original_host.as_deref(),
+            &self.initial,
+            final_services,
+            saved_name,
+            has_existing_allowlist,
+        )
     }
+}
+
+fn should_save_services(
+    original_host: Option<&str>,
+    initial: &[String],
+    final_services: &[String],
+    saved_name: &str,
+    has_existing_allowlist: bool,
+) -> bool {
+    if initial != final_services {
+        return true;
+    }
+    // Creating a new connection or renaming onto an alias that still has a stale allowlist
+    // entry must write `final_services` explicitly so it can never silently inherit old units.
+    if original_host != Some(saved_name) && has_existing_allowlist {
+        return true;
+    }
+    original_host.is_some_and(|old| old != saved_name && !initial.is_empty())
 }
 
 impl Shell {
@@ -185,6 +210,7 @@ impl Shell {
         saved_name: &str,
         cx: &gpui::App,
     ) -> Result<Option<Vec<String>>, String> {
+        let has_existing_allowlist = self.agents.config.hosts.contains_key(saved_name);
         let Some(form) = self.form.as_mut() else {
             return Ok(None);
         };
@@ -198,7 +224,7 @@ impl Shell {
         };
         if !form
             .allowed_services
-            .needs_save(&final_services, saved_name)
+            .needs_save(&final_services, saved_name, has_existing_allowlist)
         {
             return Ok(None);
         }
@@ -238,7 +264,10 @@ impl Shell {
         cx.notify();
     }
 
-    /// Renders the Saved connection editor's "Allowed services (Agents)" section.
+    /// Renders the Saved connection editor's "Allowed services (Agents)" section (`docs/ui.md`,
+    /// Agents): input matches `shell_connections::row` (30 tall, 10 inset, 8 radius), chips match
+    /// `group-chip` (`CONTROL_RADIUS` 6, `SPACE_SM` 8 left inset, 2 vertical inset, 6 gap), and
+    /// each chip's remove control matches the Files panel's 20 px Forget button.
     pub(super) fn allowed_services_section(
         &self,
         form: &ConnectionForm,
@@ -248,7 +277,7 @@ impl Shell {
         let inline_error = form.allowed_services.inline_error.clone();
         let store_error = self.agent_store_error().map(str::to_owned);
         let has_error = inline_error.is_some();
-        let chips = div().flex().flex_wrap().gap(px(6.)).children(
+        let chips = div().flex().flex_wrap().gap(px(CONTROL_RADIUS)).children(
             form.allowed_services
                 .services
                 .iter()
@@ -257,11 +286,11 @@ impl Shell {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
-                        .pl(px(8.))
+                        .gap(px(CONTROL_RADIUS))
+                        .pl(px(SPACE_SM))
                         .pr(px(4.))
-                        .py(px(3.))
-                        .rounded(px(6.))
+                        .py(px(2.))
+                        .rounded(px(CONTROL_RADIUS))
                         .bg(t.row_hover)
                         .border_1()
                         .border_color(t.hairline)
@@ -275,7 +304,7 @@ impl Shell {
                         .child(
                             div()
                                 .id(("form-remove-service", ix))
-                                .size(px(18.))
+                                .size(px(20.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -295,7 +324,7 @@ impl Shell {
         div()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(px(CONTROL_RADIUS))
             .pt(px(4.))
             .child(
                 div()
@@ -316,7 +345,7 @@ impl Shell {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(CONTROL_RADIUS))
                     .child(
                         div()
                             .flex_1()
@@ -325,7 +354,7 @@ impl Shell {
                             .px(px(10.))
                             .flex()
                             .items_center()
-                            .rounded(px(8.))
+                            .rounded(px(SPACE_SM))
                             .border_1()
                             .border_color(if has_error { t.danger } else { t.border })
                             .bg(t.row_hover)
@@ -341,7 +370,7 @@ impl Shell {
                             .px(px(12.))
                             .flex()
                             .items_center()
-                            .rounded(px(8.))
+                            .rounded(px(SPACE_SM))
                             .border_1()
                             .border_color(t.border)
                             .text_xs()
@@ -496,5 +525,37 @@ mod tests {
         assert!(host_is_saved_connection("staging", &saved));
         assert!(host_is_saved_connection("prod", &saved));
         assert!(!host_is_saved_connection("ssh-config-only", &saved));
+    }
+
+    #[test]
+    fn new_or_renamed_connection_with_empty_services_still_saves_when_stale_allowlist_exists() {
+        // Brand-new connection with empty services and no stale entry: no agents.json write needed.
+        assert!(!should_save_services(None, &[], &[], "staging", false));
+        // Brand-new connection with empty services when a stale entry exists: MUST save to clear it.
+        assert!(should_save_services(None, &[], &[], "staging", true));
+        // Renaming another empty connection onto an alias with a stale entry: MUST save to clear it.
+        assert!(should_save_services(
+            Some("other"),
+            &[],
+            &[],
+            "staging",
+            true
+        ));
+        // Editing the same connection without changing its services: no write needed.
+        assert!(!should_save_services(
+            Some("staging"),
+            &["api.service".into()],
+            &["api.service".into()],
+            "staging",
+            true
+        ));
+        // Renaming a connection that had allowed services: MUST save under the new name.
+        assert!(should_save_services(
+            Some("staging"),
+            &["api.service".into()],
+            &["api.service".into()],
+            "staging-2",
+            false
+        ));
     }
 }

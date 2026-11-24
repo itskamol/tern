@@ -25,7 +25,7 @@ use crate::decisions::{
 use crate::hover::HoverFade as _;
 use crate::messages::{Kind, Messages, Place, SHOWN_FOR, Work};
 use crate::session::Session;
-use crate::theme::{MONO_FONT, SPACE_SM, TITLEBAR_HEIGHT, Theme};
+use crate::theme::{CONTROL_RADIUS, MONO_FONT, SPACE_SM, TITLEBAR_HEIGHT, Theme};
 
 const CLIPBOARD_ONCE: &str = "once";
 const CLIPBOARD_ALWAYS: &str = "always";
@@ -73,8 +73,9 @@ enum DecisionKind {
         session: WeakEntity<Session>,
         who: String,
     },
-    #[allow(dead_code)] // Enqueued by Agents and other callers (#61/#62/#63).
-    External { tag: DecisionTag },
+    External {
+        tag: DecisionTag,
+    },
 }
 
 fn clipboard_choices() -> Vec<DecisionChoice> {
@@ -239,7 +240,6 @@ impl Shell {
     ///
     /// # Errors
     /// Returns [`QueueFull`] when the Decision queue is already at its pending limit.
-    #[allow(dead_code)] // Used by Agent broker (#61/#62/#63).
     pub(crate) fn ask_decision(
         &mut self,
         tag: DecisionTag,
@@ -267,20 +267,8 @@ impl Shell {
         Ok(pending)
     }
 
-    /// Cancels a single pending Decision by ID, dismissing it immediately if still waiting.
-    #[allow(dead_code)] // Used by Agent cancellation paths (#62).
-    pub(crate) fn cancel_decision(&mut self, id: DecisionId, cx: &mut Context<Self>) -> bool {
-        let cancelled = self.activity.decisions.cancel(id);
-        if cancelled {
-            self.sync_decision_tasks(cx);
-            cx.notify();
-        }
-        cancelled
-    }
-
     /// Cancels every pending external Decision matching `tag` (e.g., all Agent Decisions on
     /// sleep, screen lock, or Pause agents) without disturbing clipboard Decisions.
-    #[allow(dead_code)] // Used by Agent Grant/pause clearing (#63).
     pub(crate) fn cancel_decisions_for(
         &mut self,
         tag: &DecisionTag,
@@ -406,8 +394,11 @@ impl Shell {
     }
 
     /// The front Decision's card (click-only; never bound to bare Enter or Space). Card geometry
-    /// matches the Activity list (340 wide, 12 radius, 13 pt, inset and gap `SPACE_SM`); buttons
-    /// match the connection form's, 6 apart.
+    /// matches the Activity list (340 wide, 12 radius, 13 pt, inset and gap `SPACE_SM`); meta row
+    /// uses 11 pt (Activity header/time), details use 12 pt with a 52 px label column (Files panel
+    /// Size column) and 4 px row gap (`shell_connections::row`), command box uses `SPACE_SM`×
+    /// `CONTROL_RADIUS` inset with `CONTROL_RADIUS` radius and 11/16 `MONO_FONT`, and buttons
+    /// match the connection form's, `CONTROL_RADIUS` (6) apart (`docs/ui.md`, Messages / Agents).
     fn decision_card(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.prune_stale_decisions(cx);
         let front = self.activity.decisions.front(Instant::now())?;
@@ -448,8 +439,8 @@ impl Shell {
                 .when(show_meta, |el| {
                     let left = match queue_label {
                         Some(label) => div()
-                            .px(px(6.))
-                            .py(px(1.))
+                            .px(px(CONTROL_RADIUS))
+                            .py(px(2.))
                             .rounded(px(4.))
                             .bg(t.row_hover)
                             .text_color(t.text)
@@ -485,17 +476,17 @@ impl Shell {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(3.))
+                            .gap(px(4.))
                             .text_size(px(12.))
                             .children(details.into_iter().map(|d| {
                                 div()
                                     .flex()
                                     .items_start()
-                                    .gap(px(6.))
+                                    .gap(px(CONTROL_RADIUS))
                                     .child(
                                         div()
                                             .flex_none()
-                                            .min_w(px(54.))
+                                            .min_w(px(52.))
                                             .text_color(t.muted)
                                             .child(SharedString::from(format!("{}:", d.label))),
                                     )
@@ -516,9 +507,9 @@ impl Shell {
                             .w_full()
                             .min_w_0()
                             .overflow_hidden()
-                            .px(px(8.))
-                            .py(px(6.))
-                            .rounded(px(6.))
+                            .px(px(SPACE_SM))
+                            .py(px(CONTROL_RADIUS))
+                            .rounded(px(CONTROL_RADIUS))
                             .bg(t.row_hover)
                             .border_1()
                             .border_color(t.hairline)
@@ -529,7 +520,7 @@ impl Shell {
                             .child(SharedString::from(cmd)),
                     )
                 })
-                .child(div().flex().flex_wrap().gap(px(6.)).children(
+                .child(div().flex().flex_wrap().gap(px(CONTROL_RADIUS)).children(
                     choices.into_iter().enumerate().map(|(ix, choice)| {
                         let choice_id = choice.id;
                         decision_button(ix, choice.label, choice.primary, &t).on_click(cx.listener(

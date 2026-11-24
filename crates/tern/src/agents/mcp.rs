@@ -38,16 +38,11 @@ const CANCEL_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 /// # Errors
 /// Returns an error if the settings directory cannot be resolved, the tokio runtime cannot start,
 /// or stdio framing encounters an unrecoverable I/O error.
-pub fn run(socket_override: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn run() -> anyhow::Result<()> {
     init_stderr_logging();
-    let sock = match socket_override {
-        Some(path) => path,
-        None => {
-            let dir = crate::settings::dir()
-                .ok_or_else(|| anyhow::anyhow!("settings directory is unavailable"))?;
-            socket_path(&dir)
-        }
-    };
+    let dir = crate::settings::dir()
+        .ok_or_else(|| anyhow::anyhow!("settings directory is unavailable"))?;
+    let sock = socket_path(&dir);
     tracing::info!(socket = %sock.display(), "mcp_stdio_start");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -18,10 +18,8 @@ pub struct DecisionId(u64);
 /// Caller category for a non-clipboard Decision, allowing group cancellation (sleep, lock, pause)
 /// without disturbing unrelated Decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum DecisionTag {
     Agent,
-    Other(String),
 }
 
 fn is_bidi_control(c: char) -> bool {
@@ -100,7 +98,6 @@ impl DecisionPrompt {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn with_detail(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
         let label = label.into();
         let value = value.into();
@@ -112,7 +109,6 @@ impl DecisionPrompt {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn with_command(mut self, command: impl Into<String>) -> Self {
         let command = command.into();
         self.command = Some(sanitize_display_text(&command));
@@ -144,7 +140,6 @@ impl<K> DecisionRequest<K> {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
         self
@@ -153,7 +148,6 @@ impl<K> DecisionRequest<K> {
 
 /// How a Decision ended. Delivered at most once.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum DecisionOutcome {
     Chosen(String),
     Expired,
@@ -196,26 +190,17 @@ pub struct FrontDecision<'a, K> {
 /// transitions a pending Decision to [`DecisionOutcome::Cancelled`] and signals the queue's
 /// wake channel; if already resolved, it is a no-op and returns `false`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DecisionCancel {
-    id: DecisionId,
     resolution: Arc<Resolution>,
 }
 
 impl DecisionCancel {
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn id(&self) -> DecisionId {
-        self.id
-    }
-
-    #[allow(dead_code)]
     pub fn cancel(&self) -> bool {
         self.resolution.cancel(true)
     }
 
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn is_resolved(&self) -> bool {
         !self.resolution.is_pending()
     }
@@ -224,19 +209,17 @@ impl DecisionCancel {
 /// Async and non-blocking receiver for a Decision's single outcome.
 #[derive(Debug)]
 #[must_use]
-#[allow(dead_code)]
 pub struct DecisionWaiter {
     rx: async_channel::Receiver<DecisionOutcome>,
 }
 
 impl DecisionWaiter {
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn try_recv(&self) -> Option<DecisionOutcome> {
         self.rx.try_recv().ok()
     }
 
-    #[allow(dead_code)]
     pub async fn wait(self) -> DecisionOutcome {
         self.rx.recv().await.unwrap_or(DecisionOutcome::Cancelled)
     }
@@ -245,7 +228,6 @@ impl DecisionWaiter {
 /// Handle held by the caller that enqueued a Decision.
 #[derive(Debug)]
 #[must_use]
-#[allow(dead_code)]
 pub struct PendingDecision {
     id: DecisionId,
     waiter: DecisionWaiter,
@@ -253,35 +235,29 @@ pub struct PendingDecision {
 }
 
 impl PendingDecision {
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn id(&self) -> DecisionId {
         self.id
     }
 
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn cancel_handle(&self) -> DecisionCancel {
         self.cancel.clone()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn cancel(&self) -> bool {
         self.cancel.cancel()
     }
 
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn try_outcome(&self) -> Option<DecisionOutcome> {
         self.waiter.try_recv()
     }
 
-    #[allow(dead_code)]
-    pub async fn wait(self) -> DecisionOutcome {
-        self.waiter.wait().await
-    }
-
-    #[allow(dead_code)]
     pub fn into_parts(self) -> (DecisionId, DecisionWaiter, DecisionCancel) {
         (self.id, self.waiter, self.cancel)
     }
@@ -402,7 +378,6 @@ impl<K> DecisionQueue<K> {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn with_limit(limit: usize) -> Self {
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         Self {
@@ -434,7 +409,6 @@ impl<K> DecisionQueue<K> {
         let (tx, rx) = async_channel::bounded(1);
         let resolution = Resolution::new(tx, self.wake_tx.clone());
         let cancel = DecisionCancel {
-            id,
             resolution: Arc::clone(&resolution),
         };
         let waiter = DecisionWaiter { rx };
@@ -524,17 +498,6 @@ impl<K> DecisionQueue<K> {
     #[must_use]
     pub fn cancel_wake(&self) -> async_channel::Receiver<()> {
         self.wake_rx.clone()
-    }
-
-    #[allow(dead_code)] // Used by Agent cancellation paths (#62) and unit tests.
-    pub fn cancel(&mut self, id: DecisionId) -> bool {
-        let Some(pos) = self.entries.iter().position(|e| e.id == id) else {
-            return false;
-        };
-        let Some(entry) = self.entries.remove(pos) else {
-            return false;
-        };
-        entry.resolution.cancel(false)
     }
 
     pub fn cancel_where(&mut self, mut predicate: impl FnMut(&K) -> bool) -> usize {

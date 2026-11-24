@@ -1,8 +1,7 @@
 //! Newline-delimited JSON protocol over `agent.sock` and structured Agent response/error types.
 //!
 //! Includes `Progress` (broker -> client) and `Cancel` (client -> broker) variants on the same
-//! framed stream so cancellation and approval progress notifications (#62) plug in without
-//! breaking wire framing.
+//! framed stream so cancellation and approval progress notifications share one wire framing.
 
 use std::io;
 
@@ -141,7 +140,7 @@ pub enum BrokerRequest {
         #[serde(default, skip_serializing_if = "is_false")]
         wants_progress: bool,
     },
-    /// Signals cancellation of the in-flight request on this connection (#62).
+    /// Signals cancellation of the in-flight request on this connection.
     Cancel,
 }
 
@@ -157,7 +156,7 @@ pub enum BrokerResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrokerMessage {
-    /// Non-terminal status update while waiting on approval or execution (#62).
+    /// Non-terminal status update while waiting on approval or execution.
     Progress { message: String },
     /// Final result for the request; closes the exchange.
     Result(BrokerResult),

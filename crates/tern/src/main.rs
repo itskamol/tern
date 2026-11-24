@@ -81,21 +81,18 @@ enum Cli {
     Print(String),
     Refuse(String),
     VaultInit,
-    Mcp { socket: Option<std::path::PathBuf> },
+    Mcp,
 }
 
 fn parse_cli(args: &[String]) -> Cli {
-    let usage = "usage: tern [alias | user@host[:port]]\n       tern mcp [--socket <path>]\n       tern vault init   (passphrase, then PIN, on standard input)";
+    let usage = "usage: tern [alias | user@host[:port]]\n       tern mcp\n       tern vault init   (passphrase, then PIN, on standard input)";
     match args.first().map(String::as_str) {
         None => Cli::Open(None),
         Some("-V" | "--version") => Cli::Print(format!("tern {}", env!("CARGO_PKG_VERSION"))),
         Some("-h" | "--help") => Cli::Print(usage.to_owned()),
         Some("vault") if args.get(1).map(String::as_str) == Some("init") => Cli::VaultInit,
         Some("mcp") => match args.get(1..) {
-            Some([]) | None => Cli::Mcp { socket: None },
-            Some([flag, path]) if flag == "--socket" && !path.is_empty() => Cli::Mcp {
-                socket: Some(std::path::PathBuf::from(path)),
-            },
+            Some([]) | None => Cli::Mcp,
             Some([flag]) if flag == "-h" || flag == "--help" => Cli::Print(usage.to_owned()),
             _ => Cli::Refuse(format!("invalid arguments for mcp\n{usage}")),
         },
@@ -130,8 +127,8 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        Cli::Mcp { socket } => {
-            if let Err(e) = agents::mcp::run(socket) {
+        Cli::Mcp => {
+            if let Err(e) = agents::mcp::run() {
                 eprintln!("tern mcp failed: {e}");
                 std::process::exit(1);
             }
@@ -309,8 +306,6 @@ fn env() -> &'static str {
 
 #[cfg(test)]
 mod cli_tests {
-    use std::path::PathBuf;
-
     use super::{Cli, parse_cli};
 
     fn args(items: &[&str]) -> Vec<String> {
@@ -333,15 +328,10 @@ mod cli_tests {
 
     #[test]
     fn mcp_and_vault_subcommands_parse_before_gui_startup() {
-        assert_eq!(parse_cli(&args(&["mcp"])), Cli::Mcp { socket: None });
-        assert_eq!(
-            parse_cli(&args(&["mcp", "--socket", "/tmp/agent.sock"])),
-            Cli::Mcp {
-                socket: Some(PathBuf::from("/tmp/agent.sock")),
-            }
-        );
+        assert_eq!(parse_cli(&args(&["mcp"])), Cli::Mcp);
+        assert!(matches!(parse_cli(&args(&["mcp", "-h"])), Cli::Print(_)));
         assert!(matches!(
-            parse_cli(&args(&["mcp", "--socket"])),
+            parse_cli(&args(&["mcp", "--socket", "/tmp/agent.sock"])),
             Cli::Refuse(_)
         ));
         assert!(matches!(
