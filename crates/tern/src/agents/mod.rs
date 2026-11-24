@@ -5,6 +5,7 @@
 //! `0o600` local Unix socket (`agent.sock`).
 
 pub mod attention;
+pub mod audit;
 pub mod broker;
 mod broker_exec;
 mod broker_socket;

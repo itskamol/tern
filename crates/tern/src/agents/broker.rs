@@ -67,13 +67,13 @@ pub enum AgentDecision {
 }
 
 /// Summary of a completed `service_status` request, passed to [`AgentHost::on_agent_outcome`]
-/// as the seam for local audit logging and Activity entries (#64).
+/// for local audit logging and Activity entries.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Consumed by audit logging and Activity integration (#64).
 pub struct AgentOutcome {
     pub caller: String,
     pub host: String,
     pub service: String,
+    #[allow(dead_code)] // Preserved on the outcome seam for diagnostics and future callers.
     pub command: Option<String>,
     pub decision: AgentDecision,
     pub result: BrokerResult,
