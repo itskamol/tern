@@ -127,6 +127,14 @@ where
         () = wait_cancelled(&mut cancel_rx) => return Ok(EXIT_INTERRUPTED),
         res = tokio::net::UnixStream::connect(socket_path) => match res {
             Ok(s) => s,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                write_err_line(
+                    stderr,
+                    &format!("tern exec: permission denied connecting to tern agent.sock ({e})"),
+                )
+                .await?;
+                return Ok(1);
+            }
             Err(e) => {
                 write_err_line(
                     stderr,

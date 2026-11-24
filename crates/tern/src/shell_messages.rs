@@ -115,6 +115,8 @@ pub(super) struct ActivityUi {
     snackbars: toast::Snackbars,
     /// Questions tern cannot go on without, oldest first; the first one's card shows.
     decisions: DecisionQueue<DecisionKind>,
+    /// Which Decision currently has its full multi-line command expanded.
+    expanded_decision: Option<DecisionId>,
     messages: Messages,
     list_state: ListState,
     /// The one wake-up for when the newest Activity's time is up; a newer one replaces it.
@@ -244,7 +246,7 @@ impl Shell {
         &mut self,
         tag: DecisionTag,
         prompt: DecisionPrompt,
-        deadline: Option<Instant>,
+        timeout: Option<Duration>,
         cx: &mut Context<Self>,
     ) -> Result<PendingDecision, QueueFull> {
         self.prune_stale_decisions(cx);
@@ -258,8 +260,8 @@ impl Shell {
             now,
         );
         let mut request = DecisionRequest::new(DecisionKind::External { tag }, prompt);
-        if let Some(deadline) = deadline {
-            request = request.with_deadline(deadline);
+        if let Some(timeout) = timeout {
+            request = request.with_timeout(timeout);
         }
         let pending = self.activity.decisions.enqueue(request, now)?;
         self.sync_decision_tasks(cx);
@@ -290,6 +292,9 @@ impl Shell {
         let now = Instant::now();
         self.prune_stale_decisions(cx);
         let resolved = self.activity.decisions.answer(id, choice, now);
+        if self.activity.expanded_decision == Some(id) {
+            self.activity.expanded_decision = None;
+        }
         if let Some(DecisionKind::Clipboard { session, .. }) = resolved {
             let answer = match choice {
                 CLIPBOARD_ONCE => Some(Answer::Once),
@@ -417,7 +422,10 @@ impl Shell {
         };
         let details = front.prompt.details.clone();
         let command = front.prompt.command.clone();
+        let full_command = front.prompt.full_command.clone();
+        let footnote = front.prompt.footnote.clone();
         let choices = front.prompt.choices.clone();
+        let expanded = self.activity.expanded_decision == Some(id);
         let t = self.theme;
         let show_meta = queue_label.is_some() || countdown.is_some();
         Some(
@@ -502,22 +510,60 @@ impl Shell {
                     )
                 })
                 .when_some(command, |el, cmd| {
+                    let has_full = full_command.is_some();
+                    let displayed = if expanded {
+                        full_command.clone().unwrap_or(cmd)
+                    } else {
+                        cmd
+                    };
                     el.child(
                         div()
-                            .w_full()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .px(px(SPACE_SM))
-                            .py(px(CONTROL_RADIUS))
-                            .rounded(px(CONTROL_RADIUS))
-                            .bg(t.row_hover)
-                            .border_1()
-                            .border_color(t.hairline)
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.))
-                            .line_height(px(16.))
-                            .text_color(t.text)
-                            .child(SharedString::from(cmd)),
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .id("decision-command-box")
+                                    .w_full()
+                                    .min_w_0()
+                                    .when(expanded, |b| b.max_h(px(180.)).overflow_y_scroll())
+                                    .when(!expanded, |b| b.overflow_hidden())
+                                    .px(px(SPACE_SM))
+                                    .py(px(CONTROL_RADIUS))
+                                    .rounded(px(CONTROL_RADIUS))
+                                    .bg(t.row_hover)
+                                    .border_1()
+                                    .border_color(t.hairline)
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.))
+                                    .line_height(px(16.))
+                                    .text_color(t.text)
+                                    .child(SharedString::from(displayed)),
+                            )
+                            .when(has_full, |col| {
+                                col.child(
+                                    div()
+                                        .id("decision-command-toggle")
+                                        .self_start()
+                                        .text_size(px(11.))
+                                        .text_color(t.accent)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |s, _, _, cx| {
+                                            s.activity.expanded_decision =
+                                                if s.activity.expanded_decision == Some(id) {
+                                                    None
+                                                } else {
+                                                    Some(id)
+                                                };
+                                            cx.notify();
+                                        }))
+                                        .child(if expanded {
+                                            "Show less"
+                                        } else {
+                                            "Show full command"
+                                        }),
+                                )
+                            }),
                     )
                 })
                 .child(div().flex().flex_wrap().gap(px(CONTROL_RADIUS)).children(
@@ -530,6 +576,14 @@ impl Shell {
                         ))
                     }),
                 ))
+                .when_some(footnote, |el, note| {
+                    el.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(t.muted)
+                            .child(SharedString::from(note)),
+                    )
+                })
                 .into_any_element(),
         )
     }

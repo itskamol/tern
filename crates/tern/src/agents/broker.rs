@@ -106,14 +106,14 @@ pub trait AgentHost: Sized + 'static {
         DEFAULT_DECISION_TIMEOUT
     }
 
-    /// Enqueues an Agent approval Decision.
+    /// Enqueues an Agent approval Decision whose timeout starts once it reaches the front.
     ///
     /// # Errors
     /// Returns [`QueueFull`] when the Decision queue is full.
     fn ask_agent_decision(
         &mut self,
         prompt: DecisionPrompt,
-        deadline: Option<Instant>,
+        timeout: Option<Duration>,
         cx: &mut Context<Self>,
     ) -> Result<PendingDecision, QueueFull>;
 
@@ -525,12 +525,13 @@ async fn handle_run_command<H: AgentHost>(
         Precheck::NeedsDecision { conn, fingerprint } => (conn, fingerprint),
     };
 
-    // Ask explicit human approval via the click-only Decision queue with a 60 s default deadline.
+    // Ask explicit human approval via the click-only Decision queue with a 60 s default timeout
+    // starting once this card reaches the front of the queue.
     let prompt = build_run_command_prompt(&req.caller, &conn, &command);
     let cue = AttentionCue::for_run_command(&req.caller, &conn.name, &summarize_command(&command));
     let pending = match host.update(cx, |h, cx| {
-        let deadline = Instant::now() + h.agent_decision_timeout();
-        let pending = h.ask_agent_decision(prompt, Some(deadline), cx)?;
+        let timeout = h.agent_decision_timeout();
+        let pending = h.ask_agent_decision(prompt, Some(timeout), cx)?;
         h.notify_agent_attention(&cue, cx);
         Ok::<_, QueueFull>(pending)
     }) {

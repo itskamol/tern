@@ -672,6 +672,13 @@ async fn call_broker(
         () = wait_cancelled(&mut cancel_rx) => return None,
         connected = tokio::net::UnixStream::connect(socket_path) => match connected {
             Ok(stream) => stream,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                tracing::debug!(error = %e, "mcp_broker_permission_denied");
+                return Some(BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::Denied,
+                    format!("permission denied connecting to tern agent.sock ({e})"),
+                )));
+            }
             Err(e) => {
                 tracing::debug!(error = %e, "mcp_broker_unavailable");
                 return Some(tern_not_running(&e.to_string()));

@@ -25,7 +25,9 @@ use super::protocol::{
 };
 use super::vault_wait::VaultUnlockOutcome;
 use crate::connections::Connection;
-use crate::decisions::{DecisionChoice, DecisionPrompt, sanitize_display_text};
+use crate::decisions::{
+    DecisionChoice, DecisionPrompt, sanitize_display_text, sanitize_multiline_display_text,
+};
 use crate::password_command::{Approvals, Auth};
 use crate::platform::SshRuntime;
 
@@ -468,10 +470,14 @@ pub(super) fn caller_display(caller: Option<&str>) -> String {
         .unwrap_or_else(|| "Unknown Agent".to_owned())
 }
 
-/// Builds the compact click-only Decision card prompt for a `run_command` request.
+/// Builds the compact click-only Decision card prompt for a `run_command` request, attaching
+/// the sanitized full command for expandable inspection when truncated or multi-line and noting
+/// the shared scope of `Allow host until lock`.
 #[must_use]
 pub fn build_run_command_prompt(caller: &str, conn: &Connection, command: &str) -> DecisionPrompt {
-    DecisionPrompt::new(
+    let preview = summarize_command(command);
+    let full = sanitize_multiline_display_text(command);
+    let mut prompt = DecisionPrompt::new(
         format!("{caller} wants to run a command on {}", conn.name),
         vec![
             DecisionChoice::primary(CHOICE_ALLOW_ONCE, "Allow once"),
@@ -484,7 +490,15 @@ pub fn build_run_command_prompt(caller: &str, conn: &Connection, command: &str) 
         "Host",
         format!("{} ({}@{})", conn.name, conn.user, conn.host),
     )
-    .with_command(summarize_command(command))
+    .with_command(preview.clone())
+    .with_footnote(format!(
+        "Host grant lets any local Agent run commands on {} until lock.",
+        conn.name
+    ));
+    if full != preview {
+        prompt = prompt.with_full_command(full);
+    }
+    prompt
 }
 
 /// Formats a quiet **Activity** list entry summarizing a completed `run_command` outcome.
@@ -524,11 +538,35 @@ pub fn format_activity(outcome: &AgentOutcome) -> String {
             }
             (AgentDecision::Cancelled, _) => format!("{actor} request cancelled on {host}"),
             (AgentDecision::Expired, _) => format!("{actor} approval timed out on {host}"),
-            (_, AgentErrorCode::Denied) => format!("{actor} request denied on {host}"),
-            (_, AgentErrorCode::TimedOut) => format!("{actor} command timed out on {host}"),
-            (_, AgentErrorCode::UserActionRequired) => {
-                format!("{actor} needs attention in tern for {host}")
+            (_, AgentErrorCode::Denied) => {
+                if err.message.contains("not a saved connection") {
+                    format!("{actor} unknown host {host}")
+                } else if err.message.contains("command must not be empty")
+                    || err.message.contains("command exceeded maximum size")
+                {
+                    format!("{actor} invalid command for {host}")
+                } else if err.message.contains("changed") {
+                    format!("{actor} host changed before running on {host}")
+                } else {
+                    format!("{actor} request denied on {host}")
+                }
             }
+            (_, AgentErrorCode::TimedOut) => format!("{actor} command timed out on {host}"),
+            (_, AgentErrorCode::UserActionRequired) => match err.reason {
+                Some(UserActionReason::VaultLocked) => {
+                    format!("{actor} blocked: vault locked for {host}")
+                }
+                Some(UserActionReason::UnknownHostKey) => {
+                    format!("{actor} blocked: unknown host key for {host}")
+                }
+                Some(UserActionReason::CommandApprovalRequired) => {
+                    format!("{actor} blocked: command approval needed for {host}")
+                }
+                Some(UserActionReason::InteractiveAuthRequired) => {
+                    format!("{actor} blocked: interactive auth required on {host}")
+                }
+                None => format!("{actor} needs attention in tern for {host}"),
+            },
             (_, AgentErrorCode::UnknownOutcome) => {
                 format!("{actor} disconnected during command on {host}")
             }
@@ -602,5 +640,54 @@ mod tests {
             result: BrokerResult::Error(AgentError::new(AgentErrorCode::Denied, "denied")),
         };
         assert_eq!(format_activity(&denied), "Claude request denied on prod");
+
+        let unknown_host = AgentOutcome {
+            caller: "Claude".into(),
+            host: "ghost".into(),
+            decision: AgentDecision::Denied,
+            result: BrokerResult::Error(AgentError::new(
+                AgentErrorCode::Denied,
+                "host 'ghost' is not a saved connection; call list_hosts to see available hosts",
+            )),
+        };
+        assert_eq!(format_activity(&unknown_host), "Claude unknown host ghost");
+
+        let locked = AgentOutcome {
+            caller: "Codex".into(),
+            host: "alpha".into(),
+            decision: AgentDecision::AllowOnce,
+            result: BrokerResult::Error(AgentError::user_action_required(
+                UserActionReason::VaultLocked,
+                "unlock vault",
+            )),
+        };
+        assert_eq!(
+            format_activity(&locked),
+            "Codex blocked: vault locked for alpha"
+        );
+    }
+
+    #[test]
+    fn build_run_command_prompt_attaches_full_command_for_multiline_and_explains_host_grant() {
+        let conn = Connection {
+            name: "alpha".into(),
+            host: "10.0.0.5".into(),
+            port: 22,
+            user: "deploy".into(),
+            ..Connection::default()
+        };
+        let single = build_run_command_prompt("Codex", &conn, "uptime");
+        assert_eq!(single.command.as_deref(), Some("uptime"));
+        assert_eq!(single.full_command, None);
+        assert!(
+            single
+                .footnote
+                .as_deref()
+                .is_some_and(|f| f.contains("any local Agent"))
+        );
+
+        let multi = build_run_command_prompt("Codex", &conn, "set -e\necho \x1b[31mhi\x1b[0m\n");
+        assert_eq!(multi.command.as_deref(), Some("set -e (+1 line)"));
+        assert_eq!(multi.full_command.as_deref(), Some("set -e\necho hi"));
     }
 }

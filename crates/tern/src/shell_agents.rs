@@ -363,10 +363,10 @@ impl AgentHost for Shell {
     fn ask_agent_decision(
         &mut self,
         prompt: DecisionPrompt,
-        deadline: Option<Instant>,
+        timeout: Option<Duration>,
         cx: &mut Context<Self>,
     ) -> Result<PendingDecision, QueueFull> {
-        self.ask_decision(DecisionTag::Agent, prompt, deadline, cx)
+        self.ask_decision(DecisionTag::Agent, prompt, timeout, cx)
     }
 
     fn notify_agent_attention(&mut self, cue: &AttentionCue, _cx: &mut Context<Self>) {

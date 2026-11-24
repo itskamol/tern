@@ -253,6 +253,62 @@ fn a_queued_decision_behind_a_non_expiring_front_expires_on_time() {
 }
 
 #[test]
+fn front_timeout_does_not_expire_queued_decision_before_it_is_shown() {
+    let mut q = DecisionQueue::new();
+    let t0 = Instant::now();
+    let timeout = Duration::from_secs(60);
+
+    let p1 = q
+        .enqueue(
+            DecisionRequest::new(
+                Kind::Agent {
+                    host: "alpha",
+                    service: "cmd-1",
+                },
+                agent_prompt("alpha", "cmd-1"),
+            )
+            .with_timeout(timeout),
+            t0,
+        )
+        .unwrap();
+    let p2 = q
+        .enqueue(
+            DecisionRequest::new(
+                Kind::Agent {
+                    host: "beta",
+                    service: "cmd-2",
+                },
+                agent_prompt("beta", "cmd-2"),
+            )
+            .with_timeout(timeout),
+            t0,
+        )
+        .unwrap();
+
+    // 55s pass while reading p1; p2 is still queued and has not started expiring yet.
+    let t55 = t0 + Duration::from_secs(55);
+    assert_eq!(q.sweep(t55), 0);
+    assert_eq!(q.front(t55).unwrap().remaining_secs, Some(5));
+    assert_eq!(p2.try_outcome(), None);
+
+    // Answering p1 at t=55s brings p2 to the front with its full 60s countdown.
+    assert!(q.answer(p1.id(), "allow_once", t55).is_some());
+    let front2 = q.front(t55).unwrap();
+    assert_eq!(front2.id, p2.id());
+    assert_eq!(front2.remaining_secs, Some(60));
+
+    // At t=110s (55s into p2's turn, 110s since enqueue), p2 is STILL alive with 5s left.
+    let t110 = t55 + Duration::from_secs(55);
+    assert_eq!(q.sweep(t110), 0);
+    assert_eq!(q.front(t110).unwrap().remaining_secs, Some(5));
+
+    // Only at t=115s (60s after p2 reached the front) does p2 expire.
+    let t115 = t55 + Duration::from_secs(60);
+    assert_eq!(q.sweep(t115), 1);
+    assert_eq!(p2.try_outcome(), Some(DecisionOutcome::Expired));
+}
+
+#[test]
 fn an_already_expired_request_expires_immediately_without_entering_the_queue() {
     let mut q = DecisionQueue::new();
     let t0 = Instant::now();

@@ -81,12 +81,12 @@ impl AgentHost for TestShell {
     fn ask_agent_decision(
         &mut self,
         prompt: DecisionPrompt,
-        deadline: Option<Instant>,
+        timeout: Option<Duration>,
         _cx: &mut Context<Self>,
     ) -> Result<PendingDecision, QueueFull> {
         let mut req = DecisionRequest::new(DecisionTag::Agent, prompt);
-        if let Some(d) = deadline {
-            req = req.with_deadline(d);
+        if let Some(t) = timeout {
+            req = req.with_timeout(t);
         }
         self.decisions.enqueue(req, Instant::now())
     }

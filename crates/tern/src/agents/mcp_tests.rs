@@ -692,3 +692,51 @@ async fn list_hosts_forwards_query_and_rejects_non_string_query() {
     drop(client_tx);
     server.await.unwrap().unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_permission_denied_returns_denied_instead_of_tern_not_running() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let locked_dir = dir.path().join("restricted");
+    std::fs::create_dir(&locked_dir).unwrap();
+    let sock = locked_dir.join("agent.sock");
+    let _listener = tokio::net::UnixListener::bind(&sock).unwrap();
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let (mut client_tx, server_rx) = tokio::io::duplex(64 * 1024);
+    let (server_tx, client_rx) = tokio::io::duplex(64 * 1024);
+    let mut client_rx = BufReader::new(client_rx);
+    let server = tokio::spawn(serve_stdio(
+        BufReader::new(server_rx),
+        server_tx,
+        sock.clone(),
+    ));
+
+    let res = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_hosts", "arguments": {} }
+        }),
+    )
+    .await;
+
+    let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
+
+    assert_eq!(res["result"]["isError"], true);
+    assert_eq!(res["result"]["structuredContent"]["error"], "denied");
+    assert!(
+        res["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("permission denied")
+    );
+
+    drop(client_tx);
+    server.await.unwrap().unwrap();
+}

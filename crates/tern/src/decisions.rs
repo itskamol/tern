@@ -39,6 +39,15 @@ pub fn sanitize_display_text(text: &str) -> String {
         .collect()
 }
 
+/// Sanitizes multi-line text for expanded command inspection while preserving line breaks.
+#[must_use]
+pub fn sanitize_multiline_display_text(text: &str) -> String {
+    text.lines()
+        .map(sanitize_display_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// One clickable choice shown on a Decision card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionChoice {
@@ -82,6 +91,10 @@ pub struct DecisionPrompt {
     pub question: String,
     pub details: Vec<DecisionDetail>,
     pub command: Option<String>,
+    /// Optional sanitized full multi-line command shown when the user expands a truncated preview.
+    pub full_command: Option<String>,
+    /// Optional muted explanatory footnote shown beneath the choices.
+    pub footnote: Option<String>,
     pub choices: Vec<DecisionChoice>,
 }
 
@@ -93,6 +106,8 @@ impl DecisionPrompt {
             question: sanitize_display_text(&question),
             details: Vec::new(),
             command: None,
+            full_command: None,
+            footnote: None,
             choices,
         }
     }
@@ -116,17 +131,35 @@ impl DecisionPrompt {
     }
 
     #[must_use]
+    pub fn with_full_command(mut self, command: impl Into<String>) -> Self {
+        let command = command.into();
+        self.full_command = Some(sanitize_multiline_display_text(&command));
+        self
+    }
+
+    #[must_use]
+    pub fn with_footnote(mut self, footnote: impl Into<String>) -> Self {
+        let footnote = footnote.into();
+        self.footnote = Some(sanitize_display_text(&footnote));
+        self
+    }
+
+    #[must_use]
     pub fn has_choice(&self, id: &str) -> bool {
         self.choices.iter().any(|c| c.id == id)
     }
 }
 
-/// A Decision to enqueue, carrying caller metadata `K`, display content, and an optional deadline.
+/// A Decision to enqueue, carrying caller metadata `K`, display content, and an optional deadline
+/// or front-of-queue timeout.
 #[derive(Debug)]
 pub struct DecisionRequest<K> {
     pub kind: K,
     pub prompt: DecisionPrompt,
     pub deadline: Option<Instant>,
+    /// Relative timeout activated only when this Decision reaches the front of the queue so a
+    /// queued card never expires before the person has a chance to see it.
+    pub front_timeout: Option<Duration>,
 }
 
 impl<K> DecisionRequest<K> {
@@ -136,12 +169,22 @@ impl<K> DecisionRequest<K> {
             kind,
             prompt,
             deadline: None,
+            front_timeout: None,
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
+        self.front_timeout = None;
+        self
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.front_timeout = Some(timeout);
+        self.deadline = None;
         self
     }
 }
@@ -351,6 +394,7 @@ struct Entry<K> {
     id: DecisionId,
     kind: K,
     prompt: DecisionPrompt,
+    front_timeout: Option<Duration>,
     deadline: Option<Instant>,
     resolution: Arc<Resolution>,
 }
@@ -420,10 +464,21 @@ impl<K> DecisionQueue<K> {
             id,
             kind: request.kind,
             prompt: request.prompt,
+            front_timeout: request.front_timeout,
             deadline: request.deadline,
             resolution,
         });
+        self.activate_front(now);
         Ok(PendingDecision { id, waiter, cancel })
+    }
+
+    fn activate_front(&mut self, now: Instant) {
+        if let Some(front) = self.entries.front_mut()
+            && front.deadline.is_none()
+            && let Some(timeout) = front.front_timeout.take()
+        {
+            front.deadline = Some(now + timeout);
+        }
     }
 
     pub fn front(&mut self, now: Instant) -> Option<FrontDecision<'_, K>> {
@@ -447,6 +502,7 @@ impl<K> DecisionQueue<K> {
             return None;
         }
         let entry = self.entries.pop_front()?;
+        self.activate_front(now);
         if entry.resolution.answer(choice.to_owned()) {
             Some(entry.kind)
         } else {
@@ -470,6 +526,7 @@ impl<K> DecisionQueue<K> {
             }
             true
         });
+        self.activate_front(now);
         removed
     }
 
