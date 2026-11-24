@@ -1,11 +1,10 @@
-//! Local Agent broker and MCP stdio server (ADR 0003).
+//! Local Agent broker and MCP stdio server (ADR 0003, ADR 0004).
 //!
-//! Keeps SSH credentials, host-key verification, allowlists, and human Decisions inside tern
-//! while exposing typed read-only service status checks over stdio (`tern mcp`) and a dedicated
-//! `0o600` local Unix socket (`agent.sock`).
+//! Keeps SSH credentials, host-key verification, and human Decisions inside tern while exposing
+//! `list_hosts` and `run_command` over stdio (`tern mcp`) and a dedicated `0o600` local Unix
+//! socket (`agent.sock`).
 
 pub mod attention;
-pub mod audit;
 pub mod broker;
 mod broker_exec;
 mod broker_socket;
@@ -14,7 +13,6 @@ pub mod headless_login;
 pub mod mcp;
 pub mod protocol;
 pub mod store;
-pub mod systemctl;
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]

@@ -1,6 +1,6 @@
 # ADR 0003: Agent operations run over isolated headless SSH connections through a local broker
 
-Status: accepted (2026-11-23)
+Status: accepted (2026-11-23) — partially superseded by [ADR 0004](./0004-agent-run-command-host-grants.md)
 
 ## Context
 

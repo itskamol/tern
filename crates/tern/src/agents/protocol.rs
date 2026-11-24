@@ -9,9 +9,13 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 /// Upper bound on one newline-delimited JSON frame on stdio or `agent.sock`.
-pub const MAX_FRAME_BYTES: usize = 256 * 1024;
+/// Sized to hold a full 64 KiB `stdout` + 64 KiB `stderr` response even after JSON escaping.
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// Upper bound on one remote shell command or inline script sent via `run_command` (ADR 0004).
+/// Stays well below Linux `MAX_ARG_STRLEN` (128 KiB) so `sshd` never fails with `E2BIG`.
+pub const MAX_COMMAND_BYTES: usize = 64 * 1024;
 
-/// Structured error codes returned to Agents (ADR 0003).
+/// Structured error codes returned to Agents (ADR 0003, ADR 0004).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentErrorCode {
@@ -21,7 +25,6 @@ pub enum AgentErrorCode {
     TimedOut,
     UserActionRequired,
     SshError,
-    UnsupportedHost,
     UnknownOutcome,
 }
 
@@ -64,58 +67,35 @@ impl AgentError {
     }
 }
 
-/// One Saved connection and its allowlisted systemd service units returned by `list_hosts`.
+/// One Saved connection summary returned by `list_hosts` (never exposes keys or passwords).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AllowedHost {
+pub struct HostSummary {
     pub alias: String,
-    pub services: Vec<String>,
+    pub host: String,
+    pub user: String,
+    pub port: u16,
 }
 
 /// Structured response from the `list_hosts` tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListHostsResponse {
-    pub hosts: Vec<AllowedHost>,
+    pub hosts: Vec<HostSummary>,
     pub usage: String,
 }
 
-/// Normalized systemd `LoadState` values (`not-found` maps to `not_found`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LoadState {
-    Loaded,
-    NotFound,
-    BadSetting,
-    Error,
-    Masked,
-    Stub,
-    Merged,
-    Unknown,
-}
-
-/// Normalized systemd `ActiveState` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActiveState {
-    Active,
-    Inactive,
-    Failed,
-    Activating,
-    Deactivating,
-    Reloading,
-    Refreshing,
-    Maintenance,
-    Unknown,
-}
-
-/// Structured response from the `service_status` tool.
+/// Structured response from the `run_command` tool (ADR 0004).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServiceStatusResponse {
+pub struct RunCommandResponse {
     pub host: String,
-    pub service: String,
-    pub load_state: LoadState,
-    pub active_state: ActiveState,
-    pub sub_state: String,
-    pub checked_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub duration_ms: u64,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -130,11 +110,11 @@ pub enum BrokerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<String>,
     },
-    ServiceStatus {
+    RunCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<String>,
         host: String,
-        service: String,
+        command: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_secs: Option<u64>,
         #[serde(default, skip_serializing_if = "is_false")]
@@ -321,11 +301,11 @@ mod tests {
 
     #[test]
     fn broker_frames_round_trip_with_snake_case_error_codes_and_reasons() {
-        let req = BrokerRequest::ServiceStatus {
+        let req = BrokerRequest::RunCommand {
             caller: Some("Claude Code".into()),
             host: "staging".into(),
-            service: "api.service".into(),
-            timeout_secs: Some(20),
+            command: "node ./check.js".into(),
+            timeout_secs: Some(45),
             wants_progress: true,
         };
         let encoded = serde_json::to_string(&req).unwrap();
@@ -334,10 +314,10 @@ mod tests {
             req
         );
 
-        let without_progress = BrokerRequest::ServiceStatus {
+        let without_progress = BrokerRequest::RunCommand {
             caller: None,
             host: "staging".into(),
-            service: "api.service".into(),
+            command: "df -h".into(),
             timeout_secs: None,
             wants_progress: false,
         };

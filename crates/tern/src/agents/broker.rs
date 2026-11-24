@@ -1,9 +1,10 @@
-//! Local Unix socket broker (`agent.sock`, mode `0o600`) and request orchestration (ADR 0003).
+//! Local Unix socket broker (`agent.sock`, mode `0o600`) and request orchestration (ADR 0003,
+//! ADR 0004).
 //!
 //! Binds `agent.sock` on [`SshRuntime`] only when Agents are enabled, leaving `tern.sock`
-//! untouched. Validates `(host, service)` against `agents.json` and Saved connections before
-//! raising a click-only [`DecisionTag::Agent`] Decision, then runs `systemctl show` through
-//! [`super::headless_login`] and [`super::systemctl`].
+//! untouched. Exposes all **Saved connections** (`hosts.json`) to Agents, gates ungranted
+//! `run_command` requests behind a click-only [`DecisionTag::Agent`] Decision with per-Host
+//! in-memory **Grants**, and executes commands through [`super::headless_login`].
 
 use std::io;
 use std::path::PathBuf;
@@ -14,15 +15,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::attention::AttentionCue;
-pub use super::broker_exec::build_service_status_prompt;
-use super::broker_exec::{AbortOnDrop, caller_display, execute_service_status};
+use super::broker_exec::{AbortOnDrop, caller_display, execute_run_command};
+pub use super::broker_exec::{build_run_command_prompt, format_activity, summarize_command};
 use super::broker_socket::{IncomingRequest, Responder, bind_and_serve};
 use super::grants::GrantFingerprint;
 use super::protocol::{
-    AgentError, AgentErrorCode, AllowedHost, BrokerRequest, BrokerResult, ListHostsResponse,
+    AgentError, AgentErrorCode, BrokerRequest, BrokerResult, HostSummary, ListHostsResponse,
+    MAX_COMMAND_BYTES,
 };
 use super::store::AgentConfig;
-use super::systemctl;
 use crate::connections::Connection;
 use crate::decisions::{
     DecisionOutcome, DecisionPrompt, PendingDecision, QueueFull, sanitize_display_text,
@@ -31,7 +32,7 @@ use crate::platform::SshRuntime;
 
 /// Decision button identifier for one-time execution approval.
 pub const CHOICE_ALLOW_ONCE: &str = "allow_once";
-/// Decision button identifier for creating an in-memory Grant until lock/sleep/quit/revoke.
+/// Decision button identifier for creating a per-Host in-memory Grant until lock/sleep/quit/revoke.
 pub const CHOICE_ALLOW_UNTIL_LOCK: &str = "allow_until_lock";
 /// Decision button identifier for declining the request.
 pub const CHOICE_DENY: &str = "deny";
@@ -41,7 +42,7 @@ pub const DEFAULT_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Progress message sent while an Agent request is waiting for human approval in tern.
 pub const WAITING_FOR_APPROVAL_MESSAGE: &str = "Waiting for approval in tern...";
 
-const LIST_HOSTS_USAGE: &str = "Call service_status with an alias from hosts and one of its listed services. Optional timeout_secs defaults to 15 (clamped to 1..=60).";
+const LIST_HOSTS_USAGE: &str = "Call run_command with an alias from hosts and a shell command or script (up to 64 KiB). Optional timeout_secs defaults to 30 (clamped to 1..=300).";
 const MAX_PENDING_REQUESTS: usize = 32;
 
 /// Point-in-time configuration and Saved connections read from the host entity on the UI thread.
@@ -53,7 +54,7 @@ pub struct BrokerSnapshot {
     pub connections: Vec<Connection>,
 }
 
-/// How authorization was resolved for a `service_status` request.
+/// How authorization was resolved for a `run_command` request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentDecision {
@@ -66,13 +67,12 @@ pub enum AgentDecision {
     Paused,
 }
 
-/// Summary of a completed `service_status` request, passed to [`AgentHost::on_agent_outcome`]
-/// for local audit logging and Activity entries.
+/// Summary of a completed `run_command` request, passed to [`AgentHost::on_agent_outcome`]
+/// for quiet **Activity** entries.
 #[derive(Debug, Clone)]
 pub struct AgentOutcome {
     pub caller: String,
     pub host: String,
-    pub service: String,
     pub decision: AgentDecision,
     pub result: BrokerResult,
 }
@@ -81,21 +81,19 @@ pub struct AgentOutcome {
 pub trait AgentHost: Sized + 'static {
     fn agent_snapshot(&self) -> BrokerSnapshot;
 
-    /// Returns `true` when an in-memory Grant exists for `(host, service)` whose stored
-    /// fingerprint matches `fingerprint`, evicting any mismatched Grant immediately.
+    /// Returns `true` when an in-memory Grant exists for `host` whose stored fingerprint matches
+    /// `fingerprint`, evicting any mismatched Grant immediately.
     fn verify_agent_grant(
         &mut self,
         host: &str,
-        service: &str,
         fingerprint: GrantFingerprint,
         cx: &mut Context<Self>,
     ) -> bool;
 
-    /// Records an in-memory-only Grant for `(host, service)` bound to `fingerprint`.
+    /// Records an in-memory-only Grant for `host` bound to `fingerprint`.
     fn record_agent_grant(
         &mut self,
         host: &str,
-        service: &str,
         fingerprint: GrantFingerprint,
         cx: &mut Context<Self>,
     );
@@ -120,7 +118,7 @@ pub trait AgentHost: Sized + 'static {
     /// tern is not the active app.
     fn notify_agent_attention(&mut self, _cue: &AttentionCue, _cx: &mut Context<Self>) {}
 
-    /// Hook called when a `service_status` request finishes for local audit logging and Activity.
+    /// Hook called when a `run_command` request finishes for quiet **Activity** reporting.
     fn on_agent_outcome(&mut self, _outcome: &AgentOutcome, _cx: &mut Context<Self>) {}
 }
 
@@ -193,19 +191,19 @@ async fn handle_incoming<H: AgentHost>(
     let IncomingRequest { request, responder } = incoming;
     let result = match request {
         BrokerRequest::ListHosts { .. } => handle_list_hosts(&host, cx),
-        BrokerRequest::ServiceStatus {
+        BrokerRequest::RunCommand {
             caller,
             host: target_host,
-            service,
+            command,
             timeout_secs,
             wants_progress,
         } => {
-            handle_service_status(
+            handle_run_command(
                 &host,
-                ServiceStatusCall {
+                RunCommandCall {
                     caller,
                     target_host,
-                    service,
+                    command,
                     timeout_secs,
                     wants_progress,
                 },
@@ -236,10 +234,14 @@ fn handle_list_hosts<H: AgentHost>(host: &WeakEntity<H>, cx: &mut AsyncApp) -> B
         ));
     }
     let hosts = snapshot
-        .config
-        .allowed_hosts(&snapshot.connections)
-        .into_iter()
-        .map(|(alias, services)| AllowedHost { alias, services })
+        .connections
+        .iter()
+        .map(|c| HostSummary {
+            alias: c.name.clone(),
+            host: c.host.clone(),
+            user: c.user.clone(),
+            port: c.port,
+        })
         .collect();
     let payload = ListHostsResponse {
         hosts,
@@ -251,64 +253,54 @@ fn handle_list_hosts<H: AgentHost>(host: &WeakEntity<H>, cx: &mut AsyncApp) -> B
     }
 }
 
-fn allowed_connection(snapshot: &BrokerSnapshot, host: &str, service: &str) -> Option<Connection> {
+fn saved_connection(snapshot: &BrokerSnapshot, host: &str) -> Option<Connection> {
     snapshot
-        .config
-        .is_service_allowed(host, service, &snapshot.connections)
-        .then(|| {
-            snapshot
-                .connections
-                .iter()
-                .find(|c| c.name == host)
-                .cloned()
-        })
-        .flatten()
+        .connections
+        .iter()
+        .find(|c| c.name == host)
+        .cloned()
 }
 
 enum Precheck {
     Paused,
-    NotAllowed,
-    InvalidUnit(String),
+    UnknownHost,
+    InvalidCommand(String),
     Granted {
         snapshot: BrokerSnapshot,
         conn: Connection,
-        command: String,
     },
     NeedsDecision {
         conn: Connection,
-        command: String,
         fingerprint: GrantFingerprint,
     },
 }
 
 enum Postcheck {
     Paused,
-    NotAllowed,
+    UnknownHost,
     Changed,
     Ready(Box<(BrokerSnapshot, Connection)>),
 }
 
-struct ServiceStatusCall {
+struct RunCommandCall {
     caller: Option<String>,
     target_host: String,
-    service: String,
+    command: String,
     timeout_secs: Option<u64>,
     wants_progress: bool,
 }
 
-struct ServiceRequest<'a, H> {
+struct CommandRequest<'a, H> {
     host: &'a WeakEntity<H>,
     caller: String,
     target_host: String,
-    service: String,
 }
 
-impl<H: AgentHost> ServiceRequest<'_, H> {
+impl<H: AgentHost> CommandRequest<'_, H> {
     fn report(&self, decision: AgentDecision, result: &BrokerResult, cx: &mut AsyncApp) {
         let outcome = AgentOutcome {
             caller: self.caller.clone(),
             host: self.target_host.clone(),
-            service: self.service.clone(),
             decision,
             result: result.clone(),
         };
@@ -330,24 +322,35 @@ impl<H: AgentHost> ServiceRequest<'_, H> {
     }
 }
 
-async fn handle_service_status<H: AgentHost>(
+fn validate_command(command: &str) -> Result<(), String> {
+    if command.trim().is_empty() {
+        return Err("command must not be empty".to_owned());
+    }
+    if command.len() > MAX_COMMAND_BYTES {
+        return Err(format!(
+            "command exceeded maximum size of {MAX_COMMAND_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
+async fn handle_run_command<H: AgentHost>(
     host: &WeakEntity<H>,
-    call: ServiceStatusCall,
+    call: RunCommandCall,
     responder: &Responder,
     cx: &mut AsyncApp,
 ) -> BrokerResult {
-    let ServiceStatusCall {
+    let RunCommandCall {
         caller,
         target_host,
-        service,
+        command,
         timeout_secs,
         wants_progress,
     } = call;
-    let req = ServiceRequest {
+    let req = CommandRequest {
         host,
         caller: caller_display(caller.as_deref()),
         target_host,
-        service,
     };
 
     if responder.is_cancelled() {
@@ -364,27 +367,17 @@ async fn handle_service_status<H: AgentHost>(
         if snapshot.config.paused {
             return Precheck::Paused;
         }
-        let Some(conn) = allowed_connection(&snapshot, &req.target_host, &req.service) else {
-            return Precheck::NotAllowed;
+        if let Err(msg) = validate_command(&command) {
+            return Precheck::InvalidCommand(msg);
+        }
+        let Some(conn) = saved_connection(&snapshot, &req.target_host) else {
+            return Precheck::UnknownHost;
         };
-        let command = match systemctl::command_for(&req.service) {
-            Ok(cmd) => cmd,
-            Err(e) => return Precheck::InvalidUnit(e.to_string()),
-        };
-        let fingerprint =
-            GrantFingerprint::for_connection(&conn, &snapshot.connections, &req.service);
-        if h.verify_agent_grant(&req.target_host, &req.service, fingerprint, cx) {
-            Precheck::Granted {
-                snapshot,
-                conn,
-                command,
-            }
+        let fingerprint = GrantFingerprint::for_connection(&conn, &snapshot.connections);
+        if h.verify_agent_grant(&req.target_host, fingerprint, cx) {
+            Precheck::Granted { snapshot, conn }
         } else {
-            Precheck::NeedsDecision {
-                conn,
-                command,
-                fingerprint,
-            }
+            Precheck::NeedsDecision { conn, fingerprint }
         }
     }) else {
         return BrokerResult::Error(AgentError::new(
@@ -393,7 +386,7 @@ async fn handle_service_status<H: AgentHost>(
         ));
     };
 
-    let (conn, command, fingerprint) = match precheck {
+    let (conn, fingerprint) = match precheck {
         Precheck::Paused => {
             return req.fail(
                 AgentDecision::Paused,
@@ -402,22 +395,17 @@ async fn handle_service_status<H: AgentHost>(
                 cx,
             );
         }
-        Precheck::NotAllowed => {
+        Precheck::InvalidCommand(msg) => {
+            return req.fail(AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
+        }
+        Precheck::UnknownHost => {
             let msg = format!(
-                "service '{}' on host '{}' is not allowed; call list_hosts to see allowed hosts and services",
-                sanitize_display_text(&req.service),
+                "host '{}' is not a saved connection; call list_hosts to see available hosts",
                 sanitize_display_text(&req.target_host),
             );
             return req.fail(AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
         }
-        Precheck::InvalidUnit(msg) => {
-            return req.fail(AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
-        }
-        Precheck::Granted {
-            snapshot,
-            conn,
-            command,
-        } => {
+        Precheck::Granted { snapshot, conn } => {
             if responder.is_cancelled() {
                 return req.fail(
                     AgentDecision::Cancelled,
@@ -426,29 +414,17 @@ async fn handle_service_status<H: AgentHost>(
                     cx,
                 );
             }
-            let res = execute_service_status(
-                &conn,
-                &snapshot,
-                &req.service,
-                &command,
-                timeout_secs,
-                responder,
-                cx,
-            )
-            .await;
+            let res =
+                execute_run_command(&conn, &snapshot, &command, timeout_secs, responder, cx).await;
             req.report(AgentDecision::GrantReused, &res, cx);
             return res;
         }
-        Precheck::NeedsDecision {
-            conn,
-            command,
-            fingerprint,
-        } => (conn, command, fingerprint),
+        Precheck::NeedsDecision { conn, fingerprint } => (conn, fingerprint),
     };
 
     // Ask explicit human approval via the click-only Decision queue with a 60 s default deadline.
-    let prompt = build_service_status_prompt(&req.caller, &conn, &command);
-    let cue = AttentionCue::for_service_status(&req.caller, &conn.name, &req.service);
+    let prompt = build_run_command_prompt(&req.caller, &conn, &command);
+    let cue = AttentionCue::for_run_command(&req.caller, &conn.name, &summarize_command(&command));
     let pending = match host.update(cx, |h, cx| {
         let deadline = Instant::now() + h.agent_decision_timeout();
         let pending = h.ask_agent_decision(prompt, Some(deadline), cx)?;
@@ -549,22 +525,22 @@ async fn handle_service_status<H: AgentHost>(
         );
     }
 
-    // Re-read current Saved connections, allowlist, and live fingerprint before dialing or recording
+    // Re-read current Saved connections and live fingerprint before dialing or recording
     // a Grant in case settings changed while the Decision was open.
     let Ok(postcheck) = host.update(cx, |h, cx| {
         let fresh = h.agent_snapshot();
         if fresh.config.paused {
             return Postcheck::Paused;
         }
-        let Some(conn) = allowed_connection(&fresh, &req.target_host, &req.service) else {
-            return Postcheck::NotAllowed;
+        let Some(conn) = saved_connection(&fresh, &req.target_host) else {
+            return Postcheck::UnknownHost;
         };
-        let fresh_fp = GrantFingerprint::for_connection(&conn, &fresh.connections, &req.service);
+        let fresh_fp = GrantFingerprint::for_connection(&conn, &fresh.connections);
         if fresh_fp != fingerprint {
             return Postcheck::Changed;
         }
         if decision == AgentDecision::AllowUntilLock {
-            h.record_agent_grant(&req.target_host, &req.service, fresh_fp, cx);
+            h.record_agent_grant(&req.target_host, fresh_fp, cx);
         }
         Postcheck::Ready(Box::new((fresh, conn)))
     }) else {
@@ -583,11 +559,11 @@ async fn handle_service_status<H: AgentHost>(
                 cx,
             );
         }
-        Postcheck::NotAllowed => {
+        Postcheck::UnknownHost => {
             return req.fail(
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
-                "host or service is no longer allowed in tern",
+                "saved connection is no longer available in tern",
                 cx,
             );
         }
@@ -602,16 +578,7 @@ async fn handle_service_status<H: AgentHost>(
         Postcheck::Ready(ready) => *ready,
     };
 
-    let res = execute_service_status(
-        &conn,
-        &fresh,
-        &req.service,
-        &command,
-        timeout_secs,
-        responder,
-        cx,
-    )
-    .await;
+    let res = execute_run_command(&conn, &fresh, &command, timeout_secs, responder, cx).await;
     req.report(decision, &res, cx);
     res
 }

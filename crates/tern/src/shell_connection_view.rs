@@ -73,7 +73,6 @@ impl Shell {
             .child(groups)
             .child(row("Tags", &form.tags, t))
             .child(row("Password", &form.password, t))
-            .child(self.allowed_services_section(form, cx))
             .child(self.advanced_section(form, cx));
         match step {
             VaultStep::None => {}

@@ -565,16 +565,11 @@ impl Shell {
             ));
         }
         for (ix, c) in self.connections.iter().enumerate() {
-            let mut address = if c.port == 22 {
+            let address = if c.port == 22 {
                 format!("{}@{}", c.user, c.host)
             } else {
                 format!("{}@{}:{}", c.user, c.host, c.port)
             };
-            let allowed = self.agent_allowed_services(&c.name).len();
-            if allowed > 0 {
-                let noun = if allowed == 1 { "service" } else { "services" };
-                address.push_str(&format!(" · {allowed} Agent {noun}"));
-            }
             let confirming = self.confirm_delete == Some(ix);
             let actions = div()
                 .flex()

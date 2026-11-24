@@ -94,5 +94,5 @@ A local external caller that asks tern to operate on a Host.
 _Avoid_: MCP client, integration, bot
 
 **Grant**:
-An in-memory approval letting Agents repeat an allowed operation on a Host without raising a Decision again until the Mac locks, sleeps, or tern quits.
+An in-memory approval letting Agents run commands on a Host without raising a Decision again until the Mac locks, sleeps, or tern quits.
 _Avoid_: permission, rule, allowance

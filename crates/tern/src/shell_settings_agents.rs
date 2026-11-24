@@ -1,13 +1,13 @@
-//! Settings → Agents: local MCP enable/pause switches, active in-memory Grants, Saved connection
-//! allowlist overview with `~/.ssh/config` guidance, and a copyable MCP config JSON snippet
-//! populated with tern's full executable path.
+//! Settings → Agents: local MCP enable/pause switches, active per-Host in-memory Grants, Saved
+//! connection availability with `~/.ssh/config` guidance, and a copyable MCP config JSON snippet
+//! populated with tern's full executable path (ADR 0003, ADR 0004).
 
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    ClipboardItem, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    ClipboardItem, Context, InteractiveElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px,
 };
 use serde::Serialize;
@@ -104,7 +104,7 @@ impl Shell {
         let paused = self.agents_paused();
         let store_error = self.agent_store_error().map(str::to_owned);
         let grants = self.active_agent_grants();
-        let allowed_hosts = self.agent_allowed_hosts();
+        let saved_count = self.connections.len();
         let snippet = mcp_config_json(&current_executable_path());
         let now = SystemTime::now();
 
@@ -136,7 +136,7 @@ impl Shell {
                 false,
                 "Pause agents",
                 Some(
-                    "Reject new Agent requests, cancel pending Decisions, and clear active Grants without removing allowed services"
+                    "Reject new Agent requests, cancel pending Decisions, and clear active Grants"
                         .into(),
                 ),
                 div()
@@ -159,7 +159,7 @@ impl Shell {
                 true,
                 "No active Grants",
                 Some(
-                    "Approving a Decision with Allow until lock adds an in-memory Grant you can revoke here; Grants clear on sleep, screen lock, or quit"
+                    "Approving a Decision with Allow host until lock adds an in-memory Grant you can revoke here; Grants clear on sleep, screen lock, or quit"
                         .into(),
                 ),
                 div(),
@@ -190,17 +190,16 @@ impl Shell {
             ));
             for (ix, grant) in grants.into_iter().enumerate() {
                 let host = grant.host.clone();
-                let service = grant.service.clone();
                 let when = crate::files_text::modified(grant.granted_at, now);
                 grants_card = grants_card.child(w::row(
                     &t,
                     false,
-                    format!("{} — {}", grant.host, grant.service),
+                    grant.host,
                     Some(SharedString::from(format!("Granted {when}"))),
                     w::button(&t, ("agent-revoke-grant", ix), "Revoke").on_click(cx.listener(
                         move |s, _, _, cx| {
-                            if s.revoke_agent_grant(&host, &service, cx) {
-                                s.activity(format!("Revoked Grant for {service} on {host}"), cx);
+                            if s.revoke_agent_grant(&host, cx) {
+                                s.activity(format!("Revoked Grant for {host}"), cx);
                             }
                         },
                     )),
@@ -208,51 +207,37 @@ impl Shell {
             }
         }
 
-        let mut hosts_card = w::card(&t);
-        if allowed_hosts.is_empty() {
-            hosts_card = hosts_card.child(w::row(
+        let hosts_title = if saved_count == 0 {
+            "No Saved connections yet".to_owned()
+        } else if saved_count == 1 {
+            "1 Saved connection available".to_owned()
+        } else {
+            format!("{saved_count} Saved connections available")
+        };
+        let hosts_card = w::card(&t)
+            .child(w::row(
                 &t,
                 true,
-                "No services allowed yet",
+                hosts_title,
                 Some(
-                    "Edit a Saved connection to allow systemd service unit names for Agents".into(),
+                    "Agents can list and request commands on all Saved connections in hosts.json. Every Host requires a Decision unless an active Grant exists."
+                        .into(),
                 ),
                 w::button(&t, "agents-open-connections", "Connections").on_click(
                     cx.listener(|s, _, _, cx| s.select_section(Section::Connections, cx)),
                 ),
+            ))
+            .child(w::row(
+                &t,
+                false,
+                "~/.ssh/config Hosts",
+                Some(
+                    "Only Saved connections are exposed to Agents. Import or duplicate a ~/.ssh/config Host as a Saved connection first."
+                        .into(),
+                ),
+                w::button(&t, "agents-import-ssh-config", "Import from ~/.ssh/config…")
+                    .on_click(cx.listener(|s, _, window, cx| s.open_import(window, cx))),
             ));
-        } else {
-            for (ix, (host, services)) in allowed_hosts.iter().enumerate() {
-                let conn_ix = self.connections.iter().position(|c| c.name == *host);
-                let control = match conn_ix {
-                    Some(cix) => w::button(&t, ("agents-edit-host", ix), "Edit")
-                        .on_click(cx.listener(move |s, _, window, cx| {
-                            let draft = s.connection(cix);
-                            s.open_form(Some(cix), draft, window, cx);
-                        }))
-                        .into_any_element(),
-                    None => div().into_any_element(),
-                };
-                hosts_card = hosts_card.child(w::row(
-                    &t,
-                    ix == 0,
-                    host.clone(),
-                    Some(SharedString::from(services.join(", "))),
-                    control,
-                ));
-            }
-        }
-        hosts_card = hosts_card.child(w::row(
-            &t,
-            false,
-            "~/.ssh/config Hosts",
-            Some(
-                "Only Saved connections can allow services for Agents. Import or duplicate a ~/.ssh/config Host as a Saved connection first."
-                    .into(),
-            ),
-            w::button(&t, "agents-import-ssh-config", "Import from ~/.ssh/config…")
-                .on_click(cx.listener(|s, _, window, cx| s.open_import(window, cx))),
-        ));
 
         let copy_snippet = snippet.clone();
         let code_lines: Vec<SharedString> = snippet
@@ -304,14 +289,14 @@ impl Shell {
             .child(w::page_header(&t, "Agents"))
             .child(w::page_subtitle(
                 &t,
-                "Let local Agents inspect allowlisted systemd services on Saved connections without sharing SSH keys or passwords. Agent settings (agents.json) and audit history (agent-audit.jsonl) stay on this Mac only and are never synced.",
+                "Let local Agents run commands on your Saved connections without sharing SSH keys or passwords. Agent settings (agents.json) stay on this Mac only and are never synced.",
             ))
             .when_some(store_error, |el, err| {
                 el.child(w::page_subtitle(&t, err).text_color(t.danger))
             })
             .child(w::section(&t, "Local MCP", mcp_card))
             .child(w::section(&t, "Active Grants", grants_card))
-            .child(w::section(&t, "Allowed hosts", hosts_card))
+            .child(w::section(&t, "Hosts", hosts_card))
             .child(w::section(&t, "MCP configuration", config_card))
     }
 }

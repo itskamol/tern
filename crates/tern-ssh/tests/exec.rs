@@ -277,13 +277,13 @@ async fn output_caps_enforce_exact_64kib_boundary_independently_on_stdout_and_st
 }
 
 #[test]
-fn timeout_options_default_to_15s_and_clamp_to_1_to_60_seconds() {
-    assert_eq!(DEFAULT_EXEC_TIMEOUT, Duration::from_secs(15));
+fn timeout_options_default_to_30s_and_clamp_to_1_to_300_seconds() {
+    assert_eq!(DEFAULT_EXEC_TIMEOUT, Duration::from_secs(30));
     assert_eq!(MIN_EXEC_TIMEOUT, Duration::from_secs(1));
-    assert_eq!(MAX_EXEC_TIMEOUT, Duration::from_secs(60));
+    assert_eq!(MAX_EXEC_TIMEOUT, Duration::from_secs(300));
     assert_eq!(
         ExecOptions::default().effective_timeout(),
-        Duration::from_secs(15)
+        Duration::from_secs(30)
     );
     assert_eq!(
         ExecOptions::with_timeout(Duration::ZERO).effective_timeout(),
@@ -302,16 +302,16 @@ fn timeout_options_default_to_15s_and_clamp_to_1_to_60_seconds() {
         Duration::from_secs(25)
     );
     assert_eq!(
-        ExecOptions::with_timeout(Duration::from_secs(60)).effective_timeout(),
-        Duration::from_secs(60)
+        ExecOptions::with_timeout(Duration::from_secs(300)).effective_timeout(),
+        Duration::from_secs(300)
     );
     assert_eq!(
-        ExecOptions::with_timeout(Duration::from_secs(61)).effective_timeout(),
-        Duration::from_secs(60)
+        ExecOptions::with_timeout(Duration::from_secs(301)).effective_timeout(),
+        Duration::from_secs(300)
     );
     assert_eq!(
         ExecOptions::with_timeout(Duration::MAX).effective_timeout(),
-        Duration::from_secs(60)
+        Duration::from_secs(300)
     );
 }
 

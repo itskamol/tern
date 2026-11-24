@@ -408,14 +408,14 @@ fn extract_caller_name(params: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Static typed MCP tool definitions for `list_hosts` and `service_status`.
+/// Static typed MCP tool definitions for `list_hosts` and `run_command`.
 #[must_use]
 pub fn tools_list_payload() -> Value {
     json!({
         "tools": [
             {
                 "name": "list_hosts",
-                "description": "List Saved connections in tern that allow Agent systemd service checks, their allowed service unit names, and usage instructions.",
+                "description": "List Saved connections in tern available to Agents.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -423,8 +423,8 @@ pub fn tools_list_payload() -> Value {
                 }
             },
             {
-                "name": "service_status",
-                "description": "Check systemd status (LoadState, ActiveState, SubState) of an allowlisted service on a Saved connection in tern. Requires explicit approval in tern.",
+                "name": "run_command",
+                "description": "Run a shell command or multi-line script on a Saved connection in tern over an isolated non-PTY SSH exec connection. Requires approval in tern unless an active Host Grant exists.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -432,18 +432,18 @@ pub fn tools_list_payload() -> Value {
                             "type": "string",
                             "description": "Saved connection alias returned by list_hosts."
                         },
-                        "service": {
+                        "command": {
                             "type": "string",
-                            "description": "Allowlisted systemd service unit name (e.g. api.service)."
+                            "description": "Shell command or inline script to run in the remote user's login shell (up to 64 KiB)."
                         },
                         "timeout_secs": {
                             "type": "integer",
                             "minimum": 1,
-                            "maximum": 60,
-                            "description": "Optional wall-clock timeout in seconds (defaults to 15, clamped to 1..=60)."
+                            "maximum": 300,
+                            "description": "Optional wall-clock timeout in seconds (defaults to 30, clamped to 1..=300)."
                         }
                     },
-                    "required": ["host", "service"],
+                    "required": ["host", "command"],
                     "additionalProperties": false
                 }
             }
@@ -474,16 +474,16 @@ fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<ParsedToolC
 
     let request = match name {
         "list_hosts" => BrokerRequest::ListHosts { caller },
-        "service_status" => {
+        "run_command" => {
             let host = args
                 .get("host")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "missing string argument 'host'".to_owned())?
                 .to_owned();
-            let service = args
-                .get("service")
+            let command = args
+                .get("command")
                 .and_then(Value::as_str)
-                .ok_or_else(|| "missing string argument 'service'".to_owned())?
+                .ok_or_else(|| "missing string argument 'command'".to_owned())?
                 .to_owned();
             let timeout_secs = match args.get("timeout_secs") {
                 None | Some(Value::Null) => None,
@@ -498,10 +498,10 @@ fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<ParsedToolC
                     }
                 }
             };
-            BrokerRequest::ServiceStatus {
+            BrokerRequest::RunCommand {
                 caller,
                 host,
-                service,
+                command,
                 timeout_secs,
                 wants_progress: progress_token.is_some(),
             }

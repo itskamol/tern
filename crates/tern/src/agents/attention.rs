@@ -1,4 +1,4 @@
-//! Non-focus-stealing background attention cues for incoming Agent Decisions (ADR 0003).
+//! Non-focus-stealing background attention cues for incoming Agent Decisions (ADR 0003, ADR 0004).
 //!
 //! Defines the thin [`AgentAttention`] platform boundary so `gpui::TestApp` tests inject a spy
 //! without touching macOS AppKit or Notification Center. The macOS implementation checks
@@ -19,15 +19,20 @@ pub struct AttentionCue {
 }
 
 impl AttentionCue {
-    /// Builds a sanitized attention cue for a pending Agent `service_status` Decision.
+    /// Builds a sanitized attention cue for a pending Agent `run_command` Decision.
     #[must_use]
-    pub fn for_service_status(caller: &str, host: &str, service: &str) -> Self {
+    pub fn for_run_command(caller: &str, host: &str, command_preview: &str) -> Self {
         let caller = sanitize_display_text(caller);
         let host = sanitize_display_text(host);
-        let service = sanitize_display_text(service);
+        let preview = sanitize_display_text(command_preview);
+        let body = if preview.is_empty() {
+            format!("{caller} wants to run a command on {host}")
+        } else {
+            format!("{caller} wants to run on {host}: {preview}")
+        };
         Self {
             title: format!("Approval needed for {host}"),
-            body: format!("{caller} wants to check {service} on {host}"),
+            body,
         }
     }
 }
@@ -203,21 +208,21 @@ mod tests {
 
     #[test]
     fn cue_sanitizes_ansi_control_and_bidi_overrides() {
-        let cue = AttentionCue::for_service_status(
+        let cue = AttentionCue::for_run_command(
             "Claude\x1b[31m\u{202e}\nCode\x1b[0m",
             "prod\x07-host",
-            "api\r.service",
+            "node\r ./check.js",
         );
         assert_eq!(cue.title, "Approval needed for prod-host");
         assert_eq!(
             cue.body,
-            "ClaudeCode wants to check api.service on prod-host"
+            "ClaudeCode wants to run on prod-host: node ./check.js"
         );
     }
 
     #[test]
     fn notify_if_inactive_gates_on_active_state() {
-        let cue = AttentionCue::for_service_status("Claude Code", "staging", "api.service");
+        let cue = AttentionCue::for_run_command("Claude Code", "staging", "df -h");
         let fake = FakeAttention::new(true);
         assert!(!notify_if_inactive(&fake, &cue));
         assert!(fake.cues.lock().unwrap().is_empty());
@@ -231,7 +236,7 @@ mod tests {
     #[test]
     fn macos_unbundled_test_process_skips_user_notifications_safely() {
         assert!(!macos::has_app_bundle());
-        let cue = AttentionCue::for_service_status("Claude Code", "staging", "api.service");
+        let cue = AttentionCue::for_run_command("Claude Code", "staging", "df -h");
         // Must never throw an Objective-C exception when invoked from an unbundled cargo test.
         macos::MacOsAttention.alert_background(&cue);
     }

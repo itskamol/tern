@@ -18,11 +18,11 @@ use crate::error::{Cause, Disconnect, Failure};
 use crate::{ConnectSpec, Prompt, SessionEvent};
 
 /// Default wall-clock limit covering connection setup and command execution.
-pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(15);
+pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 /// Minimum permitted wall-clock timeout for [`exec`].
 pub const MIN_EXEC_TIMEOUT: Duration = Duration::from_secs(1);
 /// Maximum permitted wall-clock timeout for [`exec`].
-pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
+pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 /// Independent byte cap for each of `stdout` and `stderr` captured by [`exec`].
 pub const EXEC_OUTPUT_CAP: usize = 64 * 1024;
 
@@ -41,8 +41,8 @@ const DISCONNECT_GRACE: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecOptions {
     /// Wall-clock limit covering connection setup and command execution.
-    /// Defaults to [`DEFAULT_EXEC_TIMEOUT`] (15 s) and is clamped to
-    /// [`MIN_EXEC_TIMEOUT`]..=[`MAX_EXEC_TIMEOUT`] (1..=60 s).
+    /// Defaults to [`DEFAULT_EXEC_TIMEOUT`] (30 s) and is clamped to
+    /// [`MIN_EXEC_TIMEOUT`]..=[`MAX_EXEC_TIMEOUT`] (1..=300 s).
     pub timeout: Duration,
 }
 
@@ -587,7 +587,7 @@ mod tests {
             MIN_EXEC_TIMEOUT
         );
         assert_eq!(
-            ExecOptions::with_timeout(Duration::from_secs(60) + Duration::from_nanos(1))
+            ExecOptions::with_timeout(Duration::from_secs(300) + Duration::from_nanos(1))
                 .effective_timeout(),
             MAX_EXEC_TIMEOUT
         );

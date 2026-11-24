@@ -77,10 +77,10 @@ async fn initialize_ping_tools_list_and_closed_tern_recovery_work_without_restar
     let list = tools["result"]["tools"].as_array().unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0]["name"], "list_hosts");
-    assert_eq!(list[1]["name"], "service_status");
+    assert_eq!(list[1]["name"], "run_command");
     assert_eq!(
         list[1]["inputSchema"]["required"],
-        json!(["host", "service"])
+        json!(["host", "command"])
     );
 
     // 4. tools/call while closed returns tern_not_running and keeps tern mcp alive.
@@ -133,8 +133,8 @@ async fn initialize_ping_tools_list_and_closed_tern_recovery_work_without_restar
                 &mut w,
                 &BrokerMessage::Result(BrokerResult::Ok {
                     data: json!({
-                        "hosts": [{ "alias": "staging", "services": ["api.service"] }],
-                        "usage": "call service_status"
+                        "hosts": [{ "alias": "staging", "host": "10.0.0.10", "user": "deploy", "port": 22 }],
+                        "usage": "call run_command"
                     }),
                 }),
             )
@@ -175,7 +175,7 @@ async fn initialize_ping_tools_list_and_closed_tern_recovery_work_without_restar
             "jsonrpc": "2.0",
             "id": 6,
             "method": "tools/call",
-            "params": { "name": "service_status", "arguments": { "host": "staging" } }
+            "params": { "name": "run_command", "arguments": { "host": "staging" } }
         }),
     )
     .await;
@@ -206,7 +206,7 @@ async fn notifications_cancelled_with_string_id_sends_broker_cancel_and_suppress
         let req: BrokerRequest = serde_json::from_str(&first).unwrap();
         assert!(matches!(
             req,
-            BrokerRequest::ServiceStatus {
+            BrokerRequest::RunCommand {
                 wants_progress: true,
                 ..
             }
@@ -241,8 +241,8 @@ async fn notifications_cancelled_with_string_id_sends_broker_cancel_and_suppress
         "id": "req-str-1",
         "method": "tools/call",
         "params": {
-            "name": "service_status",
-            "arguments": { "host": "staging", "service": "api.service" },
+            "name": "run_command",
+            "arguments": { "host": "staging", "command": "echo hi" },
             "_meta": { "progressToken": "p-1" }
         }
     });

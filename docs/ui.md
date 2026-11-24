@@ -104,7 +104,7 @@ Every message is one of three kinds, and the code shows none without its kind: `
 | Decision | a card that stays until answered: 340 wide, 12 radius, 13 pt, inset and gap 8, the connection form's 28 pt buttons; above any snackbar | the Activity list's card; `SPACE_SM` |
 | A name already taken by a copy | asked in the copy's row in the Files tab or the Files panel; a sheet over the window only while neither is on screen | issue #23, story 30 |
 
-## Agents (ADR 0003)
+## Agents (ADR 0003, ADR 0004)
 
 | Feature | Value | Source |
 | --- | --- | --- |
@@ -112,7 +112,6 @@ Every message is one of three kinds, and the code shows none without its kind: `
 | Decision details | 12 pt, 4 gap between rows, 52 px label column, 6 gap between label and value | Settings row description (12 pt); connection form `row` gap (4); Files panel Size column (52) and row gap (6) |
 | Decision command block | 8×6 padding, 6 radius (`CONTROL_RADIUS`), `row_hover` fill, `hairline` border, `Geist Mono` 11 pt / 16 pt line height | Activity list row inset (8×6); `CONTROL_RADIUS`; status line 11 pt on Settings description 16 pt leading |
 | Settings → Agents snippet box | 16 side margin (`SPACE_LG`), 12 bottom margin, 12×8 padding, 8 radius (`SPACE_SM`), `ink(0.05)` fill, `hairline` border, `Geist Mono` 12 pt / 16 pt line height; 14 px Copy icon | `settings_widgets::row` margin (16), vertical rhythm (12), and description typography (12/16); `w::button` radius (8); Clipboard banner copy icon (14) |
-| Allowed services section (Saved connection form) | 30 tall input and Add button (`SPACE_SM` 8 radius, 10 input inset / 12 button inset), 6 gap (`CONTROL_RADIUS`), 4 top inset; service chips `Geist Mono` `text_xs`, 8 left / 4 right / 2 vertical padding, 6 radius (`CONTROL_RADIUS`), 20 px × button with 4 radius | `shell_connections::row` (30 tall, 10 inset, 8 radius, 4 gap); `shell_connections::button` (12 inset, 8 radius); `group-chip` (6 gap, 8×2 inset, 6 radius); Files panel Clipboard banner Forget button (20 px) |
 
 ## Keyboard
 
