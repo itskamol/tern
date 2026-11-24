@@ -6,16 +6,20 @@
 //! `tern_not_running` without exiting when tern is unavailable, and recovers automatically on the
 //! next call once tern starts.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
 use super::protocol::{
-    AgentError, AgentErrorCode, BrokerMessage, BrokerRequest, BrokerResult, FrameError,
-    MAX_FRAME_BYTES, read_line_bounded, write_json_line,
+    AgentError, AgentErrorCode, BoundedLineReader, BrokerMessage, BrokerRequest, BrokerResult,
+    FrameError, MAX_FRAME_BYTES, write_json_line,
 };
 use super::socket_path;
 
@@ -25,6 +29,9 @@ const ERR_PARSE: i64 = -32700;
 const ERR_INVALID_REQUEST: i64 = -32600;
 const ERR_METHOD_NOT_FOUND: i64 = -32601;
 const ERR_INVALID_PARAMS: i64 = -32602;
+const MAX_IN_FLIGHT_CALLS: usize = 32;
+const OUTGOING_CHANNEL_CAP: usize = 64;
+const CANCEL_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Runs `tern mcp` over process stdin/stdout until stdin closes.
 ///
@@ -124,88 +131,196 @@ struct SessionState {
     caller: Option<String>,
 }
 
-/// Serves MCP JSON-RPC 2.0 over newline-delimited `reader` and `writer`, dialing `socket_path`
-/// fresh for each `tools/call`.
-///
-/// # Errors
-/// Returns an [`io::Error`] if reading from `reader` or writing to `writer` fails.
-pub async fn serve_stdio<R, W>(mut reader: R, mut writer: W, socket_path: PathBuf) -> io::Result<()>
-where
-    R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut state = SessionState::default();
+/// Normalized JSON-RPC request ID key for tracking concurrent in-flight `tools/call` tasks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RequestKey {
+    String(String),
+    Int(i64),
+    UInt(u64),
+}
 
-    loop {
-        let line = match read_line_bounded(&mut reader, MAX_FRAME_BYTES).await {
-            Ok(Some(line)) => line,
-            Ok(None) => return Ok(()),
-            Err(FrameError::TooLarge(limit)) => {
-                let resp = JsonRpcResponse::err(
-                    Value::Null,
-                    ERR_INVALID_REQUEST,
-                    format!("frame exceeded maximum size of {limit} bytes"),
-                );
-                write_json_line(&mut writer, &resp).await?;
-                continue;
-            }
-            Err(FrameError::Utf8) => {
-                let resp = JsonRpcResponse::err(
-                    Value::Null,
-                    ERR_PARSE,
-                    "request frame was not valid utf-8",
-                );
-                write_json_line(&mut writer, &resp).await?;
-                continue;
-            }
-            Err(FrameError::Io(e)) => return Err(e),
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let req: JsonRpcRequest = match serde_json::from_str(&line) {
-            Ok(req) => req,
-            Err(e) => {
-                let resp = JsonRpcResponse::err(
-                    Value::Null,
-                    ERR_PARSE,
-                    format!("invalid json-rpc request: {e}"),
-                );
-                write_json_line(&mut writer, &resp).await?;
-                continue;
-            }
-        };
-
-        if let Some(version) = req.jsonrpc.as_deref()
-            && version != JSONRPC_VERSION
-        {
-            if let Some(id) = req.id {
-                let resp = JsonRpcResponse::err(
-                    id,
-                    ERR_INVALID_REQUEST,
-                    format!("unsupported jsonrpc version: {version}"),
-                );
-                write_json_line(&mut writer, &resp).await?;
-            }
-            continue;
-        }
-
-        let response = handle_request(req, &mut state, &socket_path).await;
-        if let Some(resp) = response {
-            write_json_line(&mut writer, &resp).await?;
+impl RequestKey {
+    fn from_value(value: &Value) -> Option<Self> {
+        if let Some(s) = value.as_str() {
+            Some(Self::String(s.to_owned()))
+        } else if let Some(i) = value.as_i64() {
+            Some(Self::Int(i))
+        } else {
+            value.as_u64().map(Self::UInt)
         }
     }
 }
 
-async fn handle_request(
+struct InFlightCall {
+    cancel_tx: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+enum Outgoing {
+    Progress {
+        key: Option<RequestKey>,
+        notification: Value,
+    },
+    Response {
+        key: Option<RequestKey>,
+        response: JsonRpcResponse,
+    },
+}
+
+struct ParsedToolCall {
+    request: BrokerRequest,
+    progress_token: Option<Value>,
+}
+
+/// Serves MCP JSON-RPC 2.0 over newline-delimited `reader` and `writer`, dialing `socket_path`
+/// fresh for each `tools/call` while remaining responsive to concurrent requests and progress
+/// notifications.
+///
+/// # Errors
+/// Returns an [`io::Error`] if reading from `reader` or writing to `writer` fails.
+pub async fn serve_stdio<R, W>(reader: R, mut writer: W, socket_path: PathBuf) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut line_reader = BoundedLineReader::new(reader);
+    let mut state = SessionState::default();
+    let (out_tx, mut out_rx) = mpsc::channel::<Outgoing>(OUTGOING_CHANNEL_CAP);
+    let mut in_flight: HashMap<RequestKey, InFlightCall> = HashMap::new();
+
+    let result = loop {
+        tokio::select! {
+            biased;
+            outgoing = out_rx.recv() => {
+                let Some(outgoing) = outgoing else {
+                    continue;
+                };
+                match outgoing {
+                    Outgoing::Progress { key, notification } => {
+                        let active = key.as_ref().is_none_or(|k| in_flight.contains_key(k));
+                        if active
+                            && let Err(e) = write_json_line(&mut writer, &notification).await
+                        {
+                            break Err(e);
+                        }
+                    }
+                    Outgoing::Response { key, response } => {
+                        let active = match key {
+                            Some(k) => in_flight.remove(&k).is_some(),
+                            None => true,
+                        };
+                        if active
+                            && let Err(e) = write_json_line(&mut writer, &response).await
+                        {
+                            break Err(e);
+                        }
+                    }
+                }
+            }
+            next = line_reader.next_line(MAX_FRAME_BYTES) => {
+                let line = match next {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break Ok(()),
+                    Err(FrameError::TooLarge(limit)) => {
+                        let resp = JsonRpcResponse::err(
+                            Value::Null,
+                            ERR_INVALID_REQUEST,
+                            format!("frame exceeded maximum size of {limit} bytes"),
+                        );
+                        if let Err(e) = write_json_line(&mut writer, &resp).await {
+                            break Err(e);
+                        }
+                        continue;
+                    }
+                    Err(FrameError::Utf8) => {
+                        let resp = JsonRpcResponse::err(
+                            Value::Null,
+                            ERR_PARSE,
+                            "request frame was not valid utf-8",
+                        );
+                        if let Err(e) = write_json_line(&mut writer, &resp).await {
+                            break Err(e);
+                        }
+                        continue;
+                    }
+                    Err(FrameError::Io(e)) => break Err(e),
+                };
+
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let req: JsonRpcRequest = match serde_json::from_str(&line) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        let resp = JsonRpcResponse::err(
+                            Value::Null,
+                            ERR_PARSE,
+                            format!("invalid json-rpc request: {e}"),
+                        );
+                        if let Err(e) = write_json_line(&mut writer, &resp).await {
+                            break Err(e);
+                        }
+                        continue;
+                    }
+                };
+
+                if let Some(version) = req.jsonrpc.as_deref()
+                    && version != JSONRPC_VERSION
+                {
+                    if let Some(id) = req.id {
+                        let resp = JsonRpcResponse::err(
+                            id,
+                            ERR_INVALID_REQUEST,
+                            format!("unsupported jsonrpc version: {version}"),
+                        );
+                        if let Err(e) = write_json_line(&mut writer, &resp).await {
+                            break Err(e);
+                        }
+                    }
+                    continue;
+                }
+
+                if let Some(resp) = dispatch_request(
+                    req,
+                    &mut state,
+                    &socket_path,
+                    &out_tx,
+                    &mut in_flight,
+                ) && let Err(e) = write_json_line(&mut writer, &resp).await
+                {
+                    break Err(e);
+                }
+            }
+        }
+    };
+
+    for (_, call) in in_flight.drain() {
+        call.cancel_tx.send_replace(true);
+        call.task.abort();
+        let _ = call.task.await;
+    }
+
+    result
+}
+
+fn dispatch_request(
     req: JsonRpcRequest,
     state: &mut SessionState,
     socket_path: &Path,
+    out_tx: &mpsc::Sender<Outgoing>,
+    in_flight: &mut HashMap<RequestKey, InFlightCall>,
 ) -> Option<JsonRpcResponse> {
     // Notifications have no `id` and must never receive a JSON-RPC response.
-    let id = req.id?;
+    let Some(id) = req.id else {
+        if req.method == "notifications/cancelled"
+            && let Some(key) = req.params.get("requestId").and_then(RequestKey::from_value)
+            && let Some(call) = in_flight.remove(&key)
+        {
+            call.cancel_tx.send_replace(true);
+        }
+        return None;
+    };
 
     let resp = match req.method.as_str() {
         "initialize" => {
@@ -235,9 +350,47 @@ async fn handle_request(
         "ping" => JsonRpcResponse::ok(id, json!({})),
         "tools/list" => JsonRpcResponse::ok(id, tools_list_payload()),
         "tools/call" => match parse_tool_call(&req.params, state.caller.clone()) {
-            Ok(broker_req) => {
-                let result = call_broker(socket_path, &broker_req).await;
-                JsonRpcResponse::ok(id, format_tool_result(result))
+            Ok(parsed) => {
+                if in_flight.len() >= MAX_IN_FLIGHT_CALLS {
+                    return Some(JsonRpcResponse::err(
+                        id,
+                        ERR_INVALID_REQUEST,
+                        "too many concurrent tool calls in flight",
+                    ));
+                }
+                let key = RequestKey::from_value(&id);
+                let socket = socket_path.to_path_buf();
+                let tx = out_tx.clone();
+                let key_for_task = key.clone();
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let task = tokio::spawn(async move {
+                    let Some(result) = call_broker(
+                        &socket,
+                        &parsed.request,
+                        parsed.progress_token,
+                        key_for_task.clone(),
+                        &tx,
+                        cancel_rx,
+                    )
+                    .await
+                    else {
+                        return;
+                    };
+                    let response = JsonRpcResponse::ok(id, format_tool_result(result));
+                    let _ = tx
+                        .send(Outgoing::Response {
+                            key: key_for_task,
+                            response,
+                        })
+                        .await;
+                });
+                if let Some(k) = key
+                    && let Some(prev) = in_flight.insert(k, InFlightCall { cancel_tx, task })
+                {
+                    prev.cancel_tx.send_replace(true);
+                    prev.task.abort();
+                }
+                return None;
             }
             Err(message) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, message),
         },
@@ -303,7 +456,16 @@ pub fn tools_list_payload() -> Value {
     })
 }
 
-fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<BrokerRequest, String> {
+fn extract_progress_token(params: &Value) -> Option<Value> {
+    let token = params.get("_meta")?.get("progressToken")?;
+    match token {
+        Value::String(s) if !s.is_empty() => Some(Value::String(s.clone())),
+        Value::Number(n) if n.is_i64() || n.is_u64() => Some(Value::Number(n.clone())),
+        _ => None,
+    }
+}
+
+fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<ParsedToolCall, String> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -313,9 +475,10 @@ fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<BrokerReque
         Some(obj) if obj.is_object() => obj.clone(),
         Some(_) => return Err("parameter 'arguments' must be an object".to_owned()),
     };
+    let progress_token = extract_progress_token(params);
 
-    match name {
-        "list_hosts" => Ok(BrokerRequest::ListHosts { caller }),
+    let request = match name {
+        "list_hosts" => BrokerRequest::ListHosts { caller },
         "service_status" => {
             let host = args
                 .get("host")
@@ -340,15 +503,20 @@ fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<BrokerReque
                     }
                 }
             };
-            Ok(BrokerRequest::ServiceStatus {
+            BrokerRequest::ServiceStatus {
                 caller,
                 host,
                 service,
                 timeout_secs,
-            })
+                wants_progress: progress_token.is_some(),
+            }
         }
-        other => Err(format!("unknown tool: {other}")),
-    }
+        other => return Err(format!("unknown tool: {other}")),
+    };
+    Ok(ParsedToolCall {
+        request,
+        progress_token,
+    })
 }
 
 fn format_tool_result(result: BrokerResult) -> Value {
@@ -381,240 +549,117 @@ fn tern_not_running(detail: &str) -> BrokerResult {
 }
 
 #[cfg(unix)]
-async fn call_broker(socket_path: &Path, request: &BrokerRequest) -> BrokerResult {
-    let stream = match tokio::net::UnixStream::connect(socket_path).await {
-        Ok(stream) => stream,
-        Err(e) => {
-            tracing::debug!(error = %e, "mcp_broker_unavailable");
-            return tern_not_running(&e.to_string());
-        }
+async fn wait_cancelled(rx: &mut watch::Receiver<bool>) {
+    let _ = rx.wait_for(|&c| c).await;
+}
+
+#[cfg(unix)]
+async fn call_broker(
+    socket_path: &Path,
+    request: &BrokerRequest,
+    progress_token: Option<Value>,
+    key: Option<RequestKey>,
+    out_tx: &mpsc::Sender<Outgoing>,
+    mut cancel_rx: watch::Receiver<bool>,
+) -> Option<BrokerResult> {
+    let stream = tokio::select! {
+        biased;
+        () = wait_cancelled(&mut cancel_rx) => return None,
+        connected = tokio::net::UnixStream::connect(socket_path) => match connected {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::debug!(error = %e, "mcp_broker_unavailable");
+                return Some(tern_not_running(&e.to_string()));
+            }
+        },
     };
     let (read_half, mut write_half) = stream.into_split();
-    if let Err(e) = write_json_line(&mut write_half, request).await {
+    let write_res = tokio::select! {
+        biased;
+        () = wait_cancelled(&mut cancel_rx) => return None,
+        res = write_json_line(&mut write_half, request) => res,
+    };
+    if let Err(e) = write_res {
         tracing::warn!(error = %e, "mcp_broker_write_failed");
-        return tern_not_running(&e.to_string());
+        return Some(tern_not_running(&e.to_string()));
     }
-    let mut reader = BufReader::new(read_half);
+    let mut reader = BoundedLineReader::new(BufReader::new(read_half));
+    let mut progress_step: u64 = 0;
     loop {
-        match read_line_bounded(&mut reader, MAX_FRAME_BYTES).await {
+        let next = tokio::select! {
+            biased;
+            () = wait_cancelled(&mut cancel_rx) => {
+                let _ = tokio::time::timeout(
+                    CANCEL_WRITE_TIMEOUT,
+                    write_json_line(&mut write_half, &BrokerRequest::Cancel),
+                )
+                .await;
+                return None;
+            }
+            line = reader.next_line(MAX_FRAME_BYTES) => line,
+        };
+        match next {
             Ok(Some(line)) => {
                 if line.trim().is_empty() {
                     continue;
                 }
                 match serde_json::from_str::<BrokerMessage>(&line) {
                     Ok(BrokerMessage::Progress { message }) => {
-                        tracing::debug!(progress = %message, "mcp_broker_progress");
+                        if let Some(token) = progress_token.as_ref() {
+                            progress_step = progress_step.saturating_add(1);
+                            let notification = json!({
+                                "jsonrpc": JSONRPC_VERSION,
+                                "method": "notifications/progress",
+                                "params": {
+                                    "progressToken": token,
+                                    "progress": progress_step,
+                                    "message": message,
+                                }
+                            });
+                            let _ = out_tx
+                                .send(Outgoing::Progress {
+                                    key: key.clone(),
+                                    notification,
+                                })
+                                .await;
+                        } else {
+                            tracing::debug!(progress = %message, "mcp_broker_progress");
+                        }
                     }
-                    Ok(BrokerMessage::Result(result)) => return result,
+                    Ok(BrokerMessage::Result(result)) => return Some(result),
                     Err(e) => {
                         tracing::warn!(error = %e, "mcp_broker_bad_frame");
-                        return BrokerResult::Error(AgentError::new(
+                        return Some(BrokerResult::Error(AgentError::new(
                             AgentErrorCode::SshError,
                             "received malformed response from tern broker",
-                        ));
+                        )));
                     }
                 }
             }
             Ok(None) => {
-                return tern_not_running("connection closed before response");
+                return Some(tern_not_running("connection closed before response"));
             }
             Err(e) => {
-                return tern_not_running(&e.to_string());
+                return Some(tern_not_running(&e.to_string()));
             }
         }
     }
 }
 
 #[cfg(not(unix))]
-async fn call_broker(_socket_path: &Path, _request: &BrokerRequest) -> BrokerResult {
-    tern_not_running("local unix socket broker is unsupported on this platform")
+async fn call_broker(
+    _socket_path: &Path,
+    _request: &BrokerRequest,
+    _progress_token: Option<Value>,
+    _key: Option<RequestKey>,
+    _out_tx: &mpsc::Sender<Outgoing>,
+    _cancel_rx: watch::Receiver<bool>,
+) -> Option<BrokerResult> {
+    Some(tern_not_running(
+        "local unix socket broker is unsupported on this platform",
+    ))
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-
-    use super::*;
-
-    async fn exchange(
-        writer: &mut tokio::io::DuplexStream,
-        reader: &mut BufReader<tokio::io::DuplexStream>,
-        req: Value,
-    ) -> Value {
-        let mut line = serde_json::to_vec(&req).unwrap();
-        line.push(b'\n');
-        writer.write_all(&line).await.unwrap();
-        writer.flush().await.unwrap();
-        let mut out = String::new();
-        reader.read_line(&mut out).await.unwrap();
-        serde_json::from_str(&out).unwrap()
-    }
-
-    #[tokio::test]
-    async fn initialize_ping_tools_list_and_closed_tern_recovery_work_without_restarting() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("agent.sock");
-
-        let (mut client_tx, server_rx) = tokio::io::duplex(64 * 1024);
-        let (server_tx, client_rx) = tokio::io::duplex(64 * 1024);
-        let mut client_rx = BufReader::new(client_rx);
-
-        let server = tokio::spawn(serve_stdio(
-            BufReader::new(server_rx),
-            server_tx,
-            sock.clone(),
-        ));
-
-        // 1. initialize works while tern is closed and records clientInfo.name.
-        let init = exchange(
-            &mut client_tx,
-            &mut client_rx,
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-03-26",
-                    "clientInfo": { "name": "Cursor", "version": "1.0" }
-                }
-            }),
-        )
-        .await;
-        assert_eq!(init["id"], 1);
-        assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(init["result"]["serverInfo"]["name"], "tern");
-
-        // 2. notifications/initialized emits no response; ping answers immediately.
-        client_tx
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
-            .await
-            .unwrap();
-        let pong = exchange(
-            &mut client_tx,
-            &mut client_rx,
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }),
-        )
-        .await;
-        assert_eq!(pong["id"], 2);
-        assert_eq!(pong["result"], json!({}));
-
-        // 3. tools/list works while tern is closed and exposes typed schemas.
-        let tools = exchange(
-            &mut client_tx,
-            &mut client_rx,
-            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
-        )
-        .await;
-        let list = tools["result"]["tools"].as_array().unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0]["name"], "list_hosts");
-        assert_eq!(list[1]["name"], "service_status");
-        assert_eq!(
-            list[1]["inputSchema"]["required"],
-            json!(["host", "service"])
-        );
-
-        // 4. tools/call while closed returns tern_not_running and keeps tern mcp alive.
-        let closed = exchange(
-            &mut client_tx,
-            &mut client_rx,
-            json!({
-                "jsonrpc": "2.0",
-                "id": 4,
-                "method": "tools/call",
-                "params": { "name": "list_hosts", "arguments": {} }
-            }),
-        )
-        .await;
-        assert_eq!(closed["result"]["isError"], true);
-        assert_eq!(
-            closed["result"]["structuredContent"]["error"],
-            "tern_not_running"
-        );
-
-        // 5. Once agent.sock binds later, the next call succeeds automatically without restart.
-        #[cfg(unix)]
-        {
-            let listener = tokio::net::UnixListener::bind(&sock).unwrap();
-            let fake_broker = tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let (r, mut w) = stream.into_split();
-                let mut r = BufReader::new(r);
-                let line = read_line_bounded(&mut r, MAX_FRAME_BYTES)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                let req: BrokerRequest = serde_json::from_str(&line).unwrap();
-                assert_eq!(
-                    req,
-                    BrokerRequest::ListHosts {
-                        caller: Some("Cursor".into())
-                    }
-                );
-                // Progress frames before the final Result are tolerated seamlessly.
-                write_json_line(
-                    &mut w,
-                    &BrokerMessage::Progress {
-                        message: "checking...".into(),
-                    },
-                )
-                .await
-                .unwrap();
-                write_json_line(
-                    &mut w,
-                    &BrokerMessage::Result(BrokerResult::Ok {
-                        data: json!({
-                            "hosts": [{ "alias": "staging", "services": ["api.service"] }],
-                            "usage": "call service_status"
-                        }),
-                    }),
-                )
-                .await
-                .unwrap();
-            });
-
-            let recovered = exchange(
-                &mut client_tx,
-                &mut client_rx,
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 5,
-                    "method": "tools/call",
-                    "params": { "name": "list_hosts", "arguments": {} }
-                }),
-            )
-            .await;
-            fake_broker.await.unwrap();
-            assert_eq!(recovered["result"]["isError"], false);
-            assert_eq!(
-                recovered["result"]["structuredContent"]["hosts"][0]["alias"],
-                "staging"
-            );
-        }
-
-        // 6. Malformed JSON and invalid params return JSON-RPC errors without crashing.
-        client_tx.write_all(b"{bad json\n").await.unwrap();
-        let mut line = String::new();
-        client_rx.read_line(&mut line).await.unwrap();
-        let parse_err: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(parse_err["error"]["code"], ERR_PARSE);
-
-        let bad_tool = exchange(
-            &mut client_tx,
-            &mut client_rx,
-            json!({
-                "jsonrpc": "2.0",
-                "id": 6,
-                "method": "tools/call",
-                "params": { "name": "service_status", "arguments": { "host": "staging" } }
-            }),
-        )
-        .await;
-        assert_eq!(bad_tool["error"]["code"], ERR_INVALID_PARAMS);
-
-        drop(client_tx);
-        server.await.unwrap().unwrap();
-    }
-}
+#[path = "mcp_tests.rs"]
+mod tests;

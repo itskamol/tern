@@ -6,12 +6,14 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::{Instant, SystemTime};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::Context;
 
 use super::Shell;
-use crate::agents::broker::{AgentHost, BrokerHandle, BrokerSnapshot};
+use crate::agents::attention::{self, AgentAttention, AttentionCue};
+use crate::agents::broker::{AgentHost, BrokerHandle, BrokerSnapshot, DEFAULT_DECISION_TIMEOUT};
 use crate::agents::grants::{Grant, GrantFingerprint, GrantStore};
 use crate::agents::socket_path;
 use crate::agents::store::{self, AgentConfig, StoreError};
@@ -21,14 +23,31 @@ use crate::lock_on_sleep::Cause;
 use crate::settings;
 
 /// Local Agent configuration, in-memory Grants, and active `agent.sock` listener owned by [`Shell`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct AgentsUi {
     pub(super) config: AgentConfig,
     /// Set when `agents.json` exists but cannot be read; saving is refused so it is not clobbered.
     pub(super) store_error: Option<String>,
     /// Active in-memory Grants; never persisted to `agents.json`, disk, or `tern-sync`.
     grants: GrantStore,
+    /// Wall-clock deadline for unanswered Agent Decisions (60 s in production; overridable in tests).
+    decision_timeout: Duration,
+    /// Non-focus-stealing background attention cue boundary (Dock bounce + macOS notification).
+    attention: Arc<dyn AgentAttention>,
     broker: Option<BrokerHandle>,
+}
+
+impl Default for AgentsUi {
+    fn default() -> Self {
+        Self {
+            config: AgentConfig::default(),
+            store_error: None,
+            grants: GrantStore::default(),
+            decision_timeout: DEFAULT_DECISION_TIMEOUT,
+            attention: attention::default_attention(),
+            broker: None,
+        }
+    }
 }
 
 /// Persists `config` to `agents.json` after dropping any host keys no longer in `connections` so
@@ -303,6 +322,10 @@ impl AgentHost for Shell {
         cx.notify();
     }
 
+    fn agent_decision_timeout(&self) -> Duration {
+        self.agents.decision_timeout
+    }
+
     fn ask_agent_decision(
         &mut self,
         prompt: DecisionPrompt,
@@ -310,6 +333,10 @@ impl AgentHost for Shell {
         cx: &mut Context<Self>,
     ) -> Result<PendingDecision, QueueFull> {
         self.ask_decision(DecisionTag::Agent, prompt, deadline, cx)
+    }
+
+    fn notify_agent_attention(&mut self, cue: &AttentionCue, _cx: &mut Context<Self>) {
+        attention::notify_if_inactive(self.agents.attention.as_ref(), cue);
     }
 }
 

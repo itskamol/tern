@@ -11,8 +11,8 @@ use tokio::io::BufReader;
 use tokio::sync::{Semaphore, watch};
 
 use super::protocol::{
-    AgentError, AgentErrorCode, BrokerMessage, BrokerRequest, BrokerResult, MAX_FRAME_BYTES,
-    read_line_bounded, write_json_line,
+    AgentError, AgentErrorCode, BoundedLineReader, BrokerMessage, BrokerRequest, BrokerResult,
+    MAX_FRAME_BYTES, write_json_line,
 };
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 32;
@@ -21,12 +21,30 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 32;
 #[derive(Debug)]
 pub(super) struct Responder {
     tx: async_channel::Sender<BrokerMessage>,
-    /// Fires when the client sends `BrokerRequest::Cancel` or disconnects (#62).
-    #[allow(dead_code)]
-    pub(super) cancelled: watch::Receiver<bool>,
+    /// Fires when the client sends `BrokerRequest::Cancel` or disconnects.
+    cancelled: watch::Receiver<bool>,
 }
 
 impl Responder {
+    #[must_use]
+    pub(super) fn is_cancelled(&self) -> bool {
+        *self.cancelled.borrow()
+    }
+
+    #[must_use]
+    pub(super) fn cancel_receiver(&self) -> watch::Receiver<bool> {
+        self.cancelled.clone()
+    }
+
+    pub(super) async fn send_progress(&self, message: impl Into<String>) {
+        let _ = self
+            .tx
+            .send(BrokerMessage::Progress {
+                message: message.into(),
+            })
+            .await;
+    }
+
     pub(super) async fn finish(self, result: BrokerResult) {
         let _ = self.tx.send(BrokerMessage::Result(result)).await;
     }
@@ -107,9 +125,9 @@ async fn serve_connection(
     req_tx: async_channel::Sender<IncomingRequest>,
 ) {
     let (read_half, mut write_half) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
+    let mut reader = BoundedLineReader::new(BufReader::new(read_half));
 
-    let line = match read_line_bounded(&mut reader, MAX_FRAME_BYTES).await {
+    let line = match reader.next_line(MAX_FRAME_BYTES).await {
         Ok(Some(line)) => line,
         Ok(None) => return,
         Err(e) => {
@@ -160,7 +178,7 @@ async fn serve_connection(
     loop {
         tokio::select! {
             biased;
-            next = read_line_bounded(&mut reader, MAX_FRAME_BYTES) => {
+            next = reader.next_line(MAX_FRAME_BYTES) => {
                 match next {
                     Ok(None) | Err(_) => {
                         cancel_tx.send_replace(true);
@@ -176,7 +194,11 @@ async fn serve_connection(
             msg = resp_rx.recv() => match msg {
                 Ok(message) => {
                     let done = matches!(message, BrokerMessage::Result(_));
-                    if write_json_line(&mut write_half, &message).await.is_err() || done {
+                    if write_json_line(&mut write_half, &message).await.is_err() {
+                        cancel_tx.send_replace(true);
+                        break;
+                    }
+                    if done {
                         break;
                     }
                 }

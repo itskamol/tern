@@ -27,12 +27,14 @@ use tern_ssh::SecretString;
 use tern_vault::{Key, Vault};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
+use super::attention::{self, AgentAttention, AttentionCue};
 use super::broker::{
     AgentDecision, AgentHost, AgentOutcome, BrokerHandle, BrokerSnapshot, CHOICE_ALLOW_ONCE,
-    CHOICE_ALLOW_UNTIL_LOCK, CHOICE_DENY,
+    CHOICE_ALLOW_UNTIL_LOCK, CHOICE_DENY, DEFAULT_DECISION_TIMEOUT,
 };
 use super::grants::{Grant, GrantFingerprint, GrantStore};
 use super::mcp;
+use super::protocol::{AgentErrorCode, BrokerResult};
 use super::socket_path;
 use super::store::{self, AgentConfig};
 use crate::connections::Connection;
@@ -310,6 +312,39 @@ enum TestDecisionKind {
     External(DecisionTag),
 }
 
+#[derive(Debug)]
+struct SpyAttention {
+    active: std::sync::atomic::AtomicBool,
+    cues: Mutex<Vec<AttentionCue>>,
+}
+
+impl SpyAttention {
+    fn new(active: bool) -> Arc<Self> {
+        Arc::new(Self {
+            active: std::sync::atomic::AtomicBool::new(active),
+            cues: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::SeqCst);
+    }
+
+    fn take_cues(&self) -> Vec<AttentionCue> {
+        std::mem::take(&mut *self.cues.lock().unwrap())
+    }
+}
+
+impl AgentAttention for SpyAttention {
+    fn is_app_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    fn alert_background(&self, cue: &AttentionCue) {
+        self.cues.lock().unwrap().push(cue.clone());
+    }
+}
+
 struct TestHost {
     dir: PathBuf,
     known_hosts: PathBuf,
@@ -317,6 +352,10 @@ struct TestHost {
     connections: Vec<Connection>,
     grants: GrantStore,
     decisions: DecisionQueue<TestDecisionKind>,
+    decision_timer: Option<gpui::Task<()>>,
+    decision_cancel_watch: Option<gpui::Task<()>>,
+    decision_timeout: Duration,
+    attention: Arc<SpyAttention>,
     outcomes: Vec<AgentOutcome>,
     broker: Option<BrokerHandle>,
 }
@@ -335,9 +374,71 @@ impl TestHost {
             connections,
             grants: GrantStore::new(),
             decisions: DecisionQueue::new(),
+            decision_timer: None,
+            decision_cancel_watch: None,
+            decision_timeout: DEFAULT_DECISION_TIMEOUT,
+            attention: SpyAttention::new(true),
             outcomes: Vec::new(),
             broker: None,
         }
+    }
+
+    fn set_attention(&mut self, attention: Arc<SpyAttention>) {
+        self.attention = attention;
+    }
+
+    fn set_decision_timeout(&mut self, timeout: Duration) {
+        self.decision_timeout = timeout;
+    }
+
+    fn sync_decision_tasks(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        self.decisions.sweep(now);
+        if let Some(wake_at) = self.decisions.next_wake(now) {
+            let wait = wake_at
+                .saturating_duration_since(now)
+                .max(Duration::from_millis(1));
+            self.decision_timer = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |host, cx| {
+                    host.decisions.sweep(Instant::now());
+                    host.sync_decision_tasks(cx);
+                });
+            }));
+        } else {
+            self.decision_timer = None;
+        }
+
+        if self.decisions.is_empty() {
+            self.decision_cancel_watch = None;
+            return;
+        }
+        if self.decision_cancel_watch.is_none() {
+            let wake_rx = self.decisions.cancel_wake();
+            self.decision_cancel_watch = Some(cx.spawn(async move |this, cx| {
+                while wake_rx.recv().await.is_ok() {
+                    let keep = this
+                        .update(cx, |host, cx| {
+                            host.decisions.sweep(Instant::now());
+                            host.sync_decision_tasks(cx);
+                            if host.decisions.is_empty() {
+                                host.decision_cancel_watch = None;
+                                false
+                            } else {
+                                true
+                            }
+                        })
+                        .unwrap_or(false);
+                    if !keep {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    fn front_remaining_secs(&mut self) -> Option<u64> {
+        self.decisions.front(Instant::now())?.remaining_secs
     }
 
     fn start_broker(&mut self, cx: &mut Context<Self>) {
@@ -473,17 +574,27 @@ impl AgentHost for TestHost {
             .insert(host, service, fingerprint, SystemTime::now());
     }
 
+    fn agent_decision_timeout(&self) -> Duration {
+        self.decision_timeout
+    }
+
     fn ask_agent_decision(
         &mut self,
         prompt: DecisionPrompt,
         deadline: Option<Instant>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Result<PendingDecision, QueueFull> {
         let mut req = DecisionRequest::new(TestDecisionKind::External(DecisionTag::Agent), prompt);
         if let Some(d) = deadline {
             req = req.with_deadline(d);
         }
-        self.decisions.enqueue(req, Instant::now())
+        let pending = self.decisions.enqueue(req, Instant::now())?;
+        self.sync_decision_tasks(cx);
+        Ok(pending)
+    }
+
+    fn notify_agent_attention(&mut self, cue: &AttentionCue, _cx: &mut Context<Self>) {
+        attention::notify_if_inactive(self.attention.as_ref(), cue);
     }
 
     fn on_agent_outcome(&mut self, outcome: &AgentOutcome, _cx: &mut Context<Self>) {
@@ -497,7 +608,7 @@ impl AgentHost for TestHost {
 /// an MCP call is in flight waiting for a Decision or SSH exec.
 struct McpClient {
     _rt: tokio::runtime::Runtime,
-    req_tx: async_channel::Sender<Value>,
+    req_tx: Option<async_channel::Sender<Value>>,
     resp_rx: async_channel::Receiver<Value>,
     next_id: u64,
 }
@@ -547,7 +658,7 @@ impl McpClient {
 
         Self {
             _rt: rt,
-            req_tx,
+            req_tx: Some(req_tx),
             resp_rx,
             next_id: 1,
         }
@@ -555,14 +666,30 @@ impl McpClient {
 
     fn notify(&self, method: &str) {
         self.req_tx
+            .as_ref()
+            .unwrap()
             .send_blocking(json!({ "jsonrpc": "2.0", "method": method }))
             .unwrap();
+    }
+
+    fn notify_with_params(&self, method: &str, params: &Value) {
+        self.req_tx
+            .as_ref()
+            .unwrap()
+            .send_blocking(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+            .unwrap();
+    }
+
+    fn close_stdin(&mut self) {
+        self.req_tx = None;
     }
 
     fn send(&mut self, method: &str, params: &Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.req_tx
+            .as_ref()
+            .unwrap()
             .send_blocking(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -581,6 +708,7 @@ impl McpClient {
                 return val;
             }
             std::thread::sleep(Duration::from_millis(10));
+            app.advance_clock(Duration::from_millis(10));
         }
         panic!("timed out waiting for MCP response");
     }
@@ -2294,4 +2422,716 @@ fn end_to_end_pause_agents_rejects_cancels_clears_grants_and_does_not_restore_on
     );
     assert_eq!(fresh_decision["result"]["isError"], false);
     assert_eq!(ssh.connection_count(), count_before_pause + 1);
+}
+
+#[test]
+fn end_to_end_decision_expires_after_deadline_with_timed_out_and_default_60s() {
+    assert_eq!(DEFAULT_DECISION_TIMEOUT, Duration::from_secs(60));
+
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let sock = socket_path(dir.path());
+
+    let ssh = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(
+        &vault_path,
+        vec![(
+            Key::Password {
+                user: "deploy".into(),
+                host: "127.0.0.1".into(),
+                port: ssh.port,
+            },
+            TEST_PASSWORD,
+        )],
+    );
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let mut hosts_map = BTreeMap::new();
+    hosts_map.insert("staging".to_owned(), vec!["api.service".to_owned()]);
+    let config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: hosts_map,
+    };
+    let connections = vec![make_conn("staging", ssh.port)];
+
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh.clone(), config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    let mut mcp = McpClient::start(sock);
+    mcp.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Claude Code" }
+        }),
+        &mut app,
+    );
+
+    // 1. Default Agent Decision carries a 60-second countdown deadline.
+    let id_default = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let (decision_id, _) = wait_for_decision(&host_entity, &mut app);
+    let remaining = app.update(|cx| host_entity.update(cx, |h, _| h.front_remaining_secs()));
+    assert!(
+        matches!(remaining, Some(58..=60)),
+        "expected default 60s countdown, got {remaining:?}"
+    );
+    assert!(app.update(|cx| host_entity.update(cx, |h, _| h.answer(decision_id, CHOICE_DENY))));
+    let denied = mcp.recv_pumping(&mut app);
+    assert_eq!(denied["id"], id_default);
+    app.update(|cx| host_entity.update(cx, |h, _| h.take_outcomes()));
+
+    // 2. With a short test decision timeout, an unanswered Decision dismisses automatically,
+    //    returns timed_out to the Agent, records AgentDecision::Expired + TimedOut, and never
+    //    dials SSH.
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| h.set_decision_timeout(Duration::from_millis(80)));
+    });
+    let id_expire = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let _ = wait_for_decision(&host_entity, &mut app);
+    let expired = mcp.recv_pumping(&mut app);
+    assert_eq!(expired["id"], id_expire);
+    assert_eq!(expired["result"]["isError"], true);
+    assert_eq!(expired["result"]["structuredContent"]["error"], "timed_out");
+    assert!(!app.update(|cx| host_entity.read(cx).has_pending_agent_decision()));
+    assert_eq!(ssh.connection_count(), 0);
+
+    let outcomes = app.update(|cx| host_entity.update(cx, |h, _| h.take_outcomes()));
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].decision, AgentDecision::Expired);
+    assert!(matches!(
+        &outcomes[0].result,
+        BrokerResult::Error(err) if err.error == AgentErrorCode::TimedOut
+    ));
+}
+
+#[test]
+fn end_to_end_progress_notification_emitted_only_with_progress_token_while_decision_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let sock = socket_path(dir.path());
+
+    let ssh = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(
+        &vault_path,
+        vec![(
+            Key::Password {
+                user: "deploy".into(),
+                host: "127.0.0.1".into(),
+                port: ssh.port,
+            },
+            TEST_PASSWORD,
+        )],
+    );
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let mut hosts_map = BTreeMap::new();
+    hosts_map.insert("staging".to_owned(), vec!["api.service".to_owned()]);
+    let config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: hosts_map,
+    };
+    let connections = vec![make_conn("staging", ssh.port)];
+
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh.clone(), config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    let mut mcp = McpClient::start(sock);
+    mcp.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Claude Code" }
+        }),
+        &mut app,
+    );
+
+    // 1. String progressToken emits notifications/progress while waiting on the Decision card.
+    let id_str = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" },
+            "_meta": { "progressToken": "tok-alpha" }
+        }),
+    );
+    let (dec_str, _) = wait_for_decision(&host_entity, &mut app);
+    let progress = mcp.recv_pumping(&mut app);
+    assert_eq!(progress["jsonrpc"], "2.0");
+    assert!(progress.get("id").is_none());
+    assert_eq!(progress["method"], "notifications/progress");
+    assert_eq!(progress["params"]["progressToken"], "tok-alpha");
+    assert_eq!(progress["params"]["progress"], 1);
+    assert_eq!(
+        progress["params"]["message"],
+        "Waiting for approval in tern..."
+    );
+
+    assert!(app.update(|cx| host_entity.update(cx, |h, _| h.answer(dec_str, CHOICE_ALLOW_ONCE))));
+    let resp_str = mcp.recv_pumping(&mut app);
+    assert_eq!(resp_str["id"], id_str);
+    assert_eq!(resp_str["result"]["isError"], false);
+
+    // 2. Integer progressToken also emits notifications/progress, preserving the numeric token.
+    let id_int = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" },
+            "_meta": { "progressToken": 42 }
+        }),
+    );
+    let (dec_int, _) = wait_for_decision(&host_entity, &mut app);
+    let progress_int = mcp.recv_pumping(&mut app);
+    assert_eq!(progress_int["method"], "notifications/progress");
+    assert_eq!(progress_int["params"]["progressToken"], 42);
+    assert_eq!(
+        progress_int["params"]["message"],
+        "Waiting for approval in tern..."
+    );
+    assert!(app.update(|cx| {
+        host_entity.update(cx, |h, _| h.answer(dec_int, CHOICE_ALLOW_UNTIL_LOCK))
+    }));
+    let resp_int = mcp.recv_pumping(&mut app);
+    assert_eq!(resp_int["id"], id_int);
+    assert_eq!(resp_int["result"]["isError"], false);
+
+    // 3. Reusing an active Grant skips the Decision queue so no approval progress frame is sent.
+    let id_grant = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" },
+            "_meta": { "progressToken": "tok-grant" }
+        }),
+    );
+    let resp_grant = mcp.recv_pumping(&mut app);
+    assert_eq!(resp_grant["id"], id_grant);
+    assert_eq!(resp_grant["result"]["isError"], false);
+
+    // 4. Without _meta.progressToken, no notifications/progress frame is emitted while waiting.
+    app.update(|cx| host_entity.update(cx, |h, _| h.revoke_all_grants()));
+    let id_none = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let (dec_none, _) = wait_for_decision(&host_entity, &mut app);
+    for _ in 0..5 {
+        app.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        mcp.resp_rx.try_recv().is_err(),
+        "no progress notification should be sent without progressToken"
+    );
+    assert!(app.update(|cx| host_entity.update(cx, |h, _| h.answer(dec_none, CHOICE_ALLOW_ONCE))));
+    let resp_none = mcp.recv_pumping(&mut app);
+    assert_eq!(resp_none["id"], id_none);
+    assert_eq!(resp_none["result"]["isError"], false);
+}
+
+fn wait_for_no_pending_agent_decision(host: &Entity<TestHost>, app: &mut TestApp) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        app.run_until_parked();
+        if !app.update(|cx| host.read(cx).has_pending_agent_decision()) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for Agent Decision to dismiss");
+}
+
+fn wait_for_outcomes(
+    host: &Entity<TestHost>,
+    expected: usize,
+    app: &mut TestApp,
+) -> Vec<AgentOutcome> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        app.run_until_parked();
+        let len = app.update(|cx| host.read(cx).outcomes.len());
+        if len >= expected {
+            return app.update(|cx| host.update(cx, |h, _| h.take_outcomes()));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for {expected} AgentOutcome(s)");
+}
+
+#[test]
+fn end_to_end_pre_dispatch_mcp_cancel_and_disconnect_dismiss_decision_and_prevent_exec() {
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let sock = socket_path(dir.path());
+
+    let ssh = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(
+        &vault_path,
+        vec![(
+            Key::Password {
+                user: "deploy".into(),
+                host: "127.0.0.1".into(),
+                port: ssh.port,
+            },
+            TEST_PASSWORD,
+        )],
+    );
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let mut hosts_map = BTreeMap::new();
+    hosts_map.insert("staging".to_owned(), vec!["api.service".to_owned()]);
+    let config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: hosts_map,
+    };
+    let connections = vec![make_conn("staging", ssh.port)];
+
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh.clone(), config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    let mut mcp = McpClient::start(sock.clone());
+    mcp.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Claude Code" }
+        }),
+        &mut app,
+    );
+
+    // 1. MCP notifications/cancelled before dispatch dismisses the Decision immediately,
+    //    blocks late/racing clicks, suppresses the cancelled response, and keeps tern mcp alive.
+    let id_cancel = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let (dec_cancel, _) = wait_for_decision(&host_entity, &mut app);
+    mcp.notify_with_params(
+        "notifications/cancelled",
+        &json!({ "requestId": id_cancel, "reason": "abandoned" }),
+    );
+    wait_for_no_pending_agent_decision(&host_entity, &mut app);
+    assert!(
+        !app.update(|cx| {
+            host_entity.update(cx, |h, _| h.answer(dec_cancel, CHOICE_ALLOW_ONCE))
+        })
+    );
+    let outcomes = wait_for_outcomes(&host_entity, 1, &mut app);
+    assert_eq!(outcomes[0].decision, AgentDecision::Cancelled);
+    assert_eq!(ssh.connection_count(), 0);
+
+    // Next MCP request succeeds and no stray response arrived for id_cancel.
+    let pong = mcp.call_sync("ping", &json!({}), &mut app);
+    assert_eq!(pong["result"], json!({}));
+
+    // 2. Stdio EOF before dispatch immediately cancels the in-flight agent.sock call and
+    //    dismisses the Decision card without dialing SSH.
+    let _id_eof = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let (dec_eof, _) = wait_for_decision(&host_entity, &mut app);
+    mcp.close_stdin();
+    wait_for_no_pending_agent_decision(&host_entity, &mut app);
+    assert!(
+        !app.update(|cx| { host_entity.update(cx, |h, _| h.answer(dec_eof, CHOICE_ALLOW_ONCE)) })
+    );
+    let outcomes = wait_for_outcomes(&host_entity, 1, &mut app);
+    assert_eq!(outcomes[0].decision, AgentDecision::Cancelled);
+    assert_eq!(ssh.connection_count(), 0);
+
+    // 3. Raw IPC disconnect on agent.sock before dispatch also dismisses immediately and prevents
+    //    execution even if a click races.
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let line = serde_json::to_string(&super::protocol::BrokerRequest::ServiceStatus {
+            caller: Some("RawClient".into()),
+            host: "staging".into(),
+            service: "api.service".into(),
+            timeout_secs: None,
+            wants_progress: false,
+        })
+        .unwrap();
+        stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+        stream.flush().unwrap();
+
+        let (dec_ipc, _) = wait_for_decision(&host_entity, &mut app);
+        drop(stream);
+        wait_for_no_pending_agent_decision(&host_entity, &mut app);
+        assert!(
+            !app.update(|cx| {
+                host_entity.update(cx, |h, _| h.answer(dec_ipc, CHOICE_ALLOW_ONCE))
+            })
+        );
+        let outcomes = wait_for_outcomes(&host_entity, 1, &mut app);
+        assert_eq!(outcomes[0].decision, AgentDecision::Cancelled);
+        assert_eq!(ssh.connection_count(), 0);
+    }
+}
+
+fn wait_for_signal(rx: &async_channel::Receiver<()>, app: &mut TestApp) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        app.run_until_parked();
+        if rx.try_recv().is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for SSH exec_request to arrive on loopback server");
+}
+
+#[test]
+fn end_to_end_post_dispatch_disconnect_and_cancel_record_unknown_outcome() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let sock = socket_path(dir.path());
+
+    let slow_mode = Arc::new(AtomicBool::new(true));
+    let slow_c = Arc::clone(&slow_mode);
+    let (started_tx, started_rx) = async_channel::bounded::<()>(4);
+    let ssh = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), move |_| {
+        let _ = started_tx.try_send(());
+        let mut reply = ExecReply::ok("loaded\nactive\nrunning\n");
+        if slow_c.load(Ordering::SeqCst) {
+            reply.delay = Duration::from_secs(10);
+        }
+        reply
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(
+        &vault_path,
+        vec![(
+            Key::Password {
+                user: "deploy".into(),
+                host: "127.0.0.1".into(),
+                port: ssh.port,
+            },
+            TEST_PASSWORD,
+        )],
+    );
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let mut hosts_map = BTreeMap::new();
+    hosts_map.insert("staging".to_owned(), vec!["api.service".to_owned()]);
+    let config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: hosts_map,
+    };
+    let connections = vec![make_conn("staging", ssh.port)];
+
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh.clone(), config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    // 1. Caller disconnects (stdio EOF) AFTER Allow once and SSH exec has reached the Host.
+    //    Broker must cancel ExecCancel promptly (not wait 10 s) and record unknown_outcome
+    //    with AgentDecision::AllowOnce (NOT Cancelled).
+    let mut mcp1 = McpClient::start(sock.clone());
+    mcp1.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Claude Code" }
+        }),
+        &mut app,
+    );
+    let _id1 = mcp1.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let (dec1, _) = wait_for_decision(&host_entity, &mut app);
+    assert!(app.update(|cx| host_entity.update(cx, |h, _| h.answer(dec1, CHOICE_ALLOW_ONCE))));
+    wait_for_signal(&started_rx, &mut app);
+
+    let cancel_at = Instant::now();
+    mcp1.close_stdin();
+    let outcomes = wait_for_outcomes(&host_entity, 1, &mut app);
+    assert!(
+        cancel_at.elapsed() < Duration::from_secs(3),
+        "in-flight SSH exec should abort promptly instead of waiting for the 10s delay"
+    );
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].decision, AgentDecision::AllowOnce);
+    assert!(matches!(
+        &outcomes[0].result,
+        BrokerResult::Error(err) if err.error == AgentErrorCode::UnknownOutcome
+    ));
+
+    // 2. Grant-reused exec followed by MCP notifications/cancelled after dispatch also records
+    //    unknown_outcome (with AgentDecision::GrantReused) and keeps tern mcp alive.
+    slow_mode.store(false, Ordering::SeqCst);
+    let mut mcp2 = McpClient::start(sock);
+    mcp2.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Cursor" }
+        }),
+        &mut app,
+    );
+    let grant_resp = mcp2.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(grant_resp["result"]["isError"], false);
+    let _ = started_rx.try_recv();
+    app.update(|cx| host_entity.update(cx, |h, _| h.take_outcomes()));
+
+    slow_mode.store(true, Ordering::SeqCst);
+    let id_grant_cancel = mcp2.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    wait_for_signal(&started_rx, &mut app);
+
+    let cancel_at2 = Instant::now();
+    mcp2.notify_with_params(
+        "notifications/cancelled",
+        &json!({ "requestId": id_grant_cancel }),
+    );
+    let outcomes2 = wait_for_outcomes(&host_entity, 1, &mut app);
+    assert!(
+        cancel_at2.elapsed() < Duration::from_secs(3),
+        "grant-reused in-flight SSH exec should abort promptly on notifications/cancelled"
+    );
+    assert_eq!(outcomes2.len(), 1);
+    assert_eq!(outcomes2[0].decision, AgentDecision::GrantReused);
+    assert!(matches!(
+        &outcomes2[0].result,
+        BrokerResult::Error(err) if err.error == AgentErrorCode::UnknownOutcome
+    ));
+
+    let pong = mcp2.call_sync("ping", &json!({}), &mut app);
+    assert_eq!(pong["result"], json!({}));
+}
+
+#[test]
+fn end_to_end_background_decision_triggers_attention_cue_without_focus_steal() {
+    use gpui::{IntoElement, Render, Window, div};
+
+    struct PassiveView {
+        focus: gpui::FocusHandle,
+    }
+
+    impl Render for PassiveView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let sock = socket_path(dir.path());
+
+    let ssh = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(
+        &vault_path,
+        vec![(
+            Key::Password {
+                user: "deploy".into(),
+                host: "127.0.0.1".into(),
+                port: ssh.port,
+            },
+            TEST_PASSWORD,
+        )],
+    );
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let window = app.open_window(|_window, cx| PassiveView {
+        focus: cx.focus_handle(),
+    });
+    let win_handle = window.handle();
+    drop(window);
+    let was_focused = app.update(|cx| {
+        win_handle
+            .update(cx, |view, window, _| view.focus.is_focused(window))
+            .unwrap()
+    });
+    assert!(!was_focused, "passive view starts unfocused");
+
+    let mut hosts_map = BTreeMap::new();
+    hosts_map.insert("staging".to_owned(), vec!["api.service".to_owned()]);
+    let config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: hosts_map,
+    };
+    let connections = vec![make_conn("staging", ssh.port)];
+    let spy = SpyAttention::new(false);
+
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh.clone(), config, connections);
+            h.set_attention(Arc::clone(&spy));
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    let mut mcp = McpClient::start(sock);
+    mcp.call_sync(
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Claude\x1b[31m\u{202e} Code\x1b[0m" }
+        }),
+        &mut app,
+    );
+
+    // 1. Background Decision (active = false) triggers sanitized attention cue and never steals focus.
+    let id_bg = mcp.send(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+    );
+    let (dec_bg, _) = wait_for_decision(&host_entity, &mut app);
+    let cues = spy.take_cues();
+    assert_eq!(cues.len(), 1);
+    assert!(cues[0].title.contains("staging"));
+    assert!(cues[0].body.contains("Claude Code"));
+    assert!(cues[0].body.contains("api.service"));
+    assert!(!cues[0].body.contains('\x1b'));
+    assert!(!cues[0].body.contains('\u{202e}'));
+    let still_focused = app.update(|cx| {
+        win_handle
+            .update(cx, |view, window, _| view.focus.is_focused(window))
+            .unwrap()
+    });
+    assert!(
+        !still_focused,
+        "background Decision must never steal window focus"
+    );
+
+    assert!(app.update(|cx| host_entity.update(cx, |h, _| h.answer(dec_bg, CHOICE_DENY))));
+    let resp_bg = mcp.recv_pumping(&mut app);
+    assert_eq!(resp_bg["id"], id_bg);
+
+    // 2. Foreground Decision (active = true) stays quiet (zero background cues).
+    spy.set_active(true);
+    let resp_fg = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(resp_fg["result"]["isError"], false);
+    assert!(spy.take_cues().is_empty());
+
+    // 3. Reusing an active Grant while in the background does not trigger an attention cue.
+    spy.set_active(false);
+    let resp_grant = mcp.call_sync(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+        &mut app,
+    );
+    assert_eq!(resp_grant["result"]["isError"], false);
+    assert!(spy.take_cues().is_empty());
+
+    // 4. Rejecting a call while paused in the background does not trigger an attention cue.
+    app.update(|cx| host_entity.update(cx, |h, _| h.set_agents_paused(true)));
+    let resp_paused = mcp.call_sync(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+        &mut app,
+    );
+    assert_eq!(resp_paused["result"]["isError"], true);
+    assert!(spy.take_cues().is_empty());
 }
