@@ -68,17 +68,21 @@ stop_all() {
 trap stop_all EXIT
 refuse() { echo "refused: $*" >&2; exit 2; }
 
+target_dir=${CARGO_TARGET_DIR:-target}
+screen_locked() { [ "$( (ioreg -n Root -d1 | grep -c CGSSessionScreenIsLocked) || true)" != 0 ]; }
+screen_locked && refuse "the screen is locked (pre-flight)"
+
 caffeinate -di -w $$ &
 
 echo "building the helpers" >&2
 cargo build -q -p tern-ssh --example password_server
 cargo build -q -p tern --example throwaway_vault
 cargo build -q --release -p tern --features dev-keys
-cp target/release/tern "$work/tern-dev-keys"
+cp "$target_dir/release/tern" "$work/tern-dev-keys"
 grep -aq TERN_DEV_KEYS "$work/tern-dev-keys" || refuse "the dev-keys build lacks the replay"
 swiftc -O -o "$work/window" scripts/measure-window.swift
 
-target/debug/examples/password_server --demo "$port" hunter2 >"$work/server.log" 2>&1 &
+"$target_dir/debug/examples/password_server" --demo "$port" hunter2 >"$work/server.log" 2>&1 &
 server_pid=$!
 known_hosts="$work/known_hosts"
 for _ in $(seq 1 30); do
@@ -90,7 +94,6 @@ done
 
 # --- readings ----------------------------------------------------------------------------------
 
-screen_locked() { [ "$( (ioreg -n Root -d1 | grep -c CGSSessionScreenIsLocked) || true)" != 0 ]; }
 # Refuses the sample unless the screen is unlocked and at least half of tern's window shows.
 ready() {
   screen_locked && refuse "the screen is locked ($1)"
@@ -130,7 +133,7 @@ run() {
         name=demo-vault extra=',"vaultKey":"bench"'
         cp "$work/tern-dev-keys" "$app/Contents/MacOS/tern"
         codesign -s - --force "$app" 2>/dev/null
-        target/debug/examples/throwaway_vault "$config/vault.age" "$passphrase"
+        "$target_dir/debug/examples/throwaway_vault" "$config/vault.age" "$passphrase"
         envs+=(--env TERN_DEV_KEYS="sleep-2000 type:$passphrase enter")
       fi
       printf '{"version":1,"connections":[{"name":"%s","host":"127.0.0.1","port":%s,"user":"test","passwordCommand":"printf hunter2"%s}]}\n' \

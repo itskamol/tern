@@ -19,11 +19,12 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 [ -n "$version" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
 
 cargo build --release -p tern
+target_dir=${CARGO_TARGET_DIR:-target}
 
 app=target/release/bundle/tern.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/tern "$app/Contents/MacOS/tern"
+cp "$target_dir/release/tern" "$app/Contents/MacOS/tern"
 cp packaging/macos/tern.icns "$app/Contents/Resources/tern.icns"
 # The licences travel with the binary: tern's own (GPL-3.0, whose terms ask for it), what it
 # copied (NOTICE.md), and every linked crate's notice (scripts/third-party.py).

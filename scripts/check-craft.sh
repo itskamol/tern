@@ -35,4 +35,26 @@ while read -r name pin; do
   [ "$pin" = "$ws" ] || { echo "$name is pinned at $pin, the workspace is at $ws (Cargo.toml)"; fail=1; }
 done < <(sed -n 's/^\(tern-[a-z]*\) = { path = "[^"]*", version = "\([^"]*\)" }/\1 \2/p' Cargo.toml)
 
+# 5. No unexplained or ticket-staged #[allow(dead_code)] in shipped code (above #[cfg(test)]).
+#    An intentional RAII holder must state why in a comment on the same or preceding line and
+#    never reference a ticket number (#123).
+while IFS= read -r f; do
+  if ! awk '
+    /^[[:space:]]*#\[cfg\(test\)\]/ { exit }
+    /#\[allow\(dead_code\)\]/ {
+      if ($0 ~ /#[0-9]+/ || prev ~ /#[0-9]+/) {
+        printf "ticket-staged allow(dead_code): %s:%d\n", FILENAME, NR
+        bad = 1
+      } else if ($0 !~ /\/\// && prev !~ /^[[:space:]]*\/\//) {
+        printf "unexplained allow(dead_code): %s:%d\n", FILENAME, NR
+        bad = 1
+      }
+    }
+    { prev = $0 }
+    END { exit bad }
+  ' "$f"; then
+    fail=1
+  fi
+done < <(find crates -name '*.rs' -not -path '*/tests/*' -not -name '*_tests.rs')
+
 exit $fail

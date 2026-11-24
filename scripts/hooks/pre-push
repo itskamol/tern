@@ -10,7 +10,7 @@ echo "pre-push: fmt"     && cargo fmt --all --check
 echo "pre-push: clippy"  && cargo clippy -q --workspace --all-targets -- -D warnings
 echo "pre-push: test"    && scripts/test-gate.sh
 echo "pre-push: craft"   && scripts/check-craft.sh
-if command -v cargo-deny >/dev/null; then echo "pre-push: deny" && cargo deny check -s 2>/dev/null; fi
+if command -v cargo-deny >/dev/null; then echo "pre-push: deny" && scripts/check-deny.sh; fi
 
 # The critical crates' changed lines must have tests that can fail (docs/testing.md). Only the
 # lines this push changes in tern-vault and tern-sync are mutated, so it stays quick.

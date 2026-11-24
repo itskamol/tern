@@ -7,6 +7,7 @@
 #   scripts/dev-check.sh keys "<script>"    the same, then replay the script into the window
 #   scripts/dev-check.sh keys "<script>" D  the same against the config directory D (made by hand,
 #                                           for a state the seed does not have, such as a vault)
+#   scripts/dev-check.sh shot <out.png>     capture the on-screen TernDev window bounds to <out.png>
 #   scripts/dev-check.sh stop               quit the app and the servers
 #
 # A keys script is how a check is driven without touching the screen: keystrokes, typing, waits,
@@ -35,6 +36,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+target_dir=${CARGO_TARGET_DIR:-target}
 root=target/dev-check
 app="$root/TernDev.app"
 config="$PWD/$root/config"
@@ -56,6 +58,22 @@ case "${1:-}" in
     echo "stopped"
     exit 0
     ;;
+  shot)
+    out=${2:?usage: scripts/dev-check.sh shot <output.png>}
+    mkdir -p "$(dirname "$out")"
+    bounds=$(swift scripts/onscreen-windows.swift TernDev \
+      | awk '/TernDev at [0-9-]+,[0-9-]+ size [0-9]+x[0-9]+, in view/ {
+          gsub(/,$/, "", $3); split($3, pos, ","); split($5, sz, "x");
+          printf "%s,%s,%s,%s\n", pos[1], pos[2], sz[1], sz[2]; exit
+        }')
+    if [ -z "$bounds" ]; then
+      echo "dev-check: no in-view TernDev window found (run swift scripts/onscreen-windows.swift)" >&2
+      exit 1
+    fi
+    screencapture -x -R "$bounds" "$out"
+    echo "$out ($bounds)"
+    exit 0
+    ;;
   keys)
     keys=${2:?usage: scripts/dev-check.sh keys "<script>" [config directory]}
     if [ -n "${3:-}" ]; then config=$(cd "$3" && pwd); fi
@@ -67,7 +85,7 @@ cargo build -q -p tern
 cargo build -q -p tern-ssh --example password_server
 
 mkdir -p "$app/Contents/MacOS"
-cp target/debug/tern "$app/Contents/MacOS/tern"
+cp "$target_dir/debug/tern" "$app/Contents/MacOS/tern"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -105,7 +123,7 @@ serve() { # port, served folder, log
     for f in notes.txt report.csv todo.md; do printf 'port %s: %s\n' "$1" "$f" > "$2/home/$f"; done
     printf 'started\n' > "$2/home/logs/app.log"
   fi
-  target/debug/examples/password_server --demo --sftp "$2" "$1" hunter2 > "$3" 2>&1 &
+  "$target_dir/debug/examples/password_server" --demo --sftp "$2" "$1" hunter2 > "$3" 2>&1 &
   echo $! >> "$pids"
 }
 serve "$port" "$PWD/$root/sftp" "$root/demo.log"

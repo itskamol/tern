@@ -50,7 +50,10 @@ noticed.
 ```sh
 cargo mutants -p tern-vault -p tern-sync        # the risk crates first
 cargo mutants --in-diff <(git diff main)        # only what a branch changed (CI-sized)
+cargo mutants -p tern --file crates/tern/src/agents/store.rs -- --bin tern -- agents::store::tests
 ```
+
+Because `tern` is a binary crate, pass `-- --bin tern -- <filter>` when scoping tests inside it. `cargo-mutants` writes `missed.txt` and logs under `<output>/mutants.out/`. Keep concurrent worktrees and `cargo mutants` workers on separate target directories (unset `CARGO_TARGET_DIR`, or use `-j 1` when sharing one) so mtime fingerprints cannot cross-contaminate builds.
 
 Run it on the crates that carry secrets, state and wire formats: **`tern-vault`,
 `tern-sync`** (the merge especially), and the version gates in `tern`. Survivors are the
@@ -126,6 +129,7 @@ does not. See `docs/ui.md` and the project memory on verifying by eye.
 cargo test --workspace                       # the suite
 scripts/test-gate.sh                         # the suite as the push gate runs it: a hung test is stopped and named
 cargo clippy --workspace --all-targets       # the craft gates
+scripts/check-deny.sh                        # advisories, licenses, bans and sources without duplicate-crate noise
 cargo mutants -p tern-vault -p tern-sync     # prove the critical tests can fail
 cargo llvm-cov --workspace --branch          # branch coverage of the critical crates
 ```
