@@ -6,20 +6,20 @@
 //! [`super::headless_login`] and [`super::systemctl`].
 
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use chrono::Utc;
 use gpui::{AsyncApp, Context, Task, WeakEntity};
+use serde::{Deserialize, Serialize};
 use tern_ssh::{ConnectSpec, ExecOptions};
-use tokio::io::BufReader;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 
+use super::broker_socket::{IncomingRequest, bind_and_serve};
+use super::grants::GrantFingerprint;
 use super::headless_login::{self, HeadlessExec};
 use super::protocol::{
-    AgentError, AgentErrorCode, AllowedHost, BrokerMessage, BrokerRequest, BrokerResult,
-    ListHostsResponse, MAX_FRAME_BYTES, read_line_bounded, write_json_line,
+    AgentError, AgentErrorCode, AllowedHost, BrokerRequest, BrokerResult, ListHostsResponse,
 };
 use super::store::AgentConfig;
 use super::systemctl;
@@ -33,12 +33,13 @@ use crate::platform::SshRuntime;
 
 /// Decision button identifier for one-time execution approval.
 pub const CHOICE_ALLOW_ONCE: &str = "allow_once";
+/// Decision button identifier for creating an in-memory Grant until lock/sleep/quit/revoke.
+pub const CHOICE_ALLOW_UNTIL_LOCK: &str = "allow_until_lock";
 /// Decision button identifier for declining the request.
 pub const CHOICE_DENY: &str = "deny";
 
 const LIST_HOSTS_USAGE: &str = "Call service_status with an alias from hosts and one of its listed services. Optional timeout_secs defaults to 15 (clamped to 1..=60).";
 const MAX_PENDING_REQUESTS: usize = 32;
-const MAX_CONCURRENT_CONNECTIONS: usize = 32;
 
 /// Point-in-time configuration and Saved connections read from the host entity on the UI thread.
 #[derive(Debug, Clone)]
@@ -47,6 +48,19 @@ pub struct BrokerSnapshot {
     pub known_hosts: Option<PathBuf>,
     pub config: AgentConfig,
     pub connections: Vec<Connection>,
+}
+
+/// How authorization was resolved for a `service_status` request (seam for `#64` audit log).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDecision {
+    AllowOnce,
+    AllowUntilLock,
+    GrantReused,
+    Denied,
+    Expired,
+    Cancelled,
+    Paused,
 }
 
 /// Summary of a completed `service_status` request, passed to [`AgentHost::on_agent_outcome`]
@@ -58,12 +72,32 @@ pub struct AgentOutcome {
     pub host: String,
     pub service: String,
     pub command: Option<String>,
+    pub decision: AgentDecision,
     pub result: BrokerResult,
 }
 
 /// Host UI seam implemented by `Shell` (and test hosts in `gpui::TestApp`).
 pub trait AgentHost: Sized + 'static {
     fn agent_snapshot(&self) -> BrokerSnapshot;
+
+    /// Returns `true` when an in-memory Grant exists for `(host, service)` whose stored
+    /// fingerprint matches `fingerprint`, evicting any mismatched Grant immediately.
+    fn verify_agent_grant(
+        &mut self,
+        host: &str,
+        service: &str,
+        fingerprint: GrantFingerprint,
+        cx: &mut Context<Self>,
+    ) -> bool;
+
+    /// Records an in-memory-only Grant for `(host, service)` bound to `fingerprint`.
+    fn record_agent_grant(
+        &mut self,
+        host: &str,
+        service: &str,
+        fingerprint: GrantFingerprint,
+        cx: &mut Context<Self>,
+    );
 
     /// Enqueues an Agent approval Decision.
     ///
@@ -78,27 +112,6 @@ pub trait AgentHost: Sized + 'static {
 
     /// Hook called when a `service_status` request finishes (seam for #64 audit + Activity).
     fn on_agent_outcome(&mut self, _outcome: &AgentOutcome, _cx: &mut Context<Self>) {}
-}
-
-/// Per-connection response and cancellation channel for one accepted `agent.sock` client.
-#[derive(Debug)]
-struct Responder {
-    tx: async_channel::Sender<BrokerMessage>,
-    /// Fires when the client sends `BrokerRequest::Cancel` or disconnects (#62).
-    #[allow(dead_code)]
-    cancelled: watch::Receiver<bool>,
-}
-
-impl Responder {
-    async fn finish(self, result: BrokerResult) {
-        let _ = self.tx.send(BrokerMessage::Result(result)).await;
-    }
-}
-
-#[derive(Debug)]
-struct IncomingRequest {
-    request: BrokerRequest,
-    responder: Responder,
 }
 
 /// Active `agent.sock` listener and dispatch task. Dropping it stops accepting new connections
@@ -162,154 +175,6 @@ impl BrokerHandle {
     }
 }
 
-#[cfg(unix)]
-fn bind_and_serve(
-    socket_path: &Path,
-    rt: &tokio::runtime::Handle,
-    req_tx: async_channel::Sender<IncomingRequest>,
-    mut shutdown: watch::Receiver<bool>,
-) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let _ = std::fs::remove_file(socket_path);
-
-    let listener = {
-        let _guard = rt.enter();
-        tokio::net::UnixListener::bind(socket_path)?
-    };
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
-
-    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
-    rt.spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.wait_for(|&stop| stop) => break,
-                accepted = listener.accept() => match accepted {
-                    Ok((stream, _)) => {
-                        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-                            tracing::warn!("agent_broker_connection_limit_reached");
-                            drop(stream);
-                            continue;
-                        };
-                        let tx = req_tx.clone();
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            serve_connection(stream, tx).await;
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "agent_broker_accept_failed");
-                        break;
-                    }
-                },
-            }
-        }
-    });
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn bind_and_serve(
-    _socket_path: &Path,
-    _rt: &tokio::runtime::Handle,
-    _req_tx: async_channel::Sender<IncomingRequest>,
-    _shutdown: watch::Receiver<bool>,
-) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "unix domain sockets are unsupported on this platform",
-    ))
-}
-
-#[cfg(unix)]
-async fn serve_connection(
-    stream: tokio::net::UnixStream,
-    req_tx: async_channel::Sender<IncomingRequest>,
-) {
-    let (read_half, mut write_half) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
-
-    let line = match read_line_bounded(&mut reader, MAX_FRAME_BYTES).await {
-        Ok(Some(line)) => line,
-        Ok(None) => return,
-        Err(e) => {
-            let _ = write_json_line(
-                &mut write_half,
-                &BrokerMessage::Result(BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::Denied,
-                    e.to_string(),
-                ))),
-            )
-            .await;
-            return;
-        }
-    };
-
-    let request: BrokerRequest = match serde_json::from_str(&line) {
-        Ok(req) => req,
-        Err(e) => {
-            let _ = write_json_line(
-                &mut write_half,
-                &BrokerMessage::Result(BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::Denied,
-                    format!("invalid broker request: {e}"),
-                ))),
-            )
-            .await;
-            return;
-        }
-    };
-
-    let (resp_tx, resp_rx) = async_channel::bounded::<BrokerMessage>(8);
-    let (cancel_tx, cancel_rx) = watch::channel(false);
-
-    if req_tx
-        .send(IncomingRequest {
-            request,
-            responder: Responder {
-                tx: resp_tx,
-                cancelled: cancel_rx,
-            },
-        })
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    loop {
-        tokio::select! {
-            biased;
-            next = read_line_bounded(&mut reader, MAX_FRAME_BYTES) => {
-                match next {
-                    Ok(None) | Err(_) => {
-                        cancel_tx.send_replace(true);
-                        break;
-                    }
-                    Ok(Some(extra)) => {
-                        if matches!(serde_json::from_str::<BrokerRequest>(&extra), Ok(BrokerRequest::Cancel)) {
-                            cancel_tx.send_replace(true);
-                        }
-                    }
-                }
-            }
-            msg = resp_rx.recv() => match msg {
-                Ok(message) => {
-                    let done = matches!(message, BrokerMessage::Result(_));
-                    if write_json_line(&mut write_half, &message).await.is_err() || done {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    }
-}
-
 async fn handle_incoming<H: AgentHost>(
     host: WeakEntity<H>,
     incoming: IncomingRequest,
@@ -361,6 +226,85 @@ fn handle_list_hosts<H: AgentHost>(host: &WeakEntity<H>, cx: &mut AsyncApp) -> B
     }
 }
 
+fn allowed_connection(snapshot: &BrokerSnapshot, host: &str, service: &str) -> Option<Connection> {
+    snapshot
+        .config
+        .is_service_allowed(host, service, &snapshot.connections)
+        .then(|| {
+            snapshot
+                .connections
+                .iter()
+                .find(|c| c.name == host)
+                .cloned()
+        })
+        .flatten()
+}
+
+enum Precheck {
+    Paused,
+    NotAllowed,
+    InvalidUnit(String),
+    Granted {
+        snapshot: BrokerSnapshot,
+        conn: Connection,
+        command: String,
+    },
+    NeedsDecision {
+        conn: Connection,
+        command: String,
+        fingerprint: GrantFingerprint,
+    },
+}
+
+enum Postcheck {
+    Paused,
+    NotAllowed,
+    Changed,
+    Ready(Box<(BrokerSnapshot, Connection)>),
+}
+
+struct ServiceRequest<'a, H> {
+    host: &'a WeakEntity<H>,
+    caller: String,
+    target_host: String,
+    service: String,
+}
+
+impl<H: AgentHost> ServiceRequest<'_, H> {
+    fn report(
+        &self,
+        command: Option<&str>,
+        decision: AgentDecision,
+        result: &BrokerResult,
+        cx: &mut AsyncApp,
+    ) {
+        let outcome = AgentOutcome {
+            caller: self.caller.clone(),
+            host: self.target_host.clone(),
+            service: self.service.clone(),
+            command: command.map(str::to_owned),
+            decision,
+            result: result.clone(),
+        };
+        let _ = self
+            .host
+            .update(cx, |h, cx| h.on_agent_outcome(&outcome, cx));
+    }
+
+    fn fail(
+        &self,
+        command: Option<&str>,
+        decision: AgentDecision,
+        code: AgentErrorCode,
+        message: impl Into<String>,
+        cx: &mut AsyncApp,
+    ) -> BrokerResult {
+        let res = BrokerResult::Error(AgentError::new(code, message));
+        self.report(command, decision, &res, cx);
+        res
+    }
+}
+
 async fn handle_service_status<H: AgentHost>(
     host: &WeakEntity<H>,
     caller: Option<String>,
@@ -369,78 +313,99 @@ async fn handle_service_status<H: AgentHost>(
     timeout_secs: Option<u64>,
     cx: &mut AsyncApp,
 ) -> BrokerResult {
-    let caller_label = caller_display(caller.as_deref());
+    let req = ServiceRequest {
+        host,
+        caller: caller_display(caller.as_deref()),
+        target_host,
+        service,
+    };
 
-    let Ok(snapshot) = host.update(cx, |h, _| h.agent_snapshot()) else {
+    let Ok(precheck) = host.update(cx, |h, cx| {
+        let snapshot = h.agent_snapshot();
+        if snapshot.config.paused {
+            return Precheck::Paused;
+        }
+        let Some(conn) = allowed_connection(&snapshot, &req.target_host, &req.service) else {
+            return Precheck::NotAllowed;
+        };
+        let command = match systemctl::command_for(&req.service) {
+            Ok(cmd) => cmd,
+            Err(e) => return Precheck::InvalidUnit(e.to_string()),
+        };
+        let fingerprint =
+            GrantFingerprint::for_connection(&conn, &snapshot.connections, &req.service);
+        if h.verify_agent_grant(&req.target_host, &req.service, fingerprint, cx) {
+            Precheck::Granted {
+                snapshot,
+                conn,
+                command,
+            }
+        } else {
+            Precheck::NeedsDecision {
+                conn,
+                command,
+                fingerprint,
+            }
+        }
+    }) else {
         return BrokerResult::Error(AgentError::new(
             AgentErrorCode::TernNotRunning,
             "tern window is no longer available",
         ));
     };
 
-    if snapshot.config.paused {
-        let res = BrokerResult::Error(AgentError::new(
-            AgentErrorCode::AgentsPaused,
-            "agents are paused in tern",
-        ));
-        report_outcome(host, &caller_label, &target_host, &service, None, &res, cx);
-        return res;
-    }
-
-    let allowed_conn = snapshot
-        .config
-        .is_service_allowed(&target_host, &service, &snapshot.connections)
-        .then(|| {
-            snapshot
-                .connections
-                .iter()
-                .find(|c| c.name == target_host)
-                .cloned()
-        })
-        .flatten();
-
-    let Some(conn) = allowed_conn else {
-        let res = BrokerResult::Error(AgentError::new(
-            AgentErrorCode::Denied,
-            format!(
+    let (conn, command, fingerprint) = match precheck {
+        Precheck::Paused => {
+            return req.fail(
+                None,
+                AgentDecision::Paused,
+                AgentErrorCode::AgentsPaused,
+                "agents are paused in tern",
+                cx,
+            );
+        }
+        Precheck::NotAllowed => {
+            let msg = format!(
                 "service '{}' on host '{}' is not allowed; call list_hosts to see allowed hosts and services",
-                sanitize_display_text(&service),
-                sanitize_display_text(&target_host),
-            ),
-        ));
-        report_outcome(host, &caller_label, &target_host, &service, None, &res, cx);
-        return res;
-    };
-
-    let command = match systemctl::command_for(&service) {
-        Ok(cmd) => cmd,
-        Err(e) => {
-            let res = BrokerResult::Error(AgentError::new(AgentErrorCode::Denied, e.to_string()));
-            report_outcome(host, &caller_label, &target_host, &service, None, &res, cx);
+                sanitize_display_text(&req.service),
+                sanitize_display_text(&req.target_host),
+            );
+            return req.fail(None, AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
+        }
+        Precheck::InvalidUnit(msg) => {
+            return req.fail(None, AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
+        }
+        Precheck::Granted {
+            snapshot,
+            conn,
+            command,
+        } => {
+            let res =
+                execute_service_status(&conn, &snapshot, &req.service, &command, timeout_secs, cx)
+                    .await;
+            req.report(Some(&command), AgentDecision::GrantReused, &res, cx);
             return res;
         }
+        Precheck::NeedsDecision {
+            conn,
+            command,
+            fingerprint,
+        } => (conn, command, fingerprint),
     };
 
     // Ask explicit human approval via the click-only Decision queue.
-    // #63 inserts Grant lookup right before this prompt; #62 adds a 60 s deadline & attention cues.
-    let prompt = build_service_status_prompt(&caller_label, &conn, &command);
+    // #62 adds a 60 s deadline & background attention cues here.
+    let prompt = build_service_status_prompt(&req.caller, &conn, &command);
     let pending = match host.update(cx, |h, cx| h.ask_agent_decision(prompt, None, cx)) {
         Ok(Ok(pending)) => pending,
         Ok(Err(QueueFull)) => {
-            let res = BrokerResult::Error(AgentError::new(
+            return req.fail(
+                Some(&command),
+                AgentDecision::Denied,
                 AgentErrorCode::Denied,
                 "too many pending approval decisions in tern",
-            ));
-            report_outcome(
-                host,
-                &caller_label,
-                &target_host,
-                &service,
-                Some(&command),
-                &res,
                 cx,
             );
-            return res;
         }
         Err(_) => {
             return BrokerResult::Error(AgentError::new(
@@ -450,103 +415,113 @@ async fn handle_service_status<H: AgentHost>(
         }
     };
 
-    match pending.wait().await {
-        DecisionOutcome::Chosen(choice) if choice == CHOICE_ALLOW_ONCE => {}
+    let decision = match pending.wait().await {
+        DecisionOutcome::Chosen(choice) if choice == CHOICE_ALLOW_ONCE => AgentDecision::AllowOnce,
+        DecisionOutcome::Chosen(choice) if choice == CHOICE_ALLOW_UNTIL_LOCK => {
+            AgentDecision::AllowUntilLock
+        }
         DecisionOutcome::Expired => {
-            let res = BrokerResult::Error(AgentError::new(
+            return req.fail(
+                Some(&command),
+                AgentDecision::Expired,
                 AgentErrorCode::TimedOut,
                 "approval decision expired",
-            ));
-            report_outcome(
-                host,
-                &caller_label,
-                &target_host,
-                &service,
-                Some(&command),
-                &res,
                 cx,
             );
-            return res;
         }
-        DecisionOutcome::Chosen(_) | DecisionOutcome::Cancelled => {
-            let res = BrokerResult::Error(AgentError::new(
+        DecisionOutcome::Cancelled => {
+            let Ok(paused) = host.update(cx, |h, _| h.agent_snapshot().config.paused) else {
+                return BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::TernNotRunning,
+                    "tern window is no longer available",
+                ));
+            };
+            if paused {
+                return req.fail(
+                    Some(&command),
+                    AgentDecision::Paused,
+                    AgentErrorCode::AgentsPaused,
+                    "agents are paused in tern",
+                    cx,
+                );
+            }
+            return req.fail(
+                Some(&command),
+                AgentDecision::Cancelled,
+                AgentErrorCode::Denied,
+                "request cancelled in tern",
+                cx,
+            );
+        }
+        DecisionOutcome::Chosen(_) => {
+            return req.fail(
+                Some(&command),
+                AgentDecision::Denied,
                 AgentErrorCode::Denied,
                 "request denied in tern",
-            ));
-            report_outcome(
-                host,
-                &caller_label,
-                &target_host,
-                &service,
-                Some(&command),
-                &res,
                 cx,
             );
-            return res;
         }
-    }
+    };
 
-    // Re-read current Saved connections & allowlist before dialing in case settings changed.
-    let Ok(fresh) = host.update(cx, |h, _| h.agent_snapshot()) else {
+    // Re-read current Saved connections, allowlist, and live fingerprint before dialing or recording
+    // a Grant in case settings changed while the Decision was open.
+    let Ok(postcheck) = host.update(cx, |h, cx| {
+        let fresh = h.agent_snapshot();
+        if fresh.config.paused {
+            return Postcheck::Paused;
+        }
+        let Some(conn) = allowed_connection(&fresh, &req.target_host, &req.service) else {
+            return Postcheck::NotAllowed;
+        };
+        let fresh_fp = GrantFingerprint::for_connection(&conn, &fresh.connections, &req.service);
+        if fresh_fp != fingerprint {
+            return Postcheck::Changed;
+        }
+        if decision == AgentDecision::AllowUntilLock {
+            h.record_agent_grant(&req.target_host, &req.service, fresh_fp, cx);
+        }
+        Postcheck::Ready(Box::new((fresh, conn)))
+    }) else {
         return BrokerResult::Error(AgentError::new(
             AgentErrorCode::TernNotRunning,
             "tern window is no longer available",
         ));
     };
-    if fresh.config.paused {
-        let res = BrokerResult::Error(AgentError::new(
-            AgentErrorCode::AgentsPaused,
-            "agents are paused in tern",
-        ));
-        report_outcome(
-            host,
-            &caller_label,
-            &target_host,
-            &service,
-            Some(&command),
-            &res,
-            cx,
-        );
-        return res;
-    }
-    let Some(conn) = fresh
-        .config
-        .is_service_allowed(&target_host, &service, &fresh.connections)
-        .then(|| {
-            fresh
-                .connections
-                .iter()
-                .find(|c| c.name == target_host)
-                .cloned()
-        })
-        .flatten()
-    else {
-        let res = BrokerResult::Error(AgentError::new(
-            AgentErrorCode::Denied,
-            "host or service is no longer allowed in tern",
-        ));
-        report_outcome(
-            host,
-            &caller_label,
-            &target_host,
-            &service,
-            Some(&command),
-            &res,
-            cx,
-        );
-        return res;
+
+    let (fresh, conn) = match postcheck {
+        Postcheck::Paused => {
+            return req.fail(
+                Some(&command),
+                AgentDecision::Paused,
+                AgentErrorCode::AgentsPaused,
+                "agents are paused in tern",
+                cx,
+            );
+        }
+        Postcheck::NotAllowed => {
+            return req.fail(
+                Some(&command),
+                AgentDecision::Denied,
+                AgentErrorCode::Denied,
+                "host or service is no longer allowed in tern",
+                cx,
+            );
+        }
+        Postcheck::Changed => {
+            return req.fail(
+                Some(&command),
+                AgentDecision::Denied,
+                AgentErrorCode::Denied,
+                "saved connection changed before approval completed",
+                cx,
+            );
+        }
+        Postcheck::Ready(ready) => *ready,
     };
 
-    let res = execute_service_status(&conn, &fresh, &service, &command, timeout_secs, cx).await;
-    report_outcome(
-        host,
-        &caller_label,
-        &target_host,
-        &service,
-        Some(&command),
-        &res,
-        cx,
-    );
+    let res = execute_service_status(&conn, &fresh, &req.service, &command, timeout_secs, cx).await;
+    req.report(Some(&command), decision, &res, cx);
     res
 }
 
@@ -624,6 +599,7 @@ pub fn build_service_status_prompt(
         format!("{caller} wants to check service status on {}", conn.name),
         vec![
             DecisionChoice::primary(CHOICE_ALLOW_ONCE, "Allow once"),
+            DecisionChoice::secondary(CHOICE_ALLOW_UNTIL_LOCK, "Allow until lock"),
             DecisionChoice::secondary(CHOICE_DENY, "Deny"),
         ],
     )
@@ -634,23 +610,4 @@ pub fn build_service_status_prompt(
     )
     .with_detail("Returns", "load_state, active_state, sub_state")
     .with_command(command)
-}
-
-fn report_outcome<H: AgentHost>(
-    host: &WeakEntity<H>,
-    caller: &str,
-    target_host: &str,
-    service: &str,
-    command: Option<&str>,
-    result: &BrokerResult,
-    cx: &mut AsyncApp,
-) {
-    let outcome = AgentOutcome {
-        caller: caller.to_owned(),
-        host: target_host.to_owned(),
-        service: service.to_owned(),
-        command: command.map(str::to_owned),
-        result: result.clone(),
-    };
-    let _ = host.update(cx, |h, cx| h.on_agent_outcome(&outcome, cx));
 }

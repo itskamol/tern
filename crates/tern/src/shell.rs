@@ -437,14 +437,6 @@ impl Shell {
             )
     }
 
-    fn refresh_hosts(&mut self) {
-        self.hosts = self
-            .connections
-            .iter()
-            .map(|c| c.entry_in(&self.connections))
-            .collect();
-    }
-
     /// Focus back to the active terminal, or the window when there is none.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = match self.tabs.active_tab() {

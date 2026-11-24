@@ -203,7 +203,7 @@ fn main() {
                 });
             }
             lock_on_sleep::start(cx, move |cause, cx| {
-                let _ = window.update(cx, |shell, _, cx| shell.lock_vault_for(cause, cx));
+                let _ = window.update(cx, |shell, _, cx| shell.on_sleep_or_lock(cause, cx));
             });
             #[cfg(any(debug_assertions, feature = "dev-keys"))]
             devkeys::replay(window, cx);

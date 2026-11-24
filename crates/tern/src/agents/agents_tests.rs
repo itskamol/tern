@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{AppContext as _, Context, Entity, TestApp};
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
@@ -27,15 +27,21 @@ use tern_ssh::SecretString;
 use tern_vault::{Key, Vault};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
-use super::broker::{AgentHost, BrokerHandle, BrokerSnapshot, CHOICE_ALLOW_ONCE, CHOICE_DENY};
+use super::broker::{
+    AgentDecision, AgentHost, AgentOutcome, BrokerHandle, BrokerSnapshot, CHOICE_ALLOW_ONCE,
+    CHOICE_ALLOW_UNTIL_LOCK, CHOICE_DENY,
+};
+use super::grants::{Grant, GrantFingerprint, GrantStore};
 use super::mcp;
 use super::socket_path;
-use super::store::AgentConfig;
+use super::store::{self, AgentConfig};
 use crate::connections::Connection;
 use crate::decisions::{
-    DecisionId, DecisionPrompt, DecisionQueue, DecisionTag, PendingDecision, QueueFull,
+    DecisionChoice, DecisionId, DecisionPrompt, DecisionQueue, DecisionRequest, DecisionTag,
+    PendingDecision, QueueFull,
 };
 use crate::keeper::Keeper;
+use crate::lock_on_sleep::{self, Cause};
 use crate::password_command::Approved;
 use crate::platform::SshRuntime;
 
@@ -298,12 +304,20 @@ impl server::Handler for LoopbackHandler {
 
 // ---- Test broker host inside gpui::TestApp --------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TestDecisionKind {
+    Clipboard,
+    External(DecisionTag),
+}
+
 struct TestHost {
     dir: PathBuf,
     known_hosts: PathBuf,
     config: AgentConfig,
     connections: Vec<Connection>,
-    decisions: DecisionQueue<DecisionTag>,
+    grants: GrantStore,
+    decisions: DecisionQueue<TestDecisionKind>,
+    outcomes: Vec<AgentOutcome>,
     broker: Option<BrokerHandle>,
 }
 
@@ -319,7 +333,9 @@ impl TestHost {
             known_hosts,
             config,
             connections,
+            grants: GrantStore::new(),
             decisions: DecisionQueue::new(),
+            outcomes: Vec::new(),
             broker: None,
         }
     }
@@ -342,6 +358,88 @@ impl TestHost {
     fn answer(&mut self, id: DecisionId, choice: &str) -> bool {
         self.decisions.answer(id, choice, Instant::now()).is_some()
     }
+
+    fn enqueue_clipboard_decision(&mut self) -> PendingDecision {
+        let prompt = DecisionPrompt::new(
+            "staging wants to copy 12 characters",
+            vec![
+                DecisionChoice::primary("once", "Allow once"),
+                DecisionChoice::secondary("deny", "Deny"),
+            ],
+        );
+        self.decisions
+            .enqueue(
+                DecisionRequest::new(TestDecisionKind::Clipboard, prompt),
+                Instant::now(),
+            )
+            .unwrap()
+    }
+
+    fn cancel_agent_decisions(&mut self) -> usize {
+        self.decisions
+            .cancel_where(|k| matches!(k, TestDecisionKind::External(DecisionTag::Agent)))
+    }
+
+    fn active_grants(&self) -> Vec<Grant> {
+        self.grants.active()
+    }
+
+    fn edit_connections(&mut self, f: impl FnOnce(&mut Vec<Connection>)) {
+        f(&mut self.connections);
+        self.grants.prune_stale(&self.config, &self.connections);
+    }
+
+    fn set_allowed_services(&mut self, host: &str, services: Vec<String>) {
+        self.config
+            .set_allowed_services(host, services, &self.connections)
+            .unwrap();
+        self.grants.prune_stale(&self.config, &self.connections);
+        store::save(&self.dir, &self.config, &self.connections).unwrap();
+    }
+
+    fn revoke_grant(&mut self, host: &str, service: &str) -> bool {
+        self.grants.revoke(host, service)
+    }
+
+    fn revoke_all_grants(&mut self) -> usize {
+        let count = self.grants.revoke_all();
+        self.cancel_agent_decisions();
+        count
+    }
+
+    fn set_agents_paused(&mut self, paused: bool) {
+        self.config.paused = paused;
+        if paused {
+            self.grants.revoke_all();
+            self.cancel_agent_decisions();
+        }
+        store::save(&self.dir, &self.config, &self.connections).unwrap();
+    }
+
+    fn on_sleep_or_lock(
+        &mut self,
+        _cause: Cause,
+        vault_lock_on_sleep: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = lock_on_sleep::lock(vault_lock_on_sleep, cx);
+        self.grants.revoke_all();
+        self.cancel_agent_decisions();
+    }
+
+    fn take_outcomes(&mut self) -> Vec<AgentOutcome> {
+        std::mem::take(&mut self.outcomes)
+    }
+
+    fn has_pending_agent_decision(&self) -> bool {
+        self.decisions
+            .has_matching(|k| matches!(k, TestDecisionKind::External(DecisionTag::Agent)))
+    }
+
+    fn has_pending_clipboard_decision(&self) -> bool {
+        self.decisions
+            .has_matching(|k| matches!(k, TestDecisionKind::Clipboard))
+    }
 }
 
 impl AgentHost for TestHost {
@@ -354,17 +452,42 @@ impl AgentHost for TestHost {
         }
     }
 
+    fn verify_agent_grant(
+        &mut self,
+        host: &str,
+        service: &str,
+        fingerprint: GrantFingerprint,
+        _cx: &mut Context<Self>,
+    ) -> bool {
+        self.grants.verify(host, service, fingerprint)
+    }
+
+    fn record_agent_grant(
+        &mut self,
+        host: &str,
+        service: &str,
+        fingerprint: GrantFingerprint,
+        _cx: &mut Context<Self>,
+    ) {
+        self.grants
+            .insert(host, service, fingerprint, SystemTime::now());
+    }
+
     fn ask_agent_decision(
         &mut self,
         prompt: DecisionPrompt,
         deadline: Option<Instant>,
         _cx: &mut Context<Self>,
     ) -> Result<PendingDecision, QueueFull> {
-        let mut req = crate::decisions::DecisionRequest::new(DecisionTag::Agent, prompt);
+        let mut req = DecisionRequest::new(TestDecisionKind::External(DecisionTag::Agent), prompt);
         if let Some(d) = deadline {
             req = req.with_deadline(d);
         }
         self.decisions.enqueue(req, Instant::now())
+    }
+
+    fn on_agent_outcome(&mut self, outcome: &AgentOutcome, _cx: &mut Context<Self>) {
+        self.outcomes.push(outcome.clone());
     }
 }
 
@@ -739,7 +862,10 @@ fn end_to_end_closed_recovery_list_hosts_allowlist_decision_allow_once_and_deny(
                     .any(|d| d.label == "Returns" && d.value.contains("load_state"))
             );
             let choice_ids: Vec<&str> = prompt.choices.iter().map(|c| c.id.as_str()).collect();
-            assert_eq!(choice_ids, vec![CHOICE_ALLOW_ONCE, CHOICE_DENY]);
+            assert_eq!(
+                choice_ids,
+                vec![CHOICE_ALLOW_ONCE, CHOICE_ALLOW_UNTIL_LOCK, CHOICE_DENY]
+            );
             CHOICE_DENY
         },
     );
@@ -1303,4 +1429,869 @@ fn end_to_end_headless_login_ladder_vault_keychain_commands_hostkeys_and_2fa() {
         r["result"]["structuredContent"]["reason"],
         "interactive_auth_required"
     );
+}
+
+// ---- Ticket #63: Allow until lock Grants, fingerprint invalidation, lock_on_sleep, Pause ----
+
+fn wait_for_agent_queued(host: &Entity<TestHost>, app: &mut TestApp) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        app.run_until_parked();
+        if app.update(|cx| host.read(cx).has_pending_agent_decision()) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for Agent Decision to enter queue");
+}
+
+#[test]
+fn end_to_end_allow_until_lock_creates_in_memory_grant_reused_without_decision() {
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let (key_path, pub_key, _) = generate_unencrypted_key(dir.path(), "id_ed25519");
+
+    let ssh = TestSshServer::start(ServerAuth::PublicKey(pub_key), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+
+    let mut staging = make_conn("staging", ssh.port);
+    staging.identity_file = Some(key_path.display().to_string());
+    let mut prod = make_conn("prod", ssh.port);
+    prod.identity_file = Some(key_path.display().to_string());
+    let connections = vec![staging, prod];
+
+    let mut config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: BTreeMap::new(),
+    };
+    config
+        .set_allowed_services(
+            "staging",
+            vec!["api.service".into(), "worker@1.service".into()],
+            &connections,
+        )
+        .unwrap();
+    config
+        .set_allowed_services("prod", vec!["api.service".into()], &connections)
+        .unwrap();
+    store::save(dir.path(), &config, &connections).unwrap();
+    let agents_json_before = std::fs::read_to_string(dir.path().join(store::FILE_NAME)).unwrap();
+
+    let mut app = setup_test_app(dir.path().join("vault.age"), false);
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh, config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+    let mut mcp = McpClient::start(socket_path(dir.path()));
+    mcp.call_sync(
+        "initialize",
+        &json!({ "clientInfo": { "name": "Cursor" } }),
+        &mut app,
+    );
+
+    // 1. First call raises Decision offering Allow once, Allow until lock, and Deny.
+    let first = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |prompt| {
+            let ids: Vec<&str> = prompt.choices.iter().map(|c| c.id.as_str()).collect();
+            let labels: Vec<&str> = prompt.choices.iter().map(|c| c.label.as_str()).collect();
+            assert_eq!(
+                ids,
+                vec![CHOICE_ALLOW_ONCE, CHOICE_ALLOW_UNTIL_LOCK, CHOICE_DENY]
+            );
+            assert_eq!(labels, vec!["Allow once", "Allow until lock", "Deny"]);
+            assert!(prompt.choices[0].primary);
+            assert!(!prompt.choices[1].primary);
+            assert!(!prompt.choices[2].primary);
+            CHOICE_ALLOW_UNTIL_LOCK
+        },
+    );
+    assert_eq!(first["result"]["isError"], false);
+    assert_eq!(
+        first["result"]["structuredContent"]["active_state"],
+        "active"
+    );
+    assert_eq!(ssh.connection_count(), 1);
+
+    // Grant lives in memory only; agents.json on disk is completely unchanged.
+    let grants = app.update(|cx| host_entity.read(cx).active_grants());
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].host, "staging");
+    assert_eq!(grants[0].service, "api.service");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(store::FILE_NAME)).unwrap(),
+        agents_json_before
+    );
+    assert!(!dir.path().join("grants.json").exists());
+
+    // 2. Second call for the same (host, service) succeeds immediately WITHOUT raising a Decision.
+    let second = mcp.call_sync(
+        "tools/call",
+        &json!({
+            "name": "service_status",
+            "arguments": { "host": "staging", "service": "api.service" }
+        }),
+        &mut app,
+    );
+    assert_eq!(second["result"]["isError"], false);
+    assert_eq!(
+        second["result"]["structuredContent"]["active_state"],
+        "active"
+    );
+    assert_eq!(ssh.connection_count(), 2);
+    assert!(
+        app.update(|cx| host_entity.update(cx, |h, _| h.front_prompt()))
+            .is_none()
+    );
+
+    // Audit seam distinguishes allow_until_lock vs grant_reused.
+    let outcomes = app.update(|cx| host_entity.update(cx, |h, _| h.take_outcomes()));
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes[0].decision, AgentDecision::AllowUntilLock);
+    assert_eq!(outcomes[1].decision, AgentDecision::GrantReused);
+
+    // 3. Different service on same host and same service on different host still require Decisions.
+    let other_svc = mcp.service_status_with_decision(
+        "staging",
+        "worker@1.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(other_svc["result"]["isError"], false);
+
+    let other_host = mcp.service_status_with_decision(
+        "prod",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(other_host["result"]["isError"], false);
+
+    let outcomes = app.update(|cx| host_entity.update(cx, |h, _| h.take_outcomes()));
+    assert_eq!(outcomes[0].decision, AgentDecision::AllowOnce);
+    assert_eq!(outcomes[1].decision, AgentDecision::AllowOnce);
+}
+
+#[test]
+fn end_to_end_fingerprint_invalidation_on_every_connection_and_service_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let (key_path, pub_key, _) = generate_unencrypted_key(dir.path(), "id_ed25519");
+
+    let ssh1 = TestSshServer::start(ServerAuth::PublicKey(pub_key.clone()), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    let ssh2 = TestSshServer::start(ServerAuth::PublicKey(pub_key), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    let kh_text = format!(
+        "[127.0.0.1]:{} {}\n[127.0.0.1]:{} {}\n",
+        ssh1.port,
+        ssh1.host_key.to_openssh().unwrap(),
+        ssh2.port,
+        ssh2.host_key.to_openssh().unwrap(),
+    );
+    std::fs::write(&kh, &kh_text).unwrap();
+
+    let mut staging = make_conn("staging", ssh1.port);
+    staging.identity_file = Some(key_path.display().to_string());
+    let mut bastion = make_conn("bastion", ssh1.port);
+    bastion.identity_file = Some(key_path.display().to_string());
+    let connections = vec![staging, bastion];
+
+    let mut config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: BTreeMap::new(),
+    };
+    config
+        .set_allowed_services("staging", vec!["api.service".into()], &connections)
+        .unwrap();
+    store::save(dir.path(), &config, &connections).unwrap();
+
+    let mut app = setup_test_app(dir.path().join("vault.age"), false);
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh, config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+    let mut mcp = McpClient::start(socket_path(dir.path()));
+    mcp.call_sync("initialize", &json!({}), &mut app);
+
+    let grant_staging = |mcp: &mut McpClient, app: &mut TestApp| {
+        let r = mcp.service_status_with_decision(
+            "staging",
+            "api.service",
+            None,
+            &host_entity,
+            app,
+            |_| CHOICE_ALLOW_UNTIL_LOCK,
+        );
+        assert_eq!(r["result"]["isError"], false);
+        // Confirm grant is active and reused immediately.
+        let r2 = mcp.call_sync(
+            "tools/call",
+            &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "api.service" } }),
+            app,
+        );
+        assert_eq!(r2["result"]["isError"], false);
+    };
+
+    // 1. Editing `host` — even WITHOUT calling eager prune_stale, broker re-verifies live
+    //    fingerprint before execution and forces a fresh Decision!
+    grant_staging(&mut mcp, &mut app);
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.connections[0].host = "localhost".into();
+        });
+    });
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |prompt| {
+            assert!(prompt.details.iter().any(|d| d.value.contains("localhost")));
+            CHOICE_DENY
+        },
+    );
+    assert_eq!(r["result"]["structuredContent"]["error"], "denied");
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+
+    // Restore host to 127.0.0.1.
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.edit_connections(|c| c[0].host = "127.0.0.1".into())
+        });
+    });
+
+    // 2. Editing `port` invalidates Grant immediately and forces a fresh Decision.
+    grant_staging(&mut mcp, &mut app);
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| h.edit_connections(|c| c[0].port = ssh2.port));
+    });
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(r["result"]["isError"], false);
+    assert_eq!(ssh2.connection_count(), 1);
+
+    // 3. Editing `user` invalidates Grant immediately and forces a fresh Decision.
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| h.edit_connections(|c| c[0].user = "ops".into()));
+    });
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |prompt| {
+            assert!(prompt.details.iter().any(|d| d.value.contains("ops@")));
+            CHOICE_ALLOW_UNTIL_LOCK
+        },
+    );
+    assert_eq!(r["result"]["isError"], false);
+
+    // 4. Editing `proxy_jump` directly invalidates Grant immediately.
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.edit_connections(|c| c[0].proxy_jump = "bastion".into())
+        });
+    });
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_DENY,
+    );
+    assert_eq!(r["result"]["structuredContent"]["error"], "denied");
+
+    // 4b. Editing a referenced jump Saved connection invalidates the target's Grant too.
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            let fp =
+                GrantFingerprint::for_connection(&h.connections[0], &h.connections, "api.service");
+            h.grants
+                .insert("staging", "api.service", fp, SystemTime::now());
+            h.edit_connections(|c| c[1].port = ssh2.port);
+        });
+    });
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| h.edit_connections(|c| c[0].proxy_jump.clear()));
+    });
+
+    // 5. Editing `proxy_command` invalidates Grant immediately.
+    grant_staging(&mut mcp, &mut app);
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.edit_connections(|c| c[0].proxy_command = Some("nc %h %p".into()));
+        });
+    });
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_DENY,
+    );
+    assert_eq!(r["result"]["structuredContent"]["error"], "denied");
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| h.edit_connections(|c| c[0].proxy_command = None));
+    });
+
+    // 6. Removing allowed service immediately invalidates Grant (returns denied); re-adding it
+    //    does NOT restore the Grant and forces a fresh Decision.
+    grant_staging(&mut mcp, &mut app);
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| h.set_allowed_services("staging", vec![]));
+    });
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    let denied = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "api.service" } }),
+        &mut app,
+    );
+    assert_eq!(denied["result"]["structuredContent"]["error"], "denied");
+
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.set_allowed_services("staging", vec!["api.service".into()]);
+        });
+    });
+    let r = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(r["result"]["isError"], false);
+
+    // 7. Editing a Saved connection while a Decision is open rejects approval (TOCTOU guard) and
+    //    records no Grant.
+    app.update(|cx| host_entity.update(cx, |h, _| h.revoke_all_grants()));
+    let req_id = mcp.send(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "api.service" } }),
+    );
+    let (dec_id, _) = wait_for_decision(&host_entity, &mut app);
+    let ssh2_before = ssh2.connection_count();
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| h.edit_connections(|c| c[0].port = ssh1.port));
+    });
+    let answered =
+        app.update(|cx| host_entity.update(cx, |h, _| h.answer(dec_id, CHOICE_ALLOW_UNTIL_LOCK)));
+    assert!(answered);
+    let toctou = mcp.recv_pumping(&mut app);
+    assert_eq!(toctou["id"], req_id);
+    assert_eq!(toctou["result"]["structuredContent"]["error"], "denied");
+    assert_eq!(ssh2.connection_count(), ssh2_before);
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+
+    // 8. Renaming Saved connection invalidates Grant; old and unallowlisted new names return denied,
+    //    and allowlisting the renamed connection forces a fresh Decision.
+    grant_staging(&mut mcp, &mut app);
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.edit_connections(|c| c[0].name = "staging-v2".into());
+        });
+    });
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    let old_name = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "api.service" } }),
+        &mut app,
+    );
+    assert_eq!(old_name["result"]["structuredContent"]["error"], "denied");
+    let new_unlisted = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging-v2", "service": "api.service" } }),
+        &mut app,
+    );
+    assert_eq!(
+        new_unlisted["result"]["structuredContent"]["error"],
+        "denied"
+    );
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.config.hosts.remove("staging");
+            h.set_allowed_services("staging-v2", vec!["api.service".into()]);
+        });
+    });
+    let renamed_ok = mcp.service_status_with_decision(
+        "staging-v2",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(renamed_ok["result"]["isError"], false);
+
+    // 9. Deleting Saved connection invalidates Grant immediately and returns denied without SSH.
+    let count_before_delete = ssh1.connection_count();
+    app.update(|cx| {
+        host_entity.update(cx, |h, _| {
+            h.edit_connections(|c| c.retain(|conn| conn.name != "staging-v2"));
+        });
+    });
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    let deleted = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging-v2", "service": "api.service" } }),
+        &mut app,
+    );
+    assert_eq!(deleted["result"]["structuredContent"]["error"], "denied");
+    assert_eq!(ssh1.connection_count(), count_before_delete);
+}
+
+#[test]
+fn end_to_end_lock_on_sleep_clears_grants_and_cancels_agent_decisions_independent_of_vault_setting()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let vault_path = dir.path().join("vault.age");
+    let (key_path, pub_key, _) = generate_unencrypted_key(dir.path(), "id_ed25519");
+
+    let ssh = TestSshServer::start(ServerAuth::PublicKey(pub_key), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+    write_locked_vault(&vault_path, vec![]);
+
+    let mut conn = make_conn("staging", ssh.port);
+    conn.identity_file = Some(key_path.display().to_string());
+    let connections = vec![conn];
+    let mut config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: BTreeMap::new(),
+    };
+    config
+        .set_allowed_services(
+            "staging",
+            vec!["api.service".into(), "worker@1.service".into()],
+            &connections,
+        )
+        .unwrap();
+    store::save(dir.path(), &config, &connections).unwrap();
+    let agents_json_before = std::fs::read_to_string(dir.path().join(store::FILE_NAME)).unwrap();
+
+    let mut app = setup_test_app(vault_path.clone(), false);
+    unlock_vault(&vault_path, &mut app);
+
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh, config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+
+    // Wire lock_on_sleep::listen with vault_lock_on_sleep = FALSE.
+    let (sleep_tx, sleep_rx) = async_channel::unbounded::<Cause>();
+    let host_weak = host_entity.downgrade();
+    app.update(|cx| {
+        lock_on_sleep::listen(sleep_rx, cx, move |cause, cx| {
+            let _ = host_weak.update(cx, |h, cx| h.on_sleep_or_lock(cause, false, cx));
+        });
+    });
+
+    let mut mcp = McpClient::start(socket_path(dir.path()));
+    mcp.call_sync("initialize", &json!({}), &mut app);
+
+    for cause in [Cause::Sleep, Cause::ScreenLocked, Cause::SessionSwitched] {
+        // Grant api.service via Allow until lock and prove Grant reuse works.
+        let ok = mcp.service_status_with_decision(
+            "staging",
+            "api.service",
+            None,
+            &host_entity,
+            &mut app,
+            |_| CHOICE_ALLOW_UNTIL_LOCK,
+        );
+        assert_eq!(ok["result"]["isError"], false);
+        let reused = mcp.call_sync(
+            "tools/call",
+            &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "api.service" } }),
+            &mut app,
+        );
+        assert_eq!(reused["result"]["isError"], false);
+
+        // Enqueue a Clipboard Decision AND an in-flight Agent Decision (worker@1.service).
+        let clipboard_pending =
+            app.update(|cx| host_entity.update(cx, |h, _| h.enqueue_clipboard_decision()));
+        let pending_id = mcp.send(
+            "tools/call",
+            &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "worker@1.service" } }),
+        );
+        wait_for_agent_queued(&host_entity, &mut app);
+
+        // Inject lock_on_sleep event.
+        sleep_tx.send_blocking(cause).unwrap();
+        let cancelled = mcp.recv_pumping(&mut app);
+        assert_eq!(cancelled["id"], pending_id);
+        assert_eq!(cancelled["result"]["isError"], true);
+        assert_eq!(cancelled["result"]["structuredContent"]["error"], "denied");
+
+        // Vault stayed unlocked (vault_lock_on_sleep = false), active Grants cleared,
+        // Agent Decisions cancelled, Clipboard Decision untouched, agents.json intact.
+        app.update(|cx| {
+            assert!(
+                !Keeper::locked(cx),
+                "vault must stay open when vault_lock_on_sleep is false"
+            );
+            let h = host_entity.read(cx);
+            assert!(
+                h.active_grants().is_empty(),
+                "{cause:?} must clear all Grants"
+            );
+            assert!(
+                !h.has_pending_agent_decision(),
+                "{cause:?} must cancel Agent Decisions"
+            );
+            assert!(
+                h.has_pending_clipboard_decision(),
+                "{cause:?} must leave clipboard Decisions untouched"
+            );
+        });
+        assert_eq!(clipboard_pending.try_outcome(), None);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(store::FILE_NAME)).unwrap(),
+            agents_json_before
+        );
+
+        let outcomes = app.update(|cx| host_entity.update(cx, |h, _| h.take_outcomes()));
+        assert_eq!(outcomes.last().unwrap().decision, AgentDecision::Cancelled);
+
+        // Clear the clipboard Decision before next iteration.
+        assert!(clipboard_pending.cancel());
+        app.update(|cx| host_entity.update(cx, |h, _| h.decisions.sweep(Instant::now())));
+    }
+}
+
+#[test]
+fn end_to_end_manual_revoke_and_app_quit_clear_grants_preserving_agents_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let (key_path, pub_key, _) = generate_unencrypted_key(dir.path(), "id_ed25519");
+
+    let ssh = TestSshServer::start(ServerAuth::PublicKey(pub_key), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+
+    let mut conn = make_conn("staging", ssh.port);
+    conn.identity_file = Some(key_path.display().to_string());
+    let connections = vec![conn];
+    let mut config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: BTreeMap::new(),
+    };
+    config
+        .set_allowed_services(
+            "staging",
+            vec![
+                "api.service".into(),
+                "worker@1.service".into(),
+                "db.service".into(),
+            ],
+            &connections,
+        )
+        .unwrap();
+    store::save(dir.path(), &config, &connections).unwrap();
+    let agents_json_before = std::fs::read_to_string(dir.path().join(store::FILE_NAME)).unwrap();
+
+    let mut app = setup_test_app(dir.path().join("vault.age"), false);
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(
+                dir.path().to_path_buf(),
+                kh.clone(),
+                config.clone(),
+                connections.clone(),
+            );
+            h.start_broker(cx);
+            h
+        })
+    });
+    let mut mcp = McpClient::start(socket_path(dir.path()));
+    mcp.call_sync("initialize", &json!({}), &mut app);
+
+    // Grant api.service and worker@1.service.
+    for svc in ["api.service", "worker@1.service"] {
+        let r =
+            mcp.service_status_with_decision("staging", svc, None, &host_entity, &mut app, |_| {
+                CHOICE_ALLOW_UNTIL_LOCK
+            });
+        assert_eq!(r["result"]["isError"], false);
+    }
+
+    // Single-grant revoke clears only api.service; worker@1.service still reuses its Grant.
+    let revoked_one =
+        app.update(|cx| host_entity.update(cx, |h, _| h.revoke_grant("staging", "api.service")));
+    assert!(revoked_one);
+    let worker_reused = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "worker@1.service" } }),
+        &mut app,
+    );
+    assert_eq!(worker_reused["result"]["isError"], false);
+
+    // Manual Revoke active Grants clears all Grants, cancels pending Agent Decisions, preserves
+    // clipboard Decisions and agents.json.
+    let clipboard_pending =
+        app.update(|cx| host_entity.update(cx, |h, _| h.enqueue_clipboard_decision()));
+    let pending_id = mcp.send(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "db.service" } }),
+    );
+    wait_for_agent_queued(&host_entity, &mut app);
+
+    let revoked_all = app.update(|cx| host_entity.update(cx, |h, _| h.revoke_all_grants()));
+    assert_eq!(revoked_all, 1);
+
+    let cancelled = mcp.recv_pumping(&mut app);
+    assert_eq!(cancelled["id"], pending_id);
+    assert_eq!(cancelled["result"]["structuredContent"]["error"], "denied");
+    assert_eq!(clipboard_pending.try_outcome(), None);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(store::FILE_NAME)).unwrap(),
+        agents_json_before
+    );
+    assert!(clipboard_pending.cancel());
+    app.update(|cx| host_entity.update(cx, |h, _| h.decisions.sweep(Instant::now())));
+
+    // App quit simulation: active Grant disappears and pending Agent Decision cancels cleanly.
+    let ok = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(ok["result"]["isError"], false);
+
+    let pending_quit_id = mcp.send(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "db.service" } }),
+    );
+    wait_for_agent_queued(&host_entity, &mut app);
+
+    // Dropping the broker + host simulates app quit (DecisionQueue::drop cancels pending items).
+    drop(host_entity);
+    app.update(|_| {});
+    app.run_until_parked();
+    let quit_resp = mcp.recv_pumping(&mut app);
+    assert_eq!(quit_resp["id"], pending_quit_id);
+    assert_eq!(quit_resp["result"]["isError"], true);
+    assert_eq!(
+        quit_resp["result"]["structuredContent"]["error"],
+        "tern_not_running"
+    );
+    assert!(!socket_path(dir.path()).exists());
+
+    // Relaunching a fresh host reading the same agents.json has zero Grants and raises a fresh
+    // Decision for api.service.
+    let reloaded_cfg = store::load(dir.path()).unwrap();
+    let restarted = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh, reloaded_cfg, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+    assert!(app.update(|cx| restarted.read(cx).active_grants().is_empty()));
+    let after_restart = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &restarted,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(after_restart["result"]["isError"], false);
+}
+
+#[test]
+fn end_to_end_pause_agents_rejects_cancels_clears_grants_and_does_not_restore_on_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    let (key_path, pub_key, _) = generate_unencrypted_key(dir.path(), "id_ed25519");
+
+    let ssh = TestSshServer::start(ServerAuth::PublicKey(pub_key), |_| {
+        ExecReply::ok("loaded\nactive\nrunning\n")
+    });
+    ssh.write_known_hosts(&kh);
+
+    let mut conn = make_conn("staging", ssh.port);
+    conn.identity_file = Some(key_path.display().to_string());
+    let connections = vec![conn];
+    let mut config = AgentConfig {
+        enabled: true,
+        paused: false,
+        hosts: BTreeMap::new(),
+    };
+    config
+        .set_allowed_services(
+            "staging",
+            vec!["api.service".into(), "worker@1.service".into()],
+            &connections,
+        )
+        .unwrap();
+    store::save(dir.path(), &config, &connections).unwrap();
+
+    let mut app = setup_test_app(dir.path().join("vault.age"), false);
+    let host_entity = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = TestHost::new(dir.path().to_path_buf(), kh, config, connections);
+            h.start_broker(cx);
+            h
+        })
+    });
+    let mut mcp = McpClient::start(socket_path(dir.path()));
+    mcp.call_sync("initialize", &json!({}), &mut app);
+
+    // 1. Grant api.service via Allow until lock and confirm reuse.
+    let ok = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_UNTIL_LOCK,
+    );
+    assert_eq!(ok["result"]["isError"], false);
+    let reused = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "api.service" } }),
+        &mut app,
+    );
+    assert_eq!(reused["result"]["isError"], false);
+    app.update(|cx| host_entity.update(cx, |h, _| h.take_outcomes()));
+
+    // 2. Enqueue a Clipboard Decision AND an in-flight Agent Decision (worker@1.service).
+    let clipboard_pending =
+        app.update(|cx| host_entity.update(cx, |h, _| h.enqueue_clipboard_decision()));
+    let pending_id = mcp.send(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "worker@1.service" } }),
+    );
+    wait_for_agent_queued(&host_entity, &mut app);
+
+    // 3. Enable Pause agents: cancels pending Agent Decision with agents_paused, clears Grants,
+    //    persists paused=true while keeping allowlist intact, leaves clipboard Decision alone.
+    let count_before_pause = ssh.connection_count();
+    app.update(|cx| host_entity.update(cx, |h, _| h.set_agents_paused(true)));
+
+    let paused_pending = mcp.recv_pumping(&mut app);
+    assert_eq!(paused_pending["id"], pending_id);
+    assert_eq!(paused_pending["result"]["isError"], true);
+    assert_eq!(
+        paused_pending["result"]["structuredContent"]["error"],
+        "agents_paused"
+    );
+
+    assert!(app.update(|cx| host_entity.read(cx).active_grants().is_empty()));
+    assert_eq!(clipboard_pending.try_outcome(), None);
+
+    let on_disk = store::load(dir.path()).unwrap();
+    assert!(on_disk.paused);
+    assert_eq!(
+        on_disk.hosts.get("staging").map(Vec::as_slice),
+        Some(&["api.service".to_owned(), "worker@1.service".to_owned()][..])
+    );
+
+    // 4. New list_hosts and service_status calls reject immediately with agents_paused without
+    //    raising a Decision or dialing SSH.
+    let list_paused = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "list_hosts", "arguments": {} }),
+        &mut app,
+    );
+    assert_eq!(list_paused["result"]["isError"], true);
+    assert_eq!(
+        list_paused["result"]["structuredContent"]["error"],
+        "agents_paused"
+    );
+
+    let status_paused = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "service_status", "arguments": { "host": "staging", "service": "api.service" } }),
+        &mut app,
+    );
+    assert_eq!(status_paused["result"]["isError"], true);
+    assert_eq!(
+        status_paused["result"]["structuredContent"]["error"],
+        "agents_paused"
+    );
+    assert_eq!(ssh.connection_count(), count_before_pause);
+
+    let outcomes = app.update(|cx| host_entity.update(cx, |h, _| h.take_outcomes()));
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes[0].decision, AgentDecision::Paused);
+    assert_eq!(outcomes[1].decision, AgentDecision::Paused);
+
+    // Clean up clipboard Decision.
+    assert!(clipboard_pending.cancel());
+    app.update(|cx| host_entity.update(cx, |h, _| h.decisions.sweep(Instant::now())));
+
+    // 5. Disable Pause agents: resumes normal handling, persists paused=false, does NOT restore
+    //    cleared Grants (api.service requires a fresh Decision).
+    app.update(|cx| host_entity.update(cx, |h, _| h.set_agents_paused(false)));
+    let on_disk_resumed = store::load(dir.path()).unwrap();
+    assert!(!on_disk_resumed.paused);
+    assert_eq!(on_disk_resumed.hosts, on_disk.hosts);
+
+    let list_ok = mcp.call_sync(
+        "tools/call",
+        &json!({ "name": "list_hosts", "arguments": {} }),
+        &mut app,
+    );
+    assert_eq!(list_ok["result"]["isError"], false);
+
+    let fresh_decision = mcp.service_status_with_decision(
+        "staging",
+        "api.service",
+        None,
+        &host_entity,
+        &mut app,
+        |_| CHOICE_ALLOW_ONCE,
+    );
+    assert_eq!(fresh_decision["result"]["isError"], false);
+    assert_eq!(ssh.connection_count(), count_before_pause + 1);
 }
