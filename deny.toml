@@ -14,6 +14,9 @@ ignore = [
   # operations; tern does at most one RSA signature per login, and host-key checks are public-key
   # only. Dropping russh's `rsa` feature would remove RSA host and user keys. Tracked in #16.
   { id = "RUSTSEC-2023-0071", reason = "no fix upstream; one signature per login; see #16" },
+  # chrono is marked unmaintained upstream; tern uses it only for UTC timestamp formatting and
+  # gpui-pre/russh also pull it in transitively. Tracked for a follow-up migration to jiff/time.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained upstream; timestamp formatting only, pulled in by gpui-pre/russh too" },
 ]
 
 [licenses]
