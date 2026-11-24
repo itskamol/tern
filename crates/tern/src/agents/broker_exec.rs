@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::AsyncApp;
-use tern_ssh::{ConnectSpec, DEFAULT_EXEC_TIMEOUT, ExecOptions};
+use tern_ssh::{ConnectSpec, DEFAULT_EXEC_TIMEOUT, ExecOptions, ExecStreamOptions};
 
 use super::broker::{
     AgentDecision, AgentHost, AgentOutcome, BrokerSnapshot, CHOICE_ALLOW_ONCE,
@@ -18,9 +18,10 @@ use super::broker::{
 };
 use super::broker_socket::Responder;
 use super::grants::GrantFingerprint;
-use super::headless_login::{self, HeadlessExec};
+use super::headless_login::{self, HeadlessExec, HeadlessExecStream};
 use super::protocol::{
-    AgentError, AgentErrorCode, BrokerResult, RunCommandResponse, UserActionReason,
+    AgentError, AgentErrorCode, BrokerResult, ExecStreamResponse, RunCommandResponse,
+    UserActionReason,
 };
 use super::vault_wait::VaultUnlockOutcome;
 use crate::connections::Connection;
@@ -82,6 +83,13 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// Whether a broker command executes buffered (`run_command` MCP) or streamed (`tern exec` CLI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExecMode {
+    Buffered,
+    Stream,
+}
+
 fn is_vault_locked(result: &BrokerResult) -> bool {
     matches!(
         result,
@@ -91,9 +99,9 @@ fn is_vault_locked(result: &BrokerResult) -> bool {
     )
 }
 
-/// Runs `command` via [`execute_run_command`]; if the host requires a locked Vault and the host UI
-/// supports bounded Vault unlock waiting, waits once for the human to unlock the Vault and retries
-/// execution strictly once (re-checking pause and target fingerprint first).
+/// Runs `command` in `mode`; if the host requires a locked Vault and the host UI supports bounded
+/// Vault unlock waiting, waits once for the human to unlock the Vault and retries execution
+/// strictly once (re-checking pause and target fingerprint first).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_with_vault_wait<H: AgentHost>(
     req: &CommandRequest<'_, H>,
@@ -102,10 +110,11 @@ pub(super) async fn execute_with_vault_wait<H: AgentHost>(
     command: &str,
     timeout_secs: Option<u64>,
     wants_progress: bool,
+    mode: ExecMode,
     responder: &Responder,
     cx: &mut AsyncApp,
 ) -> BrokerResult {
-    let first = execute_run_command(conn, snapshot, command, timeout_secs, responder, cx).await;
+    let first = execute_command(conn, snapshot, command, timeout_secs, mode, responder, cx).await;
     if !is_vault_locked(&first) || responder.is_cancelled() {
         return first;
     }
@@ -213,10 +222,155 @@ pub(super) async fn execute_with_vault_wait<H: AgentHost>(
                 )),
                 Postcheck::Ready(ready) => {
                     let (fresh, fresh_conn) = *ready;
-                    execute_run_command(&fresh_conn, &fresh, command, timeout_secs, responder, cx)
-                        .await
+                    execute_command(
+                        &fresh_conn,
+                        &fresh,
+                        command,
+                        timeout_secs,
+                        mode,
+                        responder,
+                        cx,
+                    )
+                    .await
                 }
             }
+        }
+    }
+}
+
+async fn execute_command(
+    conn: &Connection,
+    snapshot: &BrokerSnapshot,
+    command: &str,
+    timeout_secs: Option<u64>,
+    mode: ExecMode,
+    responder: &Responder,
+    cx: &mut AsyncApp,
+) -> BrokerResult {
+    match mode {
+        ExecMode::Buffered => {
+            execute_run_command(conn, snapshot, command, timeout_secs, responder, cx).await
+        }
+        ExecMode::Stream => {
+            execute_stream_command(conn, snapshot, command, timeout_secs, responder, cx).await
+        }
+    }
+}
+
+fn build_spec_and_auth(
+    conn: &Connection,
+    snapshot: &BrokerSnapshot,
+) -> Result<(ConnectSpec, Auth, Approvals), BrokerResult> {
+    let entry = conn.entry_in(&snapshot.connections);
+    let mut spec = match ConnectSpec::from_host_entry(&entry) {
+        Ok(spec) => spec,
+        Err(e) => {
+            return Err(BrokerResult::Error(AgentError::new(
+                AgentErrorCode::SshError,
+                e.to_string(),
+            )));
+        }
+    };
+    if let Some(kh) = &snapshot.known_hosts {
+        spec.known_hosts = Some(kh.clone());
+    } else {
+        #[cfg(debug_assertions)]
+        {
+            spec = crate::shell::with_dev_known_hosts(spec);
+        }
+    }
+    let auth = Auth {
+        vault_keys: conn.vault_key.clone().into_iter().collect(),
+        password_command: conn.password_command.clone(),
+        sudo_command: None,
+        proxy_command: conn.proxy_command.clone(),
+    };
+    let approvals = Approvals::in_dir(Some(snapshot.dir.clone()));
+    Ok((spec, auth, approvals))
+}
+
+async fn execute_stream_command(
+    conn: &Connection,
+    snapshot: &BrokerSnapshot,
+    command: &str,
+    timeout_secs: Option<u64>,
+    responder: &Responder,
+    cx: &mut AsyncApp,
+) -> BrokerResult {
+    let (spec, auth, approvals) = match build_spec_and_auth(conn, snapshot) {
+        Ok(parts) => parts,
+        Err(err) => return err,
+    };
+    let options = ExecStreamOptions::with_timeout(timeout_secs.map(Duration::from_secs));
+    let exec_req = HeadlessExecStream {
+        spec,
+        auth,
+        approvals,
+        command: command.to_owned(),
+        options,
+    };
+
+    let rt = cx.update(|cx| SshRuntime::handle(cx));
+    let cancelled_after_dispatch = Arc::new(AtomicBool::new(false));
+    let mut cancel_rx = Some(responder.cancel_receiver());
+    let mut cancel_bridge: Option<AbortOnDrop> = None;
+    let started = Instant::now();
+
+    let exec_res = headless_login::run_stream(
+        exec_req,
+        |exec_cancel| {
+            let Some(mut rx) = cancel_rx.take() else {
+                return;
+            };
+            let flag = Arc::clone(&cancelled_after_dispatch);
+            cancel_bridge = Some(AbortOnDrop(rt.spawn(async move {
+                if rx.wait_for(|&c| c).await.is_ok() {
+                    flag.store(true, Ordering::Release);
+                    exec_cancel.cancel();
+                }
+            })));
+        },
+        |bytes| async move {
+            responder.send_stdout(&bytes).await;
+        },
+        |bytes| async move {
+            responder.send_stderr(&bytes).await;
+        },
+        cx,
+    )
+    .await;
+    drop(cancel_bridge);
+
+    if cancelled_after_dispatch.load(Ordering::Acquire) && exec_res.is_err() {
+        return BrokerResult::Error(AgentError::new(
+            AgentErrorCode::UnknownOutcome,
+            "client disconnected or interrupted after command was dispatched",
+        ));
+    }
+
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match exec_res {
+        Ok(done) => {
+            let response = ExecStreamResponse {
+                host: conn.name.clone(),
+                exit_code: done.exit_status,
+                signal: done.exit_signal,
+                duration_ms,
+            };
+            match serde_json::to_value(response) {
+                Ok(data) => BrokerResult::Ok { data },
+                Err(e) => {
+                    BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string()))
+                }
+            }
+        }
+        Err(err) => {
+            let err = if err.error == AgentErrorCode::TimedOut {
+                err.with_duration_ms(duration_ms)
+            } else {
+                err
+            };
+            BrokerResult::Error(err)
         }
     }
 }
@@ -229,29 +383,10 @@ pub(super) async fn execute_run_command(
     responder: &Responder,
     cx: &mut AsyncApp,
 ) -> BrokerResult {
-    let entry = conn.entry_in(&snapshot.connections);
-    let mut spec = match ConnectSpec::from_host_entry(&entry) {
-        Ok(spec) => spec,
-        Err(e) => {
-            return BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string()));
-        }
+    let (spec, auth, approvals) = match build_spec_and_auth(conn, snapshot) {
+        Ok(parts) => parts,
+        Err(err) => return err,
     };
-    if let Some(kh) = &snapshot.known_hosts {
-        spec.known_hosts = Some(kh.clone());
-    } else {
-        #[cfg(debug_assertions)]
-        {
-            spec = crate::shell::with_dev_known_hosts(spec);
-        }
-    }
-
-    let auth = Auth {
-        vault_keys: conn.vault_key.clone().into_iter().collect(),
-        password_command: conn.password_command.clone(),
-        sudo_command: None,
-        proxy_command: conn.proxy_command.clone(),
-    };
-    let approvals = Approvals::in_dir(Some(snapshot.dir.clone()));
     let options = ExecOptions::with_timeout(effective_timeout(timeout_secs));
 
     let exec_req = HeadlessExec {
@@ -365,6 +500,14 @@ pub fn format_activity(outcome: &AgentOutcome) -> String {
     match &outcome.result {
         BrokerResult::Ok { data } => {
             if let Ok(resp) = serde_json::from_value::<RunCommandResponse>(data.clone()) {
+                if let Some(code) = resp.exit_code {
+                    return format!("{actor} ran command on {host} (exit {code})");
+                }
+                if let Some(sig) = resp.signal {
+                    let sig = sanitize_display_text(&sig);
+                    return format!("{actor} ran command on {host} (signal {sig})");
+                }
+            } else if let Ok(resp) = serde_json::from_value::<ExecStreamResponse>(data.clone()) {
                 if let Some(code) = resp.exit_code {
                     return format!("{actor} ran command on {host} (exit {code})");
                 }

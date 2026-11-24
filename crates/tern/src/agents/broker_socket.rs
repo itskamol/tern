@@ -7,6 +7,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use tokio::io::BufReader;
 use tokio::sync::{Semaphore, watch};
 
@@ -16,6 +17,8 @@ use super::protocol::{
 };
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 32;
+const STREAM_CHUNK_RAW_BYTES: usize = 32 * 1024;
+const RESPONSE_QUEUE_CAP: usize = 64;
 
 /// Per-connection response and cancellation channel for one accepted `agent.sock` client.
 #[derive(Debug)]
@@ -43,6 +46,34 @@ impl Responder {
                 message: message.into(),
             })
             .await;
+    }
+
+    pub(super) async fn send_stdout(&self, bytes: &[u8]) {
+        for chunk in bytes.chunks(STREAM_CHUNK_RAW_BYTES) {
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(chunk);
+            if self
+                .tx
+                .send(BrokerMessage::StdoutChunk { data_b64 })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+
+    pub(super) async fn send_stderr(&self, bytes: &[u8]) {
+        for chunk in bytes.chunks(STREAM_CHUNK_RAW_BYTES) {
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(chunk);
+            if self
+                .tx
+                .send(BrokerMessage::StderrChunk { data_b64 })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
     }
 
     pub(super) async fn finish(self, result: BrokerResult) {
@@ -158,7 +189,7 @@ async fn serve_connection(
         }
     };
 
-    let (resp_tx, resp_rx) = async_channel::bounded::<BrokerMessage>(8);
+    let (resp_tx, resp_rx) = async_channel::bounded::<BrokerMessage>(RESPONSE_QUEUE_CAP);
     let (cancel_tx, cancel_rx) = watch::channel(false);
 
     if req_tx

@@ -175,6 +175,17 @@ pub struct RunCommandResponse {
     pub duration_ms: u64,
 }
 
+/// Structured terminal response from a streaming `tern exec` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecStreamResponse {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    pub duration_ms: u64,
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -199,6 +210,17 @@ pub enum BrokerRequest {
         #[serde(default, skip_serializing_if = "is_false")]
         wants_progress: bool,
     },
+    /// Streaming command execution used by `tern exec` (unbounded output streamed live as chunks).
+    ExecStream {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
+        host: String,
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wants_progress: bool,
+    },
     /// Signals cancellation of the in-flight request on this connection.
     Cancel,
 }
@@ -211,12 +233,16 @@ pub enum BrokerResult {
     Error(AgentError),
 }
 
-/// Response frames sent from tern to `tern mcp` over `agent.sock`.
+/// Response frames sent from tern to `tern mcp` or `tern exec` over `agent.sock`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrokerMessage {
-    /// Non-terminal status update while waiting on approval or execution.
+    /// Non-terminal status update while waiting on approval, vault unlock, or execution.
     Progress { message: String },
+    /// Base64-encoded raw stdout chunk streamed live from `ExecStream`.
+    StdoutChunk { data_b64: String },
+    /// Base64-encoded raw stderr chunk streamed live from `ExecStream`.
+    StderrChunk { data_b64: String },
     /// Final result for the request; closes the exchange.
     Result(BrokerResult),
 }

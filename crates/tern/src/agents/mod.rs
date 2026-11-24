@@ -8,6 +8,7 @@ pub mod attention;
 pub mod broker;
 mod broker_exec;
 mod broker_socket;
+pub mod exec_cli;
 pub mod grants;
 pub mod headless_login;
 pub mod mcp;

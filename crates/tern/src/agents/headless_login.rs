@@ -7,12 +7,12 @@
 //! locked vault (even when `vault_keychain` opt-in is enabled — never calling `Keeper::need_vault`),
 //! an unapproved command, an unknown host key, a password prompt, or a 2FA challenge.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::AsyncApp;
 use tern_ssh::{
-    ConnectSpec, ExecCancel, ExecError, ExecEvent, ExecOptions, ExecOutput, ExecTimeoutPhase,
-    MemoryKey, Prompt,
+    ConnectSpec, ExecCancel, ExecError, ExecEvent, ExecOptions, ExecOutput, ExecStreamEvent,
+    ExecStreamOptions, ExecStreamResult, ExecTimeoutPhase, MemoryKey, Prompt,
 };
 use tern_vault::Key;
 
@@ -32,32 +32,22 @@ pub struct HeadlessExec {
     pub options: ExecOptions,
 }
 
-/// Runs `req` strictly headlessly on `SshRuntime`, never opening UI or unlocking Keychain.
-///
-/// Calls `on_dispatched` with the [`ExecCancel`] handle at the moment `tern_ssh::exec` is
-/// spawned so callers can distinguish pre-dispatch cancellation from post-dispatch disconnect
-/// (`unknown_outcome`).
-///
-/// # Errors
-/// Returns [`AgentError`] with:
-/// - [`AgentErrorCode::UserActionRequired`] and a specific [`UserActionReason`] when human
-///   interaction (vault unlock, command approval, host-key trust, password, or 2FA) is required;
-/// - [`AgentErrorCode::TimedOut`] when the wall-clock timeout expires;
-/// - [`AgentErrorCode::SshError`] on changed host key (hard stop), authentication rejection,
-///   exec refusal, or transport error.
-pub async fn run(
-    req: HeadlessExec,
-    on_dispatched: impl FnOnce(ExecCancel),
-    cx: &mut AsyncApp,
-) -> Result<ExecOutput, AgentError> {
-    let HeadlessExec {
-        mut spec,
-        auth,
-        approvals,
-        command,
-        options,
-    } = req;
+/// Inputs for one isolated, headless streaming SSH `exec_stream` call on a Saved connection.
+#[derive(Debug)]
+pub struct HeadlessExecStream {
+    pub spec: ConnectSpec,
+    pub auth: Auth,
+    pub approvals: Approvals,
+    pub command: String,
+    pub options: ExecStreamOptions,
+}
 
+fn prepare_headless_spec(
+    mut spec: ConnectSpec,
+    auth: &Auth,
+    approvals: &Approvals,
+    cx: &mut AsyncApp,
+) -> Result<ConnectSpec, AgentError> {
     // 1. Refuse unapproved ProxyCommand before dialing anything.
     if let Some(proxy_cmd) = &auth.proxy_command
         && approvals.ask(Purpose::Proxy, proxy_cmd).is_some()
@@ -96,6 +86,35 @@ pub async fn run(
     // 3. Enforce isolation defensively (ADR 0003).
     spec.forward_agent = false;
     spec.forwards.clear();
+    Ok(spec)
+}
+
+/// Runs `req` strictly headlessly on `SshRuntime`, never opening UI or unlocking Keychain.
+///
+/// Calls `on_dispatched` with the [`ExecCancel`] handle at the moment `tern_ssh::exec` is
+/// spawned so callers can distinguish pre-dispatch cancellation from post-dispatch disconnect
+/// (`unknown_outcome`).
+///
+/// # Errors
+/// Returns [`AgentError`] with:
+/// - [`AgentErrorCode::UserActionRequired`] and a specific [`UserActionReason`] when human
+///   interaction (vault unlock, command approval, host-key trust, password, or 2FA) is required;
+/// - [`AgentErrorCode::TimedOut`] when the wall-clock timeout expires;
+/// - [`AgentErrorCode::SshError`] on changed host key (hard stop), authentication rejection,
+///   exec refusal, or transport error.
+pub async fn run(
+    req: HeadlessExec,
+    on_dispatched: impl FnOnce(ExecCancel),
+    cx: &mut AsyncApp,
+) -> Result<ExecOutput, AgentError> {
+    let HeadlessExec {
+        spec,
+        auth,
+        approvals,
+        command,
+        options,
+    } = req;
+    let spec = prepare_headless_spec(spec, &auth, &approvals, cx)?;
 
     let host = spec.host.clone();
     let port = spec.port;
@@ -134,6 +153,76 @@ pub async fn run(
     Err(AgentError::new(
         AgentErrorCode::SshError,
         "ssh exec channel ended unexpectedly",
+    ))
+}
+
+/// Runs a streaming isolated SSH `exec_stream` headlessly, invoking `on_stdout` and `on_stderr`
+/// as each raw chunk arrives from the remote command.
+///
+/// # Errors
+/// Returns [`AgentError`] with the same fail-closed classification as [`run`].
+pub async fn run_stream<FOut, FutOut, FErr, FutErr>(
+    req: HeadlessExecStream,
+    on_dispatched: impl FnOnce(ExecCancel),
+    mut on_stdout: FOut,
+    mut on_stderr: FErr,
+    cx: &mut AsyncApp,
+) -> Result<ExecStreamResult, AgentError>
+where
+    FOut: FnMut(Vec<u8>) -> FutOut,
+    FutOut: std::future::Future<Output = ()>,
+    FErr: FnMut(Vec<u8>) -> FutErr,
+    FutErr: std::future::Future<Output = ()>,
+{
+    let HeadlessExecStream {
+        spec,
+        auth,
+        approvals,
+        command,
+        options,
+    } = req;
+    let spec = prepare_headless_spec(spec, &auth, &approvals, cx)?;
+
+    let host = spec.host.clone();
+    let port = spec.port;
+    let deadline = Instant::now()
+        + options
+            .effective_timeout()
+            .unwrap_or(Duration::from_secs(30));
+    let rt = cx.update(|cx| SshRuntime::handle(cx));
+
+    let mut stream = tern_ssh::exec_stream(spec, command, options, &rt);
+    on_dispatched(stream.cancel_handle());
+
+    let prompt_ctx = PromptContext {
+        host: &host,
+        port,
+        password_command: auth.password_command.as_deref(),
+        approvals: &approvals,
+        deadline,
+    };
+    let mut ladder = Ladder::default();
+    let mut prompt_failure: Option<AgentError> = None;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            ExecStreamEvent::Prompt(prompt) => {
+                prompt_failure = handle_prompt(prompt, &mut ladder, &prompt_ctx, cx).await;
+            }
+            ExecStreamEvent::Stdout(bytes) => on_stdout(bytes).await,
+            ExecStreamEvent::Stderr(bytes) => on_stderr(bytes).await,
+            ExecStreamEvent::Finished(result) => {
+                return match result {
+                    Ok(done) => Ok(done),
+                    Err(exec_err) => Err(resolve_exec_error(&exec_err, prompt_failure)),
+                };
+            }
+        }
+    }
+
+    Err(AgentError::new(
+        AgentErrorCode::SshError,
+        "ssh exec stream ended unexpectedly",
     ))
 }
 

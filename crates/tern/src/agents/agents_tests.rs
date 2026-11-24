@@ -1553,3 +1553,161 @@ fn vault_unlock_wait_resumes_once_and_never_runs_expired_or_cancelled_requests()
     );
     assert_eq!(server.connections.load(Ordering::SeqCst), 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn tern_exec_streams_before_exit_separates_stdout_stderr_preserves_exit_code_and_handles_cancel() {
+    use tokio::io::AsyncReadExt as _;
+    use tokio::sync::watch;
+
+    use super::exec_cli::{ExecCliArgs, run_client};
+
+    let dir = tempfile::tempdir().unwrap();
+    let release_gate = Arc::new(tokio::sync::Notify::new());
+    let release_srv = Arc::clone(&release_gate);
+    let server = TestSshServer::start(ServerAuth::Password(TEST_PASSWORD), move |cmd| {
+        if cmd == "follow-logs" {
+            ExecReply {
+                stdout: b"tail-line-1\n".to_vec(),
+                stderr: Vec::new(),
+                exit_status: 0,
+                delay: Duration::ZERO,
+                ack: true,
+                delay_after_output: Duration::from_secs(30),
+            }
+        } else {
+            let _ = &release_srv;
+            ExecReply {
+                stdout: b"first-line\n".to_vec(),
+                stderr: b"warn-line\n".to_vec(),
+                exit_status: 7,
+                delay: Duration::ZERO,
+                ack: true,
+                delay_after_output: Duration::from_millis(600),
+            }
+        }
+    });
+    let known_hosts = server.write_known_hosts(dir.path());
+    let alpha = saved_password_conn("alpha", server.port);
+    approve_password_cmd(dir.path(), &alpha);
+
+    let mut app = TestApp::new();
+    app.update(|cx| SshRuntime::install(cx).unwrap());
+    let host = app.update(|cx| {
+        cx.new(|cx| {
+            let mut h = FakeHost::new(dir.path().to_path_buf(), known_hosts, vec![alpha.clone()]);
+            let fp = GrantFingerprint::for_connection(&alpha, &h.connections);
+            h.grants.insert("alpha", fp, SystemTime::now());
+            h.start_broker(cx);
+            h
+        })
+    });
+    let sock = socket_path(dir.path());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // 1. Live streaming: first stdout line arrives BEFORE exit; stderr stays separate; exit code 7.
+    let (mut out_w, mut out_r) = tokio::io::duplex(16 * 1024);
+    let (mut err_w, mut err_r) = tokio::io::duplex(16 * 1024);
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let sock1 = sock.clone();
+    let client_task = rt.spawn(async move {
+        let code = run_client(
+            &sock1,
+            ExecCliArgs {
+                host: "alpha".into(),
+                command: "build".into(),
+                timeout_secs: None,
+            },
+            &mut out_w,
+            &mut err_w,
+            cancel_rx,
+        )
+        .await
+        .unwrap();
+        drop(out_w);
+        drop(err_w);
+        code
+    });
+
+    // Pump GPUI while waiting for the first streamed chunk BEFORE the 600ms exit delay finishes.
+    let first_chunk_task = rt.spawn(async move {
+        let mut buf = vec![0u8; 64];
+        let n = out_r.read(&mut buf).await.unwrap();
+        let first = String::from_utf8(buf[..n].to_vec()).unwrap();
+        let mut rest = Vec::new();
+        out_r.read_to_end(&mut rest).await.unwrap();
+        let mut err_buf = Vec::new();
+        err_r.read_to_end(&mut err_buf).await.unwrap();
+        (
+            first,
+            String::from_utf8(rest).unwrap(),
+            String::from_utf8(err_buf).unwrap(),
+        )
+    });
+
+    wait_until(&mut app, |_| {
+        client_task.is_finished() && first_chunk_task.is_finished()
+    });
+    let exit_code = rt.block_on(client_task).unwrap();
+    let (first_out, rest_out, stderr_text) = rt.block_on(first_chunk_task).unwrap();
+    assert_eq!(exit_code, 7);
+    assert_eq!(format!("{first_out}{rest_out}"), "first-line\n");
+    assert_eq!(stderr_text, "warn-line\n");
+    app.update(|cx| {
+        assert_eq!(
+            host.read(cx).activities.last().map(String::as_str),
+            Some("tern exec ran command on alpha (exit 7)")
+        );
+    });
+
+    // 2. Ctrl-C during follow stream returns 130 promptly after first line arrives.
+    let (mut out_w, mut out_r) = tokio::io::duplex(16 * 1024);
+    let (mut err_w, mut err_r) = tokio::io::duplex(16 * 1024);
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let follow_task = rt.spawn(async move {
+        let code = run_client(
+            &sock,
+            ExecCliArgs {
+                host: "alpha".into(),
+                command: "follow-logs".into(),
+                timeout_secs: None,
+            },
+            &mut out_w,
+            &mut err_w,
+            cancel_rx,
+        )
+        .await
+        .unwrap();
+        drop(out_w);
+        drop(err_w);
+        code
+    });
+
+    let first_follow = rt.spawn(async move {
+        let mut buf = vec![0u8; 64];
+        let n = out_r.read(&mut buf).await.unwrap();
+        String::from_utf8(buf[..n].to_vec()).unwrap()
+    });
+
+    wait_until(&mut app, |_| first_follow.is_finished());
+    assert_eq!(rt.block_on(first_follow).unwrap(), "tail-line-1\n");
+    // Simulate Ctrl-C while remote follow command is still running (30s sleep).
+    cancel_tx.send_replace(true);
+    wait_until(&mut app, |_| follow_task.is_finished());
+    assert_eq!(rt.block_on(follow_task).unwrap(), 130);
+
+    let err_out = rt.block_on(async move {
+        let mut s = String::new();
+        err_r.read_to_string(&mut s).await.unwrap();
+        s
+    });
+    assert!(
+        err_out.contains("remote process stop is not guaranteed"),
+        "expected honest RFC 4254 signal note in stderr, got: {err_out}"
+    );
+    let _ = host;
+}

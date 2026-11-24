@@ -27,15 +27,15 @@ pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 pub const EXEC_OUTPUT_CAP: usize = 64 * 1024;
 
 /// RFC 4254 §5.2 `SSH_EXTENDED_DATA_STDERR`.
-const SSH_EXTENDED_DATA_STDERR: u32 = 1;
+pub(crate) const SSH_EXTENDED_DATA_STDERR: u32 = 1;
 /// Capacity of the internal/public exec event queues (at most one prompt is in flight at once).
 const EXEC_EVENT_QUEUE: usize = 4;
 /// Grace window after `exit-status` / `exit-signal` for the server to close the channel.
-const EXIT_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// How long to wait for russh to report why an unexpectedly dropped connection ended.
-const CAUSE_GRACE: Duration = Duration::from_millis(500);
+pub(crate) const CAUSE_GRACE: Duration = Duration::from_millis(500);
 /// Upper bound on clean SSH disconnect + proxy child shutdown before dropping the transport.
-const DISCONNECT_GRACE: Duration = Duration::from_millis(500);
+pub(crate) const DISCONNECT_GRACE: Duration = Duration::from_millis(500);
 
 /// Configuration for a single isolated non-PTY [`exec`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,16 +204,20 @@ pub struct ExecCancel {
 }
 
 impl ExecCancel {
+    pub(crate) fn new(tx: watch::Sender<bool>) -> Self {
+        Self { tx }
+    }
+
     /// Signals the running [`Exec`] to abort and tear down its SSH connection.
     pub fn cancel(&self) {
         self.tx.send_replace(true);
     }
 }
 
-struct CancelSignal(watch::Receiver<bool>);
+pub(crate) struct CancelSignal(pub(crate) watch::Receiver<bool>);
 
 impl CancelSignal {
-    async fn wait(&mut self) {
+    pub(crate) async fn wait(&mut self) {
         let _ = self.0.wait_for(|&cancelled| cancelled).await;
     }
 }
@@ -549,7 +553,7 @@ async fn run_channel(
     })
 }
 
-fn describe_drop(reason: Option<&Disconnect>) -> &'static str {
+pub(crate) fn describe_drop(reason: Option<&Disconnect>) -> &'static str {
     match reason {
         Some(Disconnect::Timeout) => "connection timed out before command finished",
         Some(Disconnect::Reset) => "connection reset before command finished",
@@ -583,7 +587,7 @@ fn parse_hop(label: &str) -> Option<(String, u16)> {
         .and_then(|(host, port)| Some((host.to_owned(), port.parse().ok()?)))
 }
 
-fn map_failure(failure: Failure, timeout: Duration) -> ExecError {
+pub(crate) fn map_failure(failure: Failure, timeout: Duration) -> ExecError {
     let message = failure.to_string();
     map_failure_inner(failure, None, message, timeout)
 }

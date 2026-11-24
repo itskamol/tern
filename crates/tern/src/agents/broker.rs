@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::attention::AttentionCue;
-use super::broker_exec::{AbortOnDrop, caller_display, execute_with_vault_wait};
+use super::broker_exec::{AbortOnDrop, ExecMode, caller_display, execute_with_vault_wait};
 pub use super::broker_exec::{build_run_command_prompt, format_activity, summarize_command};
 use super::broker_socket::{IncomingRequest, Responder, bind_and_serve};
 use super::grants::GrantFingerprint;
@@ -222,6 +222,29 @@ async fn handle_incoming<H: AgentHost>(
                     command,
                     timeout_secs,
                     wants_progress,
+                    mode: ExecMode::Buffered,
+                },
+                &responder,
+                cx,
+            )
+            .await
+        }
+        BrokerRequest::ExecStream {
+            caller,
+            host: target_host,
+            command,
+            timeout_secs,
+            wants_progress,
+        } => {
+            handle_run_command(
+                &host,
+                RunCommandCall {
+                    caller,
+                    target_host,
+                    command,
+                    timeout_secs,
+                    wants_progress,
+                    mode: ExecMode::Stream,
                 },
                 &responder,
                 cx,
@@ -356,6 +379,7 @@ struct RunCommandCall {
     command: String,
     timeout_secs: Option<u64>,
     wants_progress: bool,
+    mode: ExecMode,
 }
 
 pub(super) struct CommandRequest<'a, H> {
@@ -414,6 +438,7 @@ async fn handle_run_command<H: AgentHost>(
         command,
         timeout_secs,
         wants_progress,
+        mode,
     } = call;
     let req = CommandRequest {
         host,
@@ -489,6 +514,7 @@ async fn handle_run_command<H: AgentHost>(
                 &command,
                 timeout_secs,
                 wants_progress,
+                mode,
                 responder,
                 cx,
             )
@@ -662,6 +688,7 @@ async fn handle_run_command<H: AgentHost>(
         &command,
         timeout_secs,
         wants_progress,
+        mode,
         responder,
         cx,
     )

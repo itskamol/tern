@@ -731,6 +731,7 @@ async fn call_broker(
                             tracing::debug!(progress = %message, "mcp_broker_progress");
                         }
                     }
+                    Ok(BrokerMessage::StdoutChunk { .. } | BrokerMessage::StderrChunk { .. }) => {}
                     Ok(BrokerMessage::Result(result)) => return Some(result),
                     Err(e) => {
                         tracing::warn!(error = %e, "mcp_broker_bad_frame");

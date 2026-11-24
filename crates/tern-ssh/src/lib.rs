@@ -12,6 +12,7 @@ mod config;
 mod connect;
 mod error;
 mod exec;
+mod exec_stream;
 mod files;
 mod files_local;
 mod files_sftp;
@@ -35,6 +36,9 @@ pub use error::{Disconnect, Error, ForwardError, InputError, Result};
 pub use exec::{
     DEFAULT_EXEC_TIMEOUT, EXEC_OUTPUT_CAP, Exec, ExecCancel, ExecError, ExecEvent, ExecOptions,
     ExecOutput, ExecPartialOutput, ExecTimeoutPhase, MAX_EXEC_TIMEOUT, MIN_EXEC_TIMEOUT, exec,
+};
+pub use exec_stream::{
+    ExecStream, ExecStreamEvent, ExecStreamOptions, ExecStreamResult, exec_stream,
 };
 pub use files::{
     Call, FileEntry, FileError, FileSource, LocalFs, PART_SUFFIX, Reader, SftpFiles, Writer,

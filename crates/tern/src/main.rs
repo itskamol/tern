@@ -82,10 +82,74 @@ enum Cli {
     Refuse(String),
     VaultInit,
     Mcp,
+    Exec(agents::exec_cli::ExecCliArgs),
+}
+
+fn parse_exec_args(rest: &[String], usage: &str) -> Cli {
+    let exec_usage = "usage: tern exec [--timeout <secs>] <host> -- <command...>";
+    let mut timeout_secs: Option<u64> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-h" | "--help" => return Cli::Print(format!("{exec_usage}\n\n{usage}")),
+            "-t" | "--timeout" => {
+                let Some(val) = rest.get(i + 1) else {
+                    return Cli::Refuse(format!("missing value for {}\n{exec_usage}", rest[i]));
+                };
+                match val.parse::<u64>() {
+                    Ok(secs) if secs >= 1 => timeout_secs = Some(secs),
+                    _ => {
+                        return Cli::Refuse(format!(
+                            "invalid timeout '{val}' (expected positive integer seconds)\n{exec_usage}"
+                        ));
+                    }
+                }
+                i += 2;
+            }
+            flag if flag.starts_with("--timeout=") => {
+                let val = &flag["--timeout=".len()..];
+                match val.parse::<u64>() {
+                    Ok(secs) if secs >= 1 => timeout_secs = Some(secs),
+                    _ => {
+                        return Cli::Refuse(format!(
+                            "invalid timeout '{val}' (expected positive integer seconds)\n{exec_usage}"
+                        ));
+                    }
+                }
+                i += 1;
+            }
+            "--" => {
+                i += 1;
+                break;
+            }
+            flag if flag.starts_with('-') => {
+                return Cli::Refuse(format!("unknown option {flag} for exec\n{exec_usage}"));
+            }
+            _ => break,
+        }
+    }
+
+    let Some(host) = rest.get(i) else {
+        return Cli::Refuse(format!("missing host for exec\n{exec_usage}"));
+    };
+    i += 1;
+    if rest.get(i).map(String::as_str) == Some("--") {
+        i += 1;
+    }
+    let cmd_parts = &rest[i..];
+    if cmd_parts.is_empty() {
+        return Cli::Refuse(format!("missing command for exec\n{exec_usage}"));
+    }
+    let command = cmd_parts.join(" ");
+    Cli::Exec(agents::exec_cli::ExecCliArgs {
+        host: host.clone(),
+        command,
+        timeout_secs,
+    })
 }
 
 fn parse_cli(args: &[String]) -> Cli {
-    let usage = "usage: tern [alias | user@host[:port]]\n       tern mcp\n       tern vault init   (passphrase, then PIN, on standard input)";
+    let usage = "usage: tern [alias | user@host[:port]]\n       tern exec [--timeout <secs>] <host> -- <command...>\n       tern mcp\n       tern vault init   (passphrase, then PIN, on standard input)";
     match args.first().map(String::as_str) {
         None => Cli::Open(None),
         Some("-V" | "--version") => Cli::Print(format!("tern {}", env!("CARGO_PKG_VERSION"))),
@@ -96,6 +160,7 @@ fn parse_cli(args: &[String]) -> Cli {
             Some([flag]) if flag == "-h" || flag == "--help" => Cli::Print(usage.to_owned()),
             _ => Cli::Refuse(format!("invalid arguments for mcp\n{usage}")),
         },
+        Some("exec") => parse_exec_args(&args[1..], usage),
         Some(flag) if flag.starts_with('-') => {
             Cli::Refuse(format!("unknown option {flag}\n{usage}"))
         }
@@ -134,6 +199,13 @@ fn main() {
             }
             return;
         }
+        Cli::Exec(exec_args) => match agents::exec_cli::run(exec_args) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("tern exec failed: {e}");
+                std::process::exit(1);
+            }
+        },
     };
     let _log_guard = init_logging();
     // One tern per settings folder: a second launch hands its host to the first and exits.
@@ -339,5 +411,50 @@ mod cli_tests {
             Cli::Refuse(_)
         ));
         assert_eq!(parse_cli(&args(&["vault", "init"])), Cli::VaultInit);
+    }
+
+    #[test]
+    fn exec_subcommand_parses_host_command_and_optional_timeout() {
+        use crate::agents::exec_cli::ExecCliArgs;
+
+        assert_eq!(
+            parse_cli(&args(&[
+                "exec",
+                "alpha",
+                "--",
+                "tail -n 30 -F ~/.pm2/logs/server-error.log"
+            ])),
+            Cli::Exec(ExecCliArgs {
+                host: "alpha".into(),
+                command: "tail -n 30 -F ~/.pm2/logs/server-error.log".into(),
+                timeout_secs: None,
+            })
+        );
+        assert_eq!(
+            parse_cli(&args(&["exec", "--timeout", "15", "alpha", "--", "uptime"])),
+            Cli::Exec(ExecCliArgs {
+                host: "alpha".into(),
+                command: "uptime".into(),
+                timeout_secs: Some(15),
+            })
+        );
+        assert_eq!(
+            parse_cli(&args(&["exec", "--timeout=45", "alpha", "ls", "-la"])),
+            Cli::Exec(ExecCliArgs {
+                host: "alpha".into(),
+                command: "ls -la".into(),
+                timeout_secs: Some(45),
+            })
+        );
+        assert!(matches!(parse_cli(&args(&["exec", "-h"])), Cli::Print(_)));
+        assert!(matches!(parse_cli(&args(&["exec"])), Cli::Refuse(_)));
+        assert!(matches!(
+            parse_cli(&args(&["exec", "alpha"])),
+            Cli::Refuse(_)
+        ));
+        assert!(matches!(
+            parse_cli(&args(&["exec", "--timeout", "0", "alpha", "--", "ls"])),
+            Cli::Refuse(_)
+        ));
     }
 }

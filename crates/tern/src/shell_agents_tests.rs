@@ -109,7 +109,9 @@ fn send_broker_request(sock: &Path, request: BrokerRequest, app: &TestApp) -> Br
                 .unwrap()
                 .expect("broker closed before response");
             match serde_json::from_str::<BrokerMessage>(&line).unwrap() {
-                BrokerMessage::Progress { .. } => {}
+                BrokerMessage::Progress { .. }
+                | BrokerMessage::StdoutChunk { .. }
+                | BrokerMessage::StderrChunk { .. } => {}
                 BrokerMessage::Result(result) => {
                     let _ = tx.send(result).await;
                     break;

@@ -18,8 +18,8 @@ use russh::server::{self, Auth, Msg, Response, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig};
 use tern_ssh::{
     DEFAULT_EXEC_TIMEOUT, EXEC_OUTPUT_CAP, ExecError, ExecOptions, ExecPartialOutput,
-    ExecTimeoutPhase, Forward, JumpHop, MAX_EXEC_TIMEOUT, MIN_EXEC_TIMEOUT, MemoryKey, Prompt,
-    SecretString, SessionEvent, exec,
+    ExecStreamEvent, ExecStreamOptions, ExecTimeoutPhase, Forward, JumpHop, MAX_EXEC_TIMEOUT,
+    MIN_EXEC_TIMEOUT, MemoryKey, Prompt, SecretString, SessionEvent, exec, exec_stream,
 };
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -442,6 +442,98 @@ async fn timeout_while_running_preserves_bounded_partial_stdout_and_stderr() {
     assert!(partial.stdout_truncated);
     assert_eq!(partial.stderr, b"waiting for lock\n");
     assert!(!partial.stderr_truncated);
+    wait_active(&server.active, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_stream_delivers_first_line_before_exit_separates_streams_and_cancels_cleanly() {
+    let release = Arc::new(Notify::new());
+    let release_srv = Arc::clone(&release);
+    let server = serve_exec(move |ctx: ExecCtx| {
+        let release = Arc::clone(&release_srv);
+        async move {
+            let _ = ctx.handle.channel_success(ctx.channel).await;
+            let _ = ctx.stdin_eof.await;
+            if ctx.command == "follow" {
+                let _ = ctx.handle.data(ctx.channel, b"follow-1\n".to_vec()).await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            } else {
+                let _ = ctx.handle.data(ctx.channel, b"line-1\n".to_vec()).await;
+                let _ = ctx
+                    .handle
+                    .extended_data(ctx.channel, 1, b"err-1\n".to_vec())
+                    .await;
+                release.notified().await;
+                let _ = ctx.handle.data(ctx.channel, b"line-2\n".to_vec()).await;
+                let _ = ctx.handle.eof(ctx.channel).await;
+                let _ = ctx.handle.exit_status_request(ctx.channel, 7).await;
+                let _ = ctx.handle.close(ctx.channel).await;
+            }
+        }
+    })
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = known_spec(&server, &dir);
+
+    // 1. First stdout + stderr chunks arrive BEFORE the remote command finishes; exit code 7 kept.
+    let mut stream = exec_stream(s.clone(), "build", ExecStreamOptions::default(), &rt());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    while stdout.is_empty() || stderr.is_empty() {
+        match tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("timed out waiting for initial streamed output")
+            .unwrap()
+        {
+            ExecStreamEvent::Stdout(b) => stdout.extend_from_slice(&b),
+            ExecStreamEvent::Stderr(b) => stderr.extend_from_slice(&b),
+            other => panic!("unexpected event before release: {other:?}"),
+        }
+    }
+    assert_eq!(stdout, b"line-1\n");
+    assert_eq!(stderr, b"err-1\n");
+
+    // Only now allow the remote command to emit its second line and exit with status 7.
+    release.notify_one();
+    let done = loop {
+        match tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("timed out waiting for stream completion")
+            .unwrap()
+        {
+            ExecStreamEvent::Stdout(b) => stdout.extend_from_slice(&b),
+            ExecStreamEvent::Stderr(b) => stderr.extend_from_slice(&b),
+            ExecStreamEvent::Finished(res) => break res.unwrap(),
+            ExecStreamEvent::Prompt(_) => panic!("unexpected prompt"),
+        }
+    };
+    assert_eq!(stdout, b"line-1\nline-2\n");
+    assert_eq!(stderr, b"err-1\n");
+    assert_eq!(done.exit_status, Some(7));
+    wait_active(&server.active, 0).await;
+
+    // 2. Cancelling a long-running follow stream tears down cleanly.
+    let mut follow = exec_stream(s, "follow", ExecStreamOptions::default(), &rt());
+    let cancel = follow.cancel_handle();
+    let first = tokio::time::timeout(Duration::from_secs(5), follow.next())
+        .await
+        .expect("timed out waiting for follow first chunk")
+        .unwrap();
+    assert!(matches!(first, ExecStreamEvent::Stdout(ref b) if b == b"follow-1\n"));
+    cancel.cancel();
+    let finished = loop {
+        match tokio::time::timeout(Duration::from_secs(5), follow.next())
+            .await
+            .expect("timed out waiting for cancelled follow finish")
+            .unwrap()
+        {
+            ExecStreamEvent::Finished(res) => break res,
+            ExecStreamEvent::Stdout(_) | ExecStreamEvent::Stderr(_) => {}
+            ExecStreamEvent::Prompt(_) => panic!("unexpected prompt"),
+        }
+    };
+    assert_eq!(finished.unwrap_err(), ExecError::Cancelled);
     wait_active(&server.active, 0).await;
 }
 
