@@ -4,7 +4,9 @@
 //! while exposing typed read-only service status checks over stdio (`tern mcp`) and a dedicated
 //! `0o600` local Unix socket (`agent.sock`).
 
+pub mod attention;
 pub mod broker;
+mod broker_exec;
 mod broker_socket;
 pub mod grants;
 pub mod headless_login;

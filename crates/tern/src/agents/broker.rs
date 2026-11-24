@@ -7,17 +7,17 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use chrono::Utc;
 use gpui::{AsyncApp, Context, Task, WeakEntity};
 use serde::{Deserialize, Serialize};
-use tern_ssh::{ConnectSpec, ExecOptions};
 use tokio::sync::watch;
 
-use super::broker_socket::{IncomingRequest, bind_and_serve};
+use super::attention::AttentionCue;
+pub use super::broker_exec::build_service_status_prompt;
+use super::broker_exec::{AbortOnDrop, caller_display, execute_service_status};
+use super::broker_socket::{IncomingRequest, Responder, bind_and_serve};
 use super::grants::GrantFingerprint;
-use super::headless_login::{self, HeadlessExec};
 use super::protocol::{
     AgentError, AgentErrorCode, AllowedHost, BrokerRequest, BrokerResult, ListHostsResponse,
 };
@@ -25,10 +25,8 @@ use super::store::AgentConfig;
 use super::systemctl;
 use crate::connections::Connection;
 use crate::decisions::{
-    DecisionChoice, DecisionOutcome, DecisionPrompt, PendingDecision, QueueFull,
-    sanitize_display_text,
+    DecisionOutcome, DecisionPrompt, PendingDecision, QueueFull, sanitize_display_text,
 };
-use crate::password_command::{Approvals, Auth};
 use crate::platform::SshRuntime;
 
 /// Decision button identifier for one-time execution approval.
@@ -37,6 +35,11 @@ pub const CHOICE_ALLOW_ONCE: &str = "allow_once";
 pub const CHOICE_ALLOW_UNTIL_LOCK: &str = "allow_until_lock";
 /// Decision button identifier for declining the request.
 pub const CHOICE_DENY: &str = "deny";
+/// Default wall-clock deadline before an unanswered Agent Decision expires with `timed_out`.
+pub const DEFAULT_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Progress message sent while an Agent request is waiting for human approval in tern.
+pub const WAITING_FOR_APPROVAL_MESSAGE: &str = "Waiting for approval in tern...";
 
 const LIST_HOSTS_USAGE: &str = "Call service_status with an alias from hosts and one of its listed services. Optional timeout_secs defaults to 15 (clamped to 1..=60).";
 const MAX_PENDING_REQUESTS: usize = 32;
@@ -99,6 +102,11 @@ pub trait AgentHost: Sized + 'static {
         cx: &mut Context<Self>,
     );
 
+    /// Wall-clock duration before an unanswered Agent Decision expires with `timed_out`.
+    fn agent_decision_timeout(&self) -> Duration {
+        DEFAULT_DECISION_TIMEOUT
+    }
+
     /// Enqueues an Agent approval Decision.
     ///
     /// # Errors
@@ -109,6 +117,10 @@ pub trait AgentHost: Sized + 'static {
         deadline: Option<Instant>,
         cx: &mut Context<Self>,
     ) -> Result<PendingDecision, QueueFull>;
+
+    /// Triggers a non-focus-stealing attention cue when a new Agent Decision is enqueued while
+    /// tern is not the active app.
+    fn notify_agent_attention(&mut self, _cue: &AttentionCue, _cx: &mut Context<Self>) {}
 
     /// Hook called when a `service_status` request finishes (seam for #64 audit + Activity).
     fn on_agent_outcome(&mut self, _outcome: &AgentOutcome, _cx: &mut Context<Self>) {}
@@ -188,7 +200,20 @@ async fn handle_incoming<H: AgentHost>(
             host: target_host,
             service,
             timeout_secs,
-        } => handle_service_status(&host, caller, target_host, service, timeout_secs, cx).await,
+            wants_progress,
+        } => {
+            handle_service_status(
+                &host,
+                caller,
+                target_host,
+                service,
+                timeout_secs,
+                wants_progress,
+                &responder,
+                cx,
+            )
+            .await
+        }
         BrokerRequest::Cancel => BrokerResult::Error(AgentError::new(
             AgentErrorCode::Denied,
             "unexpected cancel frame",
@@ -305,12 +330,15 @@ impl<H: AgentHost> ServiceRequest<'_, H> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_service_status<H: AgentHost>(
     host: &WeakEntity<H>,
     caller: Option<String>,
     target_host: String,
     service: String,
     timeout_secs: Option<u64>,
+    wants_progress: bool,
+    responder: &Responder,
     cx: &mut AsyncApp,
 ) -> BrokerResult {
     let req = ServiceRequest {
@@ -319,6 +347,16 @@ async fn handle_service_status<H: AgentHost>(
         target_host,
         service,
     };
+
+    if responder.is_cancelled() {
+        return req.fail(
+            None,
+            AgentDecision::Cancelled,
+            AgentErrorCode::Denied,
+            "request cancelled by agent",
+            cx,
+        );
+    }
 
     let Ok(precheck) = host.update(cx, |h, cx| {
         let snapshot = h.agent_snapshot();
@@ -380,9 +418,25 @@ async fn handle_service_status<H: AgentHost>(
             conn,
             command,
         } => {
-            let res =
-                execute_service_status(&conn, &snapshot, &req.service, &command, timeout_secs, cx)
-                    .await;
+            if responder.is_cancelled() {
+                return req.fail(
+                    Some(&command),
+                    AgentDecision::Cancelled,
+                    AgentErrorCode::Denied,
+                    "request cancelled by agent",
+                    cx,
+                );
+            }
+            let res = execute_service_status(
+                &conn,
+                &snapshot,
+                &req.service,
+                &command,
+                timeout_secs,
+                responder,
+                cx,
+            )
+            .await;
             req.report(Some(&command), AgentDecision::GrantReused, &res, cx);
             return res;
         }
@@ -393,10 +447,15 @@ async fn handle_service_status<H: AgentHost>(
         } => (conn, command, fingerprint),
     };
 
-    // Ask explicit human approval via the click-only Decision queue.
-    // #62 adds a 60 s deadline & background attention cues here.
+    // Ask explicit human approval via the click-only Decision queue with a 60 s default deadline.
     let prompt = build_service_status_prompt(&req.caller, &conn, &command);
-    let pending = match host.update(cx, |h, cx| h.ask_agent_decision(prompt, None, cx)) {
+    let cue = AttentionCue::for_service_status(&req.caller, &conn.name, &req.service);
+    let pending = match host.update(cx, |h, cx| {
+        let deadline = Instant::now() + h.agent_decision_timeout();
+        let pending = h.ask_agent_decision(prompt, Some(deadline), cx)?;
+        h.notify_agent_attention(&cue, cx);
+        Ok::<_, QueueFull>(pending)
+    }) {
         Ok(Ok(pending)) => pending,
         Ok(Err(QueueFull)) => {
             return req.fail(
@@ -415,7 +474,23 @@ async fn handle_service_status<H: AgentHost>(
         }
     };
 
-    let decision = match pending.wait().await {
+    let (_, waiter, decision_cancel) = pending.into_parts();
+    let rt = cx.update(|cx| SshRuntime::handle(cx));
+    let mut cancel_rx = responder.cancel_receiver();
+    let cancel_bridge = AbortOnDrop(rt.spawn(async move {
+        if cancel_rx.wait_for(|&c| c).await.is_ok() {
+            decision_cancel.cancel();
+        }
+    }));
+
+    if wants_progress && !responder.is_cancelled() {
+        responder.send_progress(WAITING_FOR_APPROVAL_MESSAGE).await;
+    }
+
+    let outcome = waiter.wait().await;
+    drop(cancel_bridge);
+
+    let decision = match outcome {
         DecisionOutcome::Chosen(choice) if choice == CHOICE_ALLOW_ONCE => AgentDecision::AllowOnce,
         DecisionOutcome::Chosen(choice) if choice == CHOICE_ALLOW_UNTIL_LOCK => {
             AgentDecision::AllowUntilLock
@@ -445,11 +520,16 @@ async fn handle_service_status<H: AgentHost>(
                     cx,
                 );
             }
+            let message = if responder.is_cancelled() {
+                "request cancelled by agent"
+            } else {
+                "request cancelled in tern"
+            };
             return req.fail(
                 Some(&command),
                 AgentDecision::Cancelled,
                 AgentErrorCode::Denied,
-                "request cancelled in tern",
+                message,
                 cx,
             );
         }
@@ -463,6 +543,18 @@ async fn handle_service_status<H: AgentHost>(
             );
         }
     };
+
+    // Guard against a click racing with cancellation right before SSH exec is dispatched:
+    // never record a Grant or dial SSH if the caller already cancelled or disconnected.
+    if responder.is_cancelled() {
+        return req.fail(
+            Some(&command),
+            AgentDecision::Cancelled,
+            AgentErrorCode::Denied,
+            "request cancelled by agent",
+            cx,
+        );
+    }
 
     // Re-read current Saved connections, allowlist, and live fingerprint before dialing or recording
     // a Grant in case settings changed while the Decision was open.
@@ -520,94 +612,16 @@ async fn handle_service_status<H: AgentHost>(
         Postcheck::Ready(ready) => *ready,
     };
 
-    let res = execute_service_status(&conn, &fresh, &req.service, &command, timeout_secs, cx).await;
+    let res = execute_service_status(
+        &conn,
+        &fresh,
+        &req.service,
+        &command,
+        timeout_secs,
+        responder,
+        cx,
+    )
+    .await;
     req.report(Some(&command), decision, &res, cx);
     res
-}
-
-async fn execute_service_status(
-    conn: &Connection,
-    snapshot: &BrokerSnapshot,
-    service: &str,
-    command: &str,
-    timeout_secs: Option<u64>,
-    cx: &mut AsyncApp,
-) -> BrokerResult {
-    let entry = conn.entry_in(&snapshot.connections);
-    let mut spec = match ConnectSpec::from_host_entry(&entry) {
-        Ok(spec) => spec,
-        Err(e) => {
-            return BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string()));
-        }
-    };
-    if let Some(kh) = &snapshot.known_hosts {
-        spec.known_hosts = Some(kh.clone());
-    } else {
-        #[cfg(debug_assertions)]
-        {
-            spec = crate::shell::with_dev_known_hosts(spec);
-        }
-    }
-
-    let auth = Auth {
-        vault_keys: conn.vault_key.clone().into_iter().collect(),
-        password_command: conn.password_command.clone(),
-        sudo_command: None,
-        proxy_command: conn.proxy_command.clone(),
-    };
-    let approvals = Approvals::in_dir(Some(snapshot.dir.clone()));
-    let options = ExecOptions::with_timeout(systemctl::effective_timeout(timeout_secs));
-
-    let exec_req = HeadlessExec {
-        spec,
-        auth,
-        approvals,
-        command: command.to_owned(),
-        options,
-    };
-
-    match headless_login::run(exec_req, |_| {}, cx).await {
-        Ok(output) => match systemctl::parse_output(&conn.name, service, &output, Utc::now()) {
-            Ok(status) => match serde_json::to_value(status) {
-                Ok(data) => BrokerResult::Ok { data },
-                Err(e) => {
-                    BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string()))
-                }
-            },
-            Err(err) => BrokerResult::Error(err),
-        },
-        Err(err) => BrokerResult::Error(err),
-    }
-}
-
-fn caller_display(caller: Option<&str>) -> String {
-    caller
-        .map(sanitize_display_text)
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Unknown Agent".to_owned())
-}
-
-/// Builds the click-only Decision card prompt for a `service_status` request.
-#[must_use]
-pub fn build_service_status_prompt(
-    caller: &str,
-    conn: &Connection,
-    command: &str,
-) -> DecisionPrompt {
-    DecisionPrompt::new(
-        format!("{caller} wants to check service status on {}", conn.name),
-        vec![
-            DecisionChoice::primary(CHOICE_ALLOW_ONCE, "Allow once"),
-            DecisionChoice::secondary(CHOICE_ALLOW_UNTIL_LOCK, "Allow until lock"),
-            DecisionChoice::secondary(CHOICE_DENY, "Deny"),
-        ],
-    )
-    .with_detail("Agent", format!("{caller} (unverified)"))
-    .with_detail(
-        "Host",
-        format!("{} ({}@{})", conn.name, conn.user, conn.host),
-    )
-    .with_detail("Returns", "load_state, active_state, sub_state")
-    .with_command(command)
 }
