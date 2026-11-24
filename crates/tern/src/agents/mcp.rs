@@ -24,7 +24,9 @@ use super::protocol::{
 use super::socket_path;
 
 const JSONRPC_VERSION: &str = "2.0";
-const DEFAULT_PROTOCOL_VERSION: &str = "2025-03-26";
+/// MCP protocol versions supported by `tern mcp`, ordered newest first.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
 const ERR_PARSE: i64 = -32700;
 const ERR_INVALID_REQUEST: i64 = -32600;
 const ERR_METHOD_NOT_FOUND: i64 = -32601;
@@ -120,10 +122,34 @@ impl JsonRpcResponse {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SessionState {
     /// Self-reported `clientInfo.name` from MCP `initialize` (unverified label).
     caller: Option<String>,
+    /// Negotiated MCP protocol version (defaults to [`LATEST_PROTOCOL_VERSION`]).
+    protocol_version: &'static str,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            caller: None,
+            protocol_version: LATEST_PROTOCOL_VERSION,
+        }
+    }
+}
+
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    if let Some(req) = requested
+        && let Some(&matched) = SUPPORTED_PROTOCOL_VERSIONS.iter().find(|&&v| v == req)
+    {
+        return matched;
+    }
+    LATEST_PROTOCOL_VERSION
+}
+
+fn supports_output_schema(protocol_version: &str) -> bool {
+    protocol_version >= "2025-06-18"
 }
 
 /// Normalized JSON-RPC request ID key for tracking concurrent in-flight `tools/call` tasks.
@@ -320,12 +346,14 @@ fn dispatch_request(
     let resp = match req.method.as_str() {
         "initialize" => {
             state.caller = extract_caller_name(&req.params);
-            let protocol_version = req
+            let requested = req
                 .params
                 .get("protocolVersion")
                 .and_then(Value::as_str)
-                .filter(|v| !v.is_empty())
-                .unwrap_or(DEFAULT_PROTOCOL_VERSION);
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let protocol_version = negotiate_protocol_version(requested);
+            state.protocol_version = protocol_version;
             JsonRpcResponse::ok(
                 id,
                 json!({
@@ -343,7 +371,9 @@ fn dispatch_request(
             )
         }
         "ping" => JsonRpcResponse::ok(id, json!({})),
-        "tools/list" => JsonRpcResponse::ok(id, tools_list_payload()),
+        "tools/list" => {
+            JsonRpcResponse::ok(id, tools_list_payload_for_version(state.protocol_version))
+        }
         "tools/call" => match parse_tool_call(&req.params, state.caller.clone()) {
             Ok(parsed) => {
                 if in_flight.len() >= MAX_IN_FLIGHT_CALLS {
@@ -408,46 +438,110 @@ fn extract_caller_name(params: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Static typed MCP tool definitions for `list_hosts` and `run_command`.
+#[cfg(test)]
 #[must_use]
-pub fn tools_list_payload() -> Value {
+fn tools_list_payload() -> Value {
+    tools_list_payload_for_version(LATEST_PROTOCOL_VERSION)
+}
+
+fn list_hosts_output_schema() -> Value {
     json!({
-        "tools": [
-            {
-                "name": "list_hosts",
-                "description": "List Saved connections in tern available to Agents.",
-                "inputSchema": {
+        "type": "object",
+        "properties": {
+            "hosts": {
+                "type": "array",
+                "description": "Saved connections available to Agents.",
+                "items": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "alias": { "type": "string", "description": "Exact Saved connection alias to pass to run_command." },
+                        "host": { "type": "string", "description": "Remote hostname or IP address." },
+                        "user": { "type": "string", "description": "SSH login username." },
+                        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "SSH port." }
+                    },
+                    "required": ["alias", "host", "user", "port"],
                     "additionalProperties": false
                 }
             },
-            {
-                "name": "run_command",
-                "description": "Run a shell command or multi-line script on a Saved connection in tern over an isolated non-PTY SSH exec connection. Requires approval in tern unless an active Host Grant exists.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "host": {
-                            "type": "string",
-                            "description": "Saved connection alias returned by list_hosts."
-                        },
-                        "command": {
-                            "type": "string",
-                            "description": "Shell command or inline script to run in the remote user's login shell (up to 64 KiB)."
-                        },
-                        "timeout_secs": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 300,
-                            "description": "Optional wall-clock timeout in seconds (defaults to 30, clamped to 1..=300)."
-                        }
-                    },
-                    "required": ["host", "command"],
-                    "additionalProperties": false
+            "usage": { "type": "string", "description": "Short guidance for calling run_command." }
+        },
+        "required": ["hosts", "usage"],
+        "additionalProperties": false
+    })
+}
+
+fn run_command_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "host": { "type": "string", "description": "Saved connection alias where the command ran." },
+            "exit_code": { "type": "integer", "minimum": 0, "description": "Remote process exit status when exited normally (absent if terminated by a signal or closed without status)." },
+            "signal": { "type": "string", "description": "Signal name when terminated by a signal." },
+            "stdout": { "type": "string", "description": "Captured standard output (UTF-8 lossy), capped at 64 KiB." },
+            "stderr": { "type": "string", "description": "Captured standard error (UTF-8 lossy), capped at 64 KiB." },
+            "stdout_truncated": { "type": "boolean", "description": "True when stdout exceeded 64 KiB and trailing bytes were discarded." },
+            "stderr_truncated": { "type": "boolean", "description": "True when stderr exceeded 64 KiB and trailing bytes were discarded." },
+            "duration_ms": { "type": "integer", "minimum": 0, "description": "Elapsed wall-clock duration in milliseconds." }
+        },
+        "required": [
+            "host",
+            "stdout",
+            "stderr",
+            "stdout_truncated",
+            "stderr_truncated",
+            "duration_ms"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn tools_list_payload_for_version(protocol_version: &str) -> Value {
+    let mut list_hosts = json!({
+        "name": "list_hosts",
+        "description": "List Saved connections in tern available to Agents.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }
+    });
+    let mut run_command = json!({
+        "name": "run_command",
+        "description": "Run a shell command or inline script on a Saved connection in tern over an isolated non-PTY, non-interactive SSH exec channel. The session PATH and environment may differ from an interactive terminal. Command text is limited to 64 KiB; stdout and stderr are each capped at 64 KiB (check stdout_truncated and stderr_truncated). MCP isError reflects broker or SSH call failure, not the remote exit status: a completed remote command returns isError: false even when exit_code is non-zero (inspect exit_code or signal). Requires approval in tern unless an active Host Grant exists.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "host": {
+                    "type": "string",
+                    "description": "Exact Saved connection alias returned by list_hosts."
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Shell command or inline script executed by the remote user's default shell over SSH exec (up to 64 KiB)."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "description": "Optional wall-clock timeout in seconds covering connection setup and execution (defaults to 30, clamped to 1..=300)."
                 }
-            }
-        ]
+            },
+            "required": ["host", "command"],
+            "additionalProperties": false
+        }
+    });
+
+    if supports_output_schema(protocol_version) {
+        if let Some(obj) = list_hosts.as_object_mut() {
+            obj.insert("outputSchema".to_owned(), list_hosts_output_schema());
+        }
+        if let Some(obj) = run_command.as_object_mut() {
+            obj.insert("outputSchema".to_owned(), run_command_output_schema());
+        }
+    }
+
+    json!({
+        "tools": [list_hosts, run_command]
     })
 }
 

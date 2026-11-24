@@ -305,3 +305,312 @@ fn extract_progress_token_accepts_non_empty_string_and_integers_only() {
     );
     assert_eq!(extract_progress_token(&json!({})), None);
 }
+
+/// Validates a JSON object against our emitted MCP `outputSchema` (object/array/primitive types,
+/// required keys, and `additionalProperties: false`).
+fn assert_matches_object_schema(value: &Value, schema: &Value) {
+    assert_eq!(schema["type"], "object");
+    let obj = value.as_object().unwrap();
+    let props = schema["properties"].as_object().unwrap();
+
+    if let Some(required) = schema["required"].as_array() {
+        for req in required {
+            let key = req.as_str().unwrap();
+            assert!(
+                obj.contains_key(key),
+                "missing required field '{key}' in {value}"
+            );
+        }
+    }
+
+    if schema["additionalProperties"] == json!(false) {
+        for key in obj.keys() {
+            assert!(
+                props.contains_key(key),
+                "unexpected additional field '{key}' in {value}"
+            );
+        }
+    }
+
+    for (key, val) in obj {
+        let prop_schema = &props[key];
+        match prop_schema["type"].as_str().unwrap() {
+            "string" => assert!(val.is_string(), "field '{key}' must be string: {val}"),
+            "boolean" => assert!(val.is_boolean(), "field '{key}' must be bool: {val}"),
+            "integer" => {
+                assert!(
+                    val.is_i64() || val.is_u64(),
+                    "field '{key}' must be integer: {val}"
+                );
+                if let Some(min) = prop_schema.get("minimum").and_then(Value::as_i64) {
+                    assert!(
+                        val.as_i64().unwrap_or(i64::MAX) >= min,
+                        "field '{key}' below minimum {min}: {val}"
+                    );
+                }
+            }
+            "array" => {
+                let items = val.as_array().unwrap();
+                let item_schema = &prop_schema["items"];
+                for item in items {
+                    assert_matches_object_schema(item, item_schema);
+                }
+            }
+            other => assert_eq!(
+                other, "string|boolean|integer|array",
+                "unsupported schema type"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn initialize_negotiates_supported_protocol_version_and_gates_output_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("agent.sock");
+
+    for (requested, expected, expect_output_schema) in [
+        (Some("2025-06-18"), "2025-06-18", true),
+        (Some("2025-03-26"), "2025-03-26", false),
+        (Some("2024-11-05"), "2024-11-05", false),
+        (Some("2099-01-01"), "2025-06-18", true),
+        (None, "2025-06-18", true),
+    ] {
+        let (mut client_tx, server_rx) = tokio::io::duplex(64 * 1024);
+        let (server_tx, client_rx) = tokio::io::duplex(64 * 1024);
+        let mut client_rx = BufReader::new(client_rx);
+        let server = tokio::spawn(serve_stdio(
+            BufReader::new(server_rx),
+            server_tx,
+            sock.clone(),
+        ));
+
+        let params = match requested {
+            Some(v) => json!({ "protocolVersion": v }),
+            None => json!({}),
+        };
+        let init = exchange(
+            &mut client_tx,
+            &mut client_rx,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params }),
+        )
+        .await;
+        assert_eq!(init["result"]["protocolVersion"], expected);
+
+        let tools = exchange(
+            &mut client_tx,
+            &mut client_rx,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .await;
+        let list = tools["result"]["tools"].as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        for tool in list {
+            assert_eq!(
+                tool.get("outputSchema").is_some(),
+                expect_output_schema,
+                "outputSchema presence mismatch for version {expected} on tool {}",
+                tool["name"]
+            );
+        }
+
+        drop(client_tx);
+        server.await.unwrap().unwrap();
+    }
+}
+
+#[test]
+fn run_command_description_documents_environment_limits_and_is_error_semantics() {
+    let payload = tools_list_payload();
+    let run_cmd = &payload["tools"][1];
+    assert_eq!(run_cmd["name"], "run_command");
+    let desc = run_cmd["description"].as_str().unwrap();
+    assert!(desc.contains("non-PTY"));
+    assert!(desc.contains("non-interactive"));
+    assert!(desc.contains("PATH"));
+    assert!(desc.contains("64 KiB"));
+    assert!(desc.contains("stdout_truncated"));
+    assert!(desc.contains("stderr_truncated"));
+    assert!(desc.contains("isError"));
+    assert!(desc.contains("exit_code"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_schema_matches_ok_nonzero_exit_and_preserves_vault_locked_reason() {
+    use crate::agents::protocol::{
+        HostSummary, ListHostsResponse, RunCommandResponse, UserActionReason,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("agent.sock");
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+
+    let scripted_results = vec![
+        BrokerResult::Ok {
+            data: serde_json::to_value(ListHostsResponse {
+                hosts: vec![HostSummary {
+                    alias: "alpha".into(),
+                    host: "10.0.0.5".into(),
+                    user: "deploy".into(),
+                    port: 22,
+                }],
+                usage: "call run_command".into(),
+            })
+            .unwrap(),
+        },
+        BrokerResult::Ok {
+            data: serde_json::to_value(RunCommandResponse {
+                host: "alpha".into(),
+                exit_code: Some(0),
+                signal: None,
+                stdout: "ok\n".into(),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                duration_ms: 42,
+            })
+            .unwrap(),
+        },
+        BrokerResult::Ok {
+            data: serde_json::to_value(RunCommandResponse {
+                host: "alpha".into(),
+                exit_code: Some(7),
+                signal: None,
+                stdout: "partial\n".into(),
+                stderr: "boom\n".into(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                duration_ms: 19,
+            })
+            .unwrap(),
+        },
+        BrokerResult::Error(AgentError::user_action_required(
+            UserActionReason::VaultLocked,
+            "unlock vault in tern",
+        )),
+    ];
+
+    let fake_broker = tokio::spawn(async move {
+        for result in scripted_results {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut r = BufReader::new(r);
+            let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES)
+                .await
+                .unwrap()
+                .unwrap();
+            write_json_line(&mut w, &BrokerMessage::Result(result))
+                .await
+                .unwrap();
+        }
+    });
+
+    let (mut client_tx, server_rx) = tokio::io::duplex(64 * 1024);
+    let (server_tx, client_rx) = tokio::io::duplex(64 * 1024);
+    let mut client_rx = BufReader::new(client_rx);
+    let server = tokio::spawn(serve_stdio(BufReader::new(server_rx), server_tx, sock));
+
+    let init = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18" }
+        }),
+    )
+    .await;
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+
+    let tools = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    )
+    .await;
+    let list_hosts_schema = &tools["result"]["tools"][0]["outputSchema"];
+    let run_cmd_schema = &tools["result"]["tools"][1]["outputSchema"];
+
+    // 1. list_hosts conforms to list_hosts.outputSchema.
+    let hosts_res = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "list_hosts", "arguments": {} }
+        }),
+    )
+    .await;
+    assert_eq!(hosts_res["result"]["isError"], false);
+    assert_matches_object_schema(&hosts_res["result"]["structuredContent"], list_hosts_schema);
+
+    // 2. Normal exit 0 conforms to run_command.outputSchema.
+    let ok_res = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": { "name": "run_command", "arguments": { "host": "alpha", "command": "echo ok" } }
+        }),
+    )
+    .await;
+    assert_eq!(ok_res["result"]["isError"], false);
+    assert_eq!(ok_res["result"]["structuredContent"]["exit_code"], 0);
+    assert_matches_object_schema(&ok_res["result"]["structuredContent"], run_cmd_schema);
+
+    // 3. Non-zero exit 7 still returns isError: false and conforms to run_command.outputSchema.
+    let exit7_res = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": { "name": "run_command", "arguments": { "host": "alpha", "command": "exit 7" } }
+        }),
+    )
+    .await;
+    assert_eq!(exit7_res["result"]["isError"], false);
+    assert_eq!(exit7_res["result"]["structuredContent"]["exit_code"], 7);
+    assert_eq!(
+        exit7_res["result"]["structuredContent"]["stdout"],
+        "partial\n"
+    );
+    assert_eq!(exit7_res["result"]["structuredContent"]["stderr"], "boom\n");
+    assert_matches_object_schema(&exit7_res["result"]["structuredContent"], run_cmd_schema);
+
+    // 4. Structured broker error (vault_locked) preserves error, reason, and message.
+    let locked_res = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": { "name": "run_command", "arguments": { "host": "alpha", "command": "whoami" } }
+        }),
+    )
+    .await;
+    assert_eq!(locked_res["result"]["isError"], true);
+    assert_eq!(
+        locked_res["result"]["structuredContent"]["error"],
+        "user_action_required"
+    );
+    assert_eq!(
+        locked_res["result"]["structuredContent"]["reason"],
+        "vault_locked"
+    );
+    let text_json: Value =
+        serde_json::from_str(locked_res["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text_json["reason"], "vault_locked");
+
+    fake_broker.await.unwrap();
+    drop(client_tx);
+    server.await.unwrap().unwrap();
+}
