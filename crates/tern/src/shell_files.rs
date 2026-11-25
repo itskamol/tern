@@ -132,10 +132,14 @@ impl Shell {
     }
 
     /// Quit (⌘Q): asks first when copies would be cut off.
-    pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn request_quit(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.copies_running(cx) {
             self.quit_ask = true;
-            cx.notify();
+            if window.is_window_active() {
+                cx.notify();
+            } else {
+                super::show_main_window(window, cx);
+            }
         } else {
             cx.quit();
         }

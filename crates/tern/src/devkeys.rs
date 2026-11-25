@@ -6,7 +6,8 @@
 //! `drag:x0,y0,x1,y1` act at window points, and with modifiers named first they act with those
 //! held (`cmd-click:x,y`, `shift-click:x,y`); `hold:alt-cmd` leaves modifiers held (for what
 //! shows only while they are, like the ⌥⌘ pane numbers, so a screenshot can catch it) until
-//! `release`.
+//! `release`. On macOS, `close-window` presses the native close button and
+//! `agent-menu:Open_Tern` selects the named status menu item.
 
 use std::time::Duration;
 
@@ -26,6 +27,31 @@ pub fn replay(window: WindowHandle<Shell>, cx: &mut App) {
             .timer(Duration::from_millis(1500))
             .await;
         for source in script.split_whitespace() {
+            #[cfg(target_os = "macos")]
+            if source == "close-window" {
+                if let Some(mtm) = objc2::MainThreadMarker::new() {
+                    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+                    if let Some(window) = app
+                        .windows()
+                        .iter()
+                        .find(|w| w.isVisible() && w.canBecomeMainWindow())
+                    {
+                        window.performClose(None);
+                    }
+                }
+                continue;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(title) = source.strip_prefix("agent-menu:") {
+                cx.update(|cx| {
+                    if let Ok(shell) = window.read(cx)
+                        && let Some(menu) = shell.agent_menu()
+                    {
+                        menu.replay(&title.replace('_', " "));
+                    }
+                });
+                continue;
+            }
             if let Some(ms) = source.strip_prefix("sleep-").and_then(|n| n.parse().ok()) {
                 cx.background_executor()
                     .timer(Duration::from_millis(ms))

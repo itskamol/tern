@@ -38,14 +38,11 @@ const HELP_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#readme");
 
 /// Quits, unless copies are running: the window asks first.
 fn quit(cx: &mut App) {
-    let shell = cx
-        .windows()
-        .into_iter()
-        .find_map(|w| w.downcast::<crate::shell::Shell>());
+    let shell = crate::shell::main_window(cx);
     match shell {
         Some(window) => {
             if window
-                .update(cx, |shell, _, cx| shell.request_quit(cx))
+                .update(cx, |shell, window, cx| shell.request_quit(window, cx))
                 .is_err()
             {
                 cx.quit();

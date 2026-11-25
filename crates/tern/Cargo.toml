@@ -37,7 +37,7 @@ security-framework.workspace = true
 # libmalloc keeps a freed 256 MiB scrypt block resident; mimalloc hands it back to the OS.
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSWorkspace", "NSAccessibility", "NSView", "NSResponder", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSWorkspace", "NSWindow", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "objc2-core-foundation", "NSAccessibility", "NSView", "NSResponder", "objc2-quartz-core"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
 raw-window-handle = { version = "0.6", default-features = false }
 # The sleep and screen-lock notifications (lock_on_sleep.rs) and background Agent attention cues
@@ -45,7 +45,7 @@ raw-window-handle = { version = "0.6", default-features = false }
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSBundle", "NSString", "NSNotification", "NSOperation", "NSDistributedNotificationCenter"] }
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationResponse", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger"] }
 
 [features]
 # Compiles the TERN_DEV_KEYS replay (devkeys.rs) into a release build. Off by default and never

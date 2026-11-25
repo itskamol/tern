@@ -17,7 +17,7 @@ mod advanced;
 #[path = "shell_connection_view.rs"]
 mod view;
 
-pub(crate) use view::button;
+pub(crate) use view::{action_button, button};
 pub(super) use view::{note, row};
 
 /// Space kept free around the form sheet, per side.

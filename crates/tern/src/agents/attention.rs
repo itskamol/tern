@@ -11,9 +11,33 @@ use std::sync::Arc;
 
 use crate::decisions::sanitize_display_text;
 
+/// The card to bring to the top when the person opens a notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionKind {
+    Approval,
+    Vault,
+}
+
+#[cfg(target_os = "macos")]
+impl AttentionKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Approval => "tern-agent-decision-",
+            Self::Vault => "tern-agent-vault-",
+        }
+    }
+
+    pub fn from_notification(id: &str) -> Option<Self> {
+        [Self::Approval, Self::Vault]
+            .into_iter()
+            .find(|kind| id.starts_with(kind.prefix()))
+    }
+}
+
 /// Sanitized title and body delivered when an Agent Decision arrives while tern is inactive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttentionCue {
+    pub kind: AttentionKind,
     pub title: String,
     pub body: String,
 }
@@ -31,6 +55,7 @@ impl AttentionCue {
             format!("{caller} wants to run on {host}: {preview}")
         };
         Self {
+            kind: AttentionKind::Approval,
             title: format!("Approval needed for {host}"),
             body,
         }
@@ -43,6 +68,7 @@ impl AttentionCue {
         let caller = sanitize_display_text(caller);
         let host = sanitize_display_text(host);
         Self {
+            kind: AttentionKind::Vault,
             title: format!("Unlock vault for {host}"),
             body: format!("{caller} is waiting for the vault to unlock to connect to {host}"),
         }
@@ -96,6 +122,9 @@ impl AgentAttention for NoopAttention {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) use macos::{has_app_bundle, request_alert_permission};
+
+#[cfg(target_os = "macos")]
 mod macos {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -122,43 +151,54 @@ mod macos {
     ///
     /// `UNUserNotificationCenter::currentNotificationCenter()` throws an ObjC exception if called
     /// from an unbundled executable (`cargo run` or `cargo test`), so this guard is mandatory.
-    pub(super) fn has_app_bundle() -> bool {
+    pub(crate) fn has_app_bundle() -> bool {
         crate::updater::running_bundle().is_some()
             && NSBundle::mainBundle().bundleIdentifier().is_some()
     }
 
     fn post_user_notification(cue: &AttentionCue) {
         let id = format!(
-            "tern-agent-decision-{}",
+            "{}{}",
+            cue.kind.prefix(),
             NEXT_NOTIFICATION_ID.fetch_add(1, Ordering::Relaxed)
         );
-        let title = cue.title.clone();
-        let body = cue.body.clone();
-        let center = UNUserNotificationCenter::currentNotificationCenter();
-        let block = RcBlock::new(move |granted: Bool, err: *mut NSError| {
-            if !err.is_null() {
-                tracing::warn!("agent_notification_auth_failed");
-                return;
-            }
-            if !granted.as_bool() {
-                tracing::debug!("agent_notification_not_authorized");
-                return;
-            }
-            let content = UNMutableNotificationContent::new();
-            content.setTitle(&NSString::from_str(&title));
-            content.setBody(&NSString::from_str(&body));
-            let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-                &NSString::from_str(&id),
-                &content,
-                None,
-            );
-            UNUserNotificationCenter::currentNotificationCenter()
-                .addNotificationRequest_withCompletionHandler(&request, None);
-        });
-        center.requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert,
-            &block,
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(&cue.title));
+        content.setBody(&NSString::from_str(&cue.body));
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str(&id),
+            &content,
+            None,
         );
+        UNUserNotificationCenter::currentNotificationCenter()
+            .addNotificationRequest_withCompletionHandler(&request, None);
+    }
+
+    /// Only the button in Agents settings asks macOS for permission to post alerts.
+    pub(crate) async fn request_alert_permission() -> Result<(), &'static str> {
+        if !has_app_bundle() {
+            return Err("Open the Tern app bundle to enable notifications.");
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        let reply = RcBlock::new(move |granted: Bool, err: *mut NSError| {
+            let result = if !err.is_null() {
+                Err("macOS could not enable Tern notifications.")
+            } else if granted.as_bool() {
+                Ok(())
+            } else {
+                Err("Allow notifications for Tern in System Settings → Notifications.")
+            };
+            let _ = tx.try_send(result);
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(
+                UNAuthorizationOptions::Alert,
+                &reply,
+            );
+        drop(reply);
+        rx.recv()
+            .await
+            .unwrap_or(Err("Notification settings are unavailable."))
     }
 
     impl AgentAttention for MacOsAttention {
@@ -216,6 +256,16 @@ mod tests {
         fn alert_background(&self, cue: &AttentionCue) {
             self.cues.lock().unwrap().push(cue.clone());
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notification_ids_route_to_the_card_that_requested_attention() {
+        for kind in [AttentionKind::Approval, AttentionKind::Vault] {
+            let id = format!("{}42", kind.prefix());
+            assert_eq!(AttentionKind::from_notification(&id), Some(kind));
+        }
+        assert_eq!(AttentionKind::from_notification("unrelated"), None);
     }
 
     #[test]

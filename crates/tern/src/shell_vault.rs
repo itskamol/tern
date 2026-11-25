@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui::{AppContext, ClipboardItem, Context, Entity, Subscription};
+use gpui::{App, AppContext, ClipboardItem, Context, Entity, Subscription};
 use tern_ssh::{HostEntry, SecretString};
 use tern_vault::keys::{self, KeyInfo};
 use tern_vault::{ExposeSecret, Key, Vault, VaultError};
@@ -14,7 +14,7 @@ use tern_vault::{ExposeSecret, Key, Vault, VaultError};
 use super::{Alert, Shell};
 use crate::keeper::{self, Ask, Keeper, Tried, Typed};
 use crate::lock_on_sleep::{self, Cause};
-use crate::text_input::TextInput;
+use crate::text_input::{InputColors, TextInput};
 
 /// How often the idle lock looks at the clock.
 const IDLE_CHECK: Duration = Duration::from_secs(10);
@@ -22,16 +22,12 @@ const IDLE_CHECK: Duration = Duration::from_secs(10);
 const MAX_KEY_FILE: u64 = 64 * 1024;
 
 pub(super) struct VaultUi {
-    pub(super) unlock: Entity<TextInput>,
+    pub(super) unlock: VaultUnlockFields,
     pub(super) current: Entity<TextInput>,
     pub(super) new: Entity<TextInput>,
     pub(super) confirm: Entity<TextInput>,
-    /// The vault PIN, entered to unlock, and entered twice to set one.
-    pub(super) pin: Entity<TextInput>,
     pub(super) pin_new: Entity<TextInput>,
     pub(super) pin_repeat: Entity<TextInput>,
-    /// "Use passphrase instead": the unlock row asks for the passphrase although a PIN is set.
-    pub(super) use_passphrase: bool,
     pub(super) key_name: Entity<TextInput>,
     pub(super) key_path: Entity<TextInput>,
     pub(super) busy: bool,
@@ -40,6 +36,57 @@ pub(super) struct VaultUi {
     /// The key just made or imported: its name and public half.
     pub(super) shown_key: Option<(String, KeyInfo)>,
     _repaint: Vec<Subscription>,
+}
+
+/// The PIN and passphrase fields shared by the Vault settings and contextual unlock card.
+pub(super) struct VaultUnlockFields {
+    pub(super) pin: Entity<TextInput>,
+    pub(super) passphrase: Entity<TextInput>,
+    use_passphrase: bool,
+}
+
+impl VaultUnlockFields {
+    pub(super) fn new(colors: InputColors, cx: &mut App) -> Self {
+        Self {
+            pin: cx.new(|cx| TextInput::new("Vault PIN", true, colors, cx)),
+            passphrase: cx.new(|cx| TextInput::new("Vault passphrase", true, colors, cx)),
+            use_passphrase: false,
+        }
+    }
+
+    pub(super) fn selected(&self, cx: &App) -> (Ask, &Entity<TextInput>) {
+        if Keeper::pin_set(cx) && !self.use_passphrase {
+            (Ask::Pin, &self.pin)
+        } else {
+            (Ask::Passphrase, &self.passphrase)
+        }
+    }
+
+    pub(super) fn read(&self, cx: &App) -> Result<(Typed, &Entity<TextInput>), &'static str> {
+        let (ask, input) = self.selected(cx);
+        let text = input.read(cx).text();
+        let typed = match ask {
+            Ask::Pin if text.is_empty() => return Err("Enter the vault PIN."),
+            Ask::Passphrase if text.is_empty() => return Err("Enter the vault passphrase."),
+            Ask::Pin => Typed::Pin(text.to_owned()),
+            Ask::Passphrase => Typed::Passphrase(secret(text)),
+        };
+        Ok((typed, input))
+    }
+
+    pub(super) fn toggle(&mut self) {
+        self.use_passphrase = !self.use_passphrase;
+    }
+
+    pub(super) fn follow(&mut self, result: &Tried) {
+        self.use_passphrase |= matches!(
+            result,
+            Tried::Again {
+                ask: Ask::Passphrase,
+                ..
+            }
+        );
+    }
 }
 
 /// How an entry reads in the list: a title and a line under it, never the secret. A password
@@ -101,18 +148,17 @@ impl Shell {
         }
         let t = self.theme;
         let colors = t.input_colors();
+        let unlock = VaultUnlockFields::new(colors, cx);
         let mut input = |placeholder: &'static str, masked: bool| {
             cx.new(|cx| TextInput::new(placeholder, masked, colors, cx))
         };
         let ui = VaultUi {
-            unlock: input("Vault passphrase", true),
+            unlock,
             current: input("Current passphrase", true),
             new: input("New passphrase", true),
             confirm: input("Repeat new passphrase", true),
-            pin: input("Vault PIN", true),
             pin_new: input("New PIN, 4 to 8 digits", true),
             pin_repeat: input("Repeat PIN", true),
-            use_passphrase: false,
             key_name: input("Key name, e.g. laptop", false),
             key_path: input("~/.ssh/id_ed25519", false),
             busy: false,
@@ -121,11 +167,11 @@ impl Shell {
             _repaint: Vec::new(),
         };
         let repaint = [
-            &ui.unlock,
+            &ui.unlock.passphrase,
             &ui.current,
             &ui.new,
             &ui.confirm,
-            &ui.pin,
+            &ui.unlock.pin,
             &ui.pin_new,
             &ui.pin_repeat,
             &ui.key_name,
@@ -167,25 +213,15 @@ impl Shell {
     /// Settings' Unlock row: the PIN while one is set (unless the person chose the passphrase),
     /// else the passphrase, tried off the UI thread.
     pub(super) fn unlock_vault(&mut self, cx: &mut Context<Self>) {
-        let pin_set = Keeper::pin_set(cx);
         let Some(ui) = self.vault_ui.as_mut() else {
             return;
         };
         if ui.busy {
             return;
         }
-        let (input, typed) = if pin_set && !ui.use_passphrase {
-            let pin = ui.pin.read(cx).text().to_owned();
-            if pin.is_empty() {
-                return self.vault_message(false, "Enter the vault PIN.", cx);
-            }
-            (ui.pin.clone(), Typed::Pin(pin))
-        } else {
-            let typed = ui.unlock.read(cx).text().to_owned();
-            if typed.is_empty() {
-                return self.vault_message(false, "Enter the vault passphrase.", cx);
-            }
-            (ui.unlock.clone(), Typed::Passphrase(secret(&typed)))
+        let (typed, input) = match ui.unlock.read(cx) {
+            Ok((typed, input)) => (typed, input.clone()),
+            Err(message) => return self.vault_message(false, message, cx),
         };
         ui.busy = true;
         ui.message = None;
@@ -195,20 +231,12 @@ impl Shell {
             let _ = this.update(cx, |s, cx| {
                 if let Some(ui) = s.vault_ui.as_mut() {
                     ui.busy = false;
-                    // A PIN that is off leaves only the passphrase to ask for.
-                    ui.use_passphrase |= matches!(
-                        tried,
-                        Tried::Again {
-                            ask: Ask::Passphrase,
-                            ..
-                        }
-                    );
+                    ui.unlock.follow(&tried);
                 }
                 match tried {
                     Tried::Opened => {
                         s.clear_inputs(&[&input], cx);
-                        s.activity("Vault unlocked", cx);
-                        s.on_vault_unlocked(cx);
+                        s.vault_unlock_succeeded(cx);
                     }
                     Tried::Again { message, .. } | Tried::Failed(message) => {
                         s.vault_message(false, message, cx);
@@ -220,9 +248,14 @@ impl Shell {
         .detach();
     }
 
+    pub(super) fn vault_unlock_succeeded(&mut self, cx: &mut Context<Self>) {
+        self.activity("Vault unlocked", cx);
+        self.on_vault_unlocked(cx);
+    }
+
     pub(super) fn toggle_use_passphrase(&mut self, cx: &mut Context<Self>) {
         if let Some(ui) = self.vault_ui.as_mut() {
-            ui.use_passphrase = !ui.use_passphrase;
+            ui.unlock.toggle();
             ui.message = None;
         }
         cx.notify();
@@ -305,7 +338,7 @@ impl Shell {
                     Ok(()) => {
                         Keeper::pin_stored(cx);
                         if let Some(ui) = s.vault_ui.as_mut() {
-                            ui.use_passphrase = false;
+                            ui.unlock.use_passphrase = false;
                             let (a, b) = (ui.pin_new.clone(), ui.pin_repeat.clone());
                             s.clear_inputs(&[&a, &b], cx);
                         }

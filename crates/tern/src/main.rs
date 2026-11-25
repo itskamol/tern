@@ -1,6 +1,8 @@
 //! tern: a fast, low-memory SSH terminal.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod agent_menu;
 mod agents;
 mod alloc;
 mod chrome;
@@ -225,7 +227,10 @@ fn main() {
     tern_term::frame_stats::init();
     log_panics();
     let _app = tracing::info_span!("app", service = "tern", env = env()).entered();
-    gpui_platform::application()
+    let application = gpui_platform::application();
+    #[cfg(target_os = "macos")]
+    application.on_reopen(agent_menu::reopen);
+    application
         .with_assets(icons::Assets)
         .run(move |cx: &mut App| {
             platform::register_fonts(cx);
@@ -266,9 +271,8 @@ fn main() {
                         if let Some(target) = target {
                             shell.connect_target(&target, window, cx);
                         }
-                        window.activate_window();
+                        shell::show_main_window(window, cx);
                     });
-                    cx.activate(true);
                 });
             }
             lock_on_sleep::start(cx, move |cause, cx| {

@@ -22,7 +22,7 @@ pub struct Keeper {
     open: Option<Vault>,
     /// The Keychain opt-in (Settings -> Vault) is on.
     keychain: bool,
-    /// The run's one Keychain attempt: whether it ran, is running, and who waits for it.
+    /// Coalesces reads and remembers whether the automatic attempt ran.
     gate: Gate<Waiter>,
     /// The Keychain item already holds the current passphrase, so `put` need not write it.
     keychain_current: bool,
@@ -115,7 +115,7 @@ impl Keeper {
         }
         let slot = Rc::new(RefCell::new(Some(work)));
         let held = slot.clone();
-        let waiting = Self::keychain_then(cx, move |cx| {
+        let waiting = Self::keychain_then(cx, move |cx, _| {
             if let Some(work) = held.borrow_mut().take() {
                 then(work, cx);
             }
@@ -171,13 +171,26 @@ impl Keeper {
         tried
     }
 
+    pub fn keychain_enabled(cx: &App) -> bool {
+        cx.global::<Self>().keychain
+    }
+
+    /// Called only from a person's unlock action. Automatic needs retain their one-shot policy.
+    pub fn unlock_with_keychain(cx: &mut App, then: impl FnOnce(&mut App, bool) + 'static) -> bool {
+        if !Self::keychain_enabled(cx) || !Self::locked(cx) {
+            return false;
+        }
+        cx.global_mut::<Self>().gate.allow_explicit_retry();
+        Self::keychain_then(cx, then)
+    }
+
     /// The first need for a locked vault in this run: with the Keychain opt-in on, reads the
     /// passphrase and opens the vault off the UI thread, then runs `then`. Returns `true` when
     /// `then` will run once the attempt resolves, whether this call started it or joined one in
     /// flight; the vault is in the keeper by then if it opened. Returns `false` when the Keychain
     /// is not to be asked (off, already asked this run, nothing to open) and `then` is dropped:
     /// the caller prompts as usual. A missing item, a refusal or a stale passphrase say nothing.
-    fn keychain_then(cx: &mut App, then: impl FnOnce(&mut App) + 'static) -> bool {
+    fn keychain_then(cx: &mut App, then: impl FnOnce(&mut App, bool) + 'static) -> bool {
         let locked = Self::locked(cx);
         let k = cx.global_mut::<Self>();
         let Some(path) = k.path.clone() else {
@@ -209,7 +222,7 @@ impl Keeper {
             k.keychain_current = true;
         }
         for waiter in k.gate.finish(read.refused) {
-            waiter(cx);
+            waiter(cx, read.refused);
         }
     }
 

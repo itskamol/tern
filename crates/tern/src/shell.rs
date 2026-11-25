@@ -120,6 +120,16 @@ mod snippets_ui;
 pub(crate) use hostlist::{FocusHostSearch, RedoHosts, UndoHosts};
 pub(crate) use snippets_ui::ToggleSnippets;
 
+pub(crate) fn main_window(cx: &App) -> Option<WindowHandle<Shell>> {
+    cx.windows().into_iter().find_map(|w| w.downcast::<Shell>())
+}
+
+pub(crate) fn show_main_window(window: &Window, cx: &mut Context<Shell>) {
+    window.activate_window();
+    cx.activate(true);
+    cx.notify();
+}
+
 pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
     let bounds = open::start_bounds(cx);
     let options = WindowOptions {
@@ -217,9 +227,14 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
         })
     })?;
     window.update(cx, |_, window, cx| {
-        // The close button asks first when copies are running.
+        // The broker and pending decisions belong to this shell. Hiding keeps their owner alive.
         let shell = cx.entity();
         window.on_window_should_close(cx, move |_, cx| {
+            #[cfg(target_os = "macos")]
+            if shell.read(cx).agent_menu().is_some() {
+                cx.hide();
+                return false;
+            }
             shell.update(cx, |s, cx| s.close_allowed(cx))
         });
     })?;

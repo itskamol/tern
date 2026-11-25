@@ -46,6 +46,8 @@ pub(super) struct AgentsUi {
     /// Watches Agent cancel/disconnect signals while Vault unlock waiters are queued.
     pub(super) vault_wait_cancel_watch: Option<Task<()>>,
     broker: Option<BrokerHandle>,
+    #[cfg(target_os = "macos")]
+    menu: Option<crate::agent_menu::AgentMenu>,
 }
 
 impl Default for AgentsUi {
@@ -61,6 +63,8 @@ impl Default for AgentsUi {
             vault_wait_timer: None,
             vault_wait_cancel_watch: None,
             broker: None,
+            #[cfg(target_os = "macos")]
+            menu: None,
         }
     }
 }
@@ -186,12 +190,38 @@ impl Shell {
         let Some(dir) = settings::dir() else {
             return;
         };
+        cx.on_app_quit(|shell, _| {
+            shell.agents.broker = None;
+            async {}
+        })
+        .detach();
         if let Err(msg) = self
             .agents
             .load_and_start(&dir, cx.entity().downgrade(), cx)
         {
             self.alert_failed(msg, cx);
         }
+        #[cfg(target_os = "macos")]
+        self.sync_agent_menu(cx);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sync_agent_menu(&mut self, cx: &mut Context<Self>) {
+        if self.agents.broker.is_some() {
+            if self.agents.menu.is_none() {
+                self.agents.menu = crate::agent_menu::AgentMenu::new(cx);
+            }
+            if let Some(menu) = &self.agents.menu {
+                menu.set_paused(self.agents_paused());
+            }
+        } else {
+            self.agents.menu = None;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn agent_menu(&self) -> Option<&crate::agent_menu::AgentMenu> {
+        self.agents.menu.as_ref()
     }
 
     /// Whether local MCP Agent access is enabled in `agents.json`.
@@ -233,6 +263,8 @@ impl Shell {
         let disabled =
             self.agents
                 .set_enabled(dir.as_deref(), enabled, cx.entity().downgrade(), cx)?;
+        #[cfg(target_os = "macos")]
+        self.sync_agent_menu(cx);
         if disabled {
             self.cancel_decisions_for(&DecisionTag::Agent, cx);
             self.cancel_agent_vault_waits(cx);
@@ -256,6 +288,8 @@ impl Shell {
     ) -> Result<(), StoreError> {
         let dir = settings::dir();
         let grants = self.agents.set_paused(dir.as_deref(), paused)?;
+        #[cfg(target_os = "macos")]
+        self.sync_agent_menu(cx);
         if paused {
             let decisions = self.cancel_decisions_for(&DecisionTag::Agent, cx);
             let vault_waits = self.cancel_agent_vault_waits(cx);
@@ -369,7 +403,11 @@ impl AgentHost for Shell {
         self.ask_decision(DecisionTag::Agent, prompt, timeout, cx)
     }
 
-    fn notify_agent_attention(&mut self, cue: &AttentionCue, _cx: &mut Context<Self>) {
+    fn notify_agent_attention(&mut self, cue: &AttentionCue, cx: &mut Context<Self>) {
+        self.activity(
+            format!("{} · Open Tern to review the command", cue.title),
+            cx,
+        );
         attention::notify_if_inactive(self.agents.attention.as_ref(), cue);
     }
 

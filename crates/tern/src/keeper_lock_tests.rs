@@ -86,7 +86,7 @@ fn a_keychain_read_running_when_the_mac_sleeps_does_not_reopen_the_vault() {
         let need = k.gate.need(
             true,
             true,
-            Box::new(move |cx: &mut gpui::App| {
+            Box::new(move |cx: &mut gpui::App, _| {
                 seen.set(Keeper::locked(cx));
             }),
         );
@@ -199,7 +199,7 @@ fn work_waiting_on_a_keychain_read_is_handed_back_when_it_answers() {
         let k = cx.global_mut::<Keeper>();
         k.keychain = true;
         assert_eq!(
-            k.gate.need(true, true, Box::new(|_: &mut gpui::App| {})),
+            k.gate.need(true, true, Box::new(|_: &mut gpui::App, _| {})),
             Need::Start
         );
         let need = Keeper::need_vault(cx, "prompt", move |work, cx| {

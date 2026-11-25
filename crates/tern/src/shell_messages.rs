@@ -16,16 +16,15 @@ mod toast;
 
 pub(crate) use toast::{Alert, CubicBezier};
 
-use super::Shell;
+use super::{Shell, connections_ui::action_button};
 use crate::clipboard::Answer;
 use crate::decisions::{
     DecisionChoice, DecisionId, DecisionPrompt, DecisionQueue, DecisionRequest, DecisionTag,
     PendingDecision, QueueFull,
 };
-use crate::hover::HoverFade as _;
 use crate::messages::{Kind, Messages, Place, SHOWN_FOR, Work};
 use crate::session::Session;
-use crate::theme::{CONTROL_RADIUS, MONO_FONT, SPACE_SM, TITLEBAR_HEIGHT, Theme};
+use crate::theme::{CONTROL_RADIUS, MONO_FONT, SPACE_SM, TITLEBAR_HEIGHT};
 
 const CLIPBOARD_ONCE: &str = "once";
 const CLIPBOARD_ALWAYS: &str = "always";
@@ -86,29 +85,6 @@ fn clipboard_choices() -> Vec<DecisionChoice> {
     ]
 }
 
-fn decision_button(
-    ix: usize,
-    label: impl Into<SharedString>,
-    primary: bool,
-    t: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(("decision-choice", ix))
-        .h(px(28.))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .rounded(px(8.))
-        .text_sm()
-        .cursor_pointer()
-        .when(primary, |el| el.bg(t.accent).text_color(t.on_accent))
-        .when(!primary, |el| {
-            el.hover_fade(format!("decision-button-{ix}"), t.row_hover, t.row_active)
-                .text_color(t.text)
-        })
-        .child(label.into())
-}
-
 #[derive(Debug, Default)]
 pub(super) struct ActivityUi {
     /// The snackbar an Alert shows as; nothing outside this module can show one.
@@ -117,6 +93,7 @@ pub(super) struct ActivityUi {
     decisions: DecisionQueue<DecisionKind>,
     /// Which Decision currently has its full multi-line command expanded.
     expanded_decision: Option<DecisionId>,
+    vault_first: bool,
     messages: Messages,
     list_state: ListState,
     /// The one wake-up for when the newest Activity's time is up; a newer one replaces it.
@@ -569,11 +546,16 @@ impl Shell {
                 .child(div().flex().flex_wrap().gap(px(CONTROL_RADIUS)).children(
                     choices.into_iter().enumerate().map(|(ix, choice)| {
                         let choice_id = choice.id;
-                        decision_button(ix, choice.label, choice.primary, &t).on_click(cx.listener(
-                            move |s, _, _, cx| {
-                                s.answer_decision(id, &choice_id, cx);
-                            },
-                        ))
+                        action_button(
+                            ("decision-choice", ix),
+                            format!("decision-button-{ix}"),
+                            choice.label,
+                            choice.primary,
+                            &t,
+                        )
+                        .on_click(cx.listener(move |s, _, _, cx| {
+                            s.answer_decision(id, &choice_id, cx);
+                        }))
                     }),
                 ))
                 .when_some(footnote, |el, note| {
@@ -588,6 +570,11 @@ impl Shell {
         )
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn show_agent_card(&mut self, kind: crate::agents::attention::AttentionKind) {
+        self.activity.vault_first = kind == crate::agents::attention::AttentionKind::Vault;
+    }
+
     /// The top right under the titlebar: the Decision card, then the snackbar under it, so
     /// neither covers the other.
     pub(super) fn render_top_right(
@@ -597,8 +584,14 @@ impl Shell {
     ) -> Option<AnyElement> {
         let decision = self.decision_card(cx);
         let vault_unlock = self.agent_vault_unlock_card(window, cx);
+        self.activity.vault_first &= vault_unlock.is_some();
+        let cards = if self.activity.vault_first {
+            [vault_unlock, decision]
+        } else {
+            [decision, vault_unlock]
+        };
         let snackbar = self.render_snackbar(window, cx);
-        if decision.is_none() && vault_unlock.is_none() && snackbar.is_none() {
+        if cards.iter().all(Option::is_none) && snackbar.is_none() {
             return None;
         }
         Some(
@@ -613,8 +606,7 @@ impl Shell {
                             .flex_col()
                             .items_end()
                             .gap(px(SPACE_SM))
-                            .children(decision)
-                            .children(vault_unlock)
+                            .children(cards.into_iter().flatten())
                             .children(snackbar),
                     ),
             )

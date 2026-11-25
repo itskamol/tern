@@ -1,4 +1,4 @@
-//! How the vault opens: the run's one Keychain attempt (who may start it, who waits for it, what
+//! How the vault opens: the run's automatic Keychain attempt (who may start it, who waits for it, what
 //! happens to the vault it opens), then the PIN or the passphrase the person types. No gpui
 //! logic here (only the `Waiter` type), so the rules are tested with fake stores; the real
 //! Keychain is never reached from a test.
@@ -168,7 +168,8 @@ pub(crate) fn store_due(keychain: bool, current: bool, refused: bool, in_flight:
     keychain && !current && !refused && !in_flight
 }
 
-pub(crate) type Waiter = Box<dyn FnOnce(&mut App)>;
+/// A refused store (including a cancelled OS prompt) can explain a manual unlock failure.
+pub(crate) type Waiter = Box<dyn FnOnce(&mut App, bool)>;
 
 /// What a need for the vault does about the Keychain.
 #[derive(Debug, PartialEq, Eq)]
@@ -181,7 +182,7 @@ pub(crate) enum Need {
     Skip,
 }
 
-/// The once-per-run Keychain attempt and the needs waiting on it.
+/// The shared Keychain read, attempted automatically once and retried on a person's click.
 pub(crate) struct Gate<W> {
     tried: bool,
     in_flight: bool,
@@ -226,6 +227,13 @@ impl<W> Gate<W> {
         }
     }
 
+    /// A person can retry a completed read; simultaneous requests still share the in-flight read.
+    pub(crate) fn allow_explicit_retry(&mut self) {
+        if !self.in_flight {
+            self.tried = false;
+        }
+    }
+
     /// The attempt resolved; hands back everything that waited, in order.
     pub(crate) fn finish(&mut self, refused: bool) -> Vec<W> {
         self.in_flight = false;
@@ -242,6 +250,20 @@ mod tests {
     use tern_vault::Key;
 
     use super::*;
+
+    #[test]
+    fn explicit_click_retries_a_spent_attempt_but_never_starts_two_reads() {
+        let mut gate = Gate::default();
+        assert_eq!(gate.need(true, true, 1), Need::Start);
+        assert_eq!(gate.finish(true), [1]);
+        assert_eq!(gate.need(true, true, 2), Need::Skip);
+        gate.allow_explicit_retry();
+        assert_eq!(gate.need(true, true, 3), Need::Start);
+        gate.allow_explicit_retry();
+        assert_eq!(gate.need(true, true, 4), Need::Wait);
+        assert_eq!(gate.finish(false), [3, 4]);
+        assert_eq!(gate.need(true, true, 5), Need::Skip);
+    }
 
     /// Counts reads; a fake for the Keychain so no test reaches the real one.
     struct Counting {

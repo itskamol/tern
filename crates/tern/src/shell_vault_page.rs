@@ -69,7 +69,8 @@ impl Shell {
             w::card(&t).child(w::row(&t, true, status, Some(detail.into()), lock));
         if entries.is_none() && exists {
             let pin = Keeper::pin_set(cx);
-            let by_pin = pin && !ui.use_passphrase;
+            let (ask, input) = ui.unlock.selected(cx);
+            let by_pin = ask == crate::keeper::Ask::Pin;
             let switch = pin.then(|| {
                 w::button(
                     &t,
@@ -95,11 +96,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(if by_pin {
-                        field(&ui.pin, &t)
-                    } else {
-                        field(&ui.unlock, &t)
-                    })
+                    .child(field(input, &t))
                     .children(switch)
                     .child(
                         w::button(

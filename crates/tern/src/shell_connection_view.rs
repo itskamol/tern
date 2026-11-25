@@ -4,8 +4,8 @@
 use crate::hover::HoverFade as _;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, anchored, deferred, div, point, px,
+    AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, point, px,
 };
 
 use super::{FORM_MARGIN, Shell, VaultStep};
@@ -208,6 +208,16 @@ pub(crate) fn button(
     primary: bool,
     t: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    action_button(id, format!("form-button-{id}"), label, primary, t)
+}
+
+pub(crate) fn action_button(
+    id: impl Into<ElementId>,
+    hover_key: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    primary: bool,
+    t: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(px(28.))
@@ -219,7 +229,7 @@ pub(crate) fn button(
         .cursor_pointer()
         .when(primary, |el| el.bg(t.accent).text_color(t.on_accent))
         .when(!primary, |el| {
-            el.hover_fade(format!("form-button-{id}"), t.row_hover, t.row_active)
+            el.hover_fade(hover_key, t.row_hover, t.row_active)
                 .text_color(t.text)
         })
         .child(label.into())

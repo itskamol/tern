@@ -990,7 +990,10 @@ fn headless_login_fails_closed_on_locked_vault_unknown_host_key_and_2fa() {
             },
             SecretString::from(pem.to_string()),
         );
-        Keeper::install(true, cx);
+        let path = dir.path().join("vault.age");
+        // Headless attempts only check that a vault exists. A real Keychain read is never needed.
+        std::fs::write(&path, b"locked fixture").unwrap();
+        Keeper::install_at_with_keychain(path, true, cx);
         Keeper::adopt(vault, cx);
         Keeper::lock(cx);
     });
@@ -1394,7 +1397,10 @@ fn vault_unlock_wait_resumes_once_and_never_runs_expired_or_cancelled_requests()
     let mut app = TestApp::new();
     app.update(|cx| {
         SshRuntime::install(cx).unwrap();
-        Keeper::install(true, cx);
+        let path = dir.path().join("vault.age");
+        // Headless attempts only check that a vault exists. A real Keychain read is never needed.
+        std::fs::write(&path, b"locked fixture").unwrap();
+        Keeper::install_at_with_keychain(path, true, cx);
         Keeper::adopt(make_vault(), cx);
         Keeper::lock(cx);
     });

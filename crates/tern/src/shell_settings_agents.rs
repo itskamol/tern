@@ -110,6 +110,8 @@ impl Shell {
 
         let enable_desc = if store_error.is_some() {
             "Unavailable while agents.json cannot be read; fix or move the file so tern will not overwrite it"
+        } else if cfg!(target_os = "macos") {
+            "Keep the local broker running when the terminal window closes. Reopen Tern, pause agents, or quit from the menu bar."
         } else {
             "Listen on the local agent.sock for tern mcp requests while tern is open"
         };
@@ -150,6 +152,47 @@ impl Shell {
                         }
                     }))
                     .child(w::toggle(&t, paused, "agents-paused")),
+            ));
+
+        #[cfg(target_os = "macos")]
+        let mcp_card = mcp_card
+            .when(enabled, |card| {
+                card.child(w::row(
+                    &t,
+                    false,
+                    "Agent notifications",
+                    Some(
+                        "Show a macOS alert when a request needs approval or a vault unlock."
+                            .into(),
+                    ),
+                    w::button(&t, "agents-allow-alerts", "Allow Notifications…").on_click(
+                        cx.listener(|_, _, _, cx| {
+                            cx.spawn(async move |shell, cx| {
+                                let result =
+                                    crate::agents::attention::request_alert_permission().await;
+                                let _ = shell.update(cx, |s, cx| match result {
+                                    Ok(()) => s.activity("Agent notifications allowed", cx),
+                                    Err(message) => s.alert_failed(message, cx),
+                                });
+                            })
+                            .detach();
+                        }),
+                    ),
+                ))
+            })
+            .child(w::row(
+                &t,
+                false,
+                "Open at Login",
+                Some("Optional. Add or remove Tern in macOS Login Items.".into()),
+                w::button(&t, "agents-login-items", "Login Items…").on_click(|_, _, cx| {
+                    let url = if objc2::available!(macos = 13.0) {
+                        "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+                    } else {
+                        "x-apple.systempreferences:com.apple.preference.users?LoginItems"
+                    };
+                    cx.open_url(url);
+                }),
             ));
 
         let mut grants_card = w::card(&t);

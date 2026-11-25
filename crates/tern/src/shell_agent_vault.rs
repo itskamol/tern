@@ -1,32 +1,26 @@
 //! In-window contextual `Unlock Vault` card for approved Agent requests waiting on a locked Vault.
 //!
-//! Only appears while at least one Agent request is actively waiting in `AgentsUi::vault_waits`
-//! (never on normal window focus when nothing is waiting). Unlocks via [`Keeper::try_unlock`]
-//! without ever calling [`Keeper::need_vault`] (no automatic macOS Keychain prompt) and without
-//! stealing application focus.
+//! Approved requests wait in a bounded queue. Only a click starts a credential-store read;
+//! manual entry uses the same PIN and passphrase unlock path as Settings.
 
 use std::time::Instant;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AppContext, Context, Entity, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    Window, div, px,
+    AnyElement, Context, EntityId, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, px,
 };
-use tern_ssh::SecretString;
 
-use super::Shell;
+use super::vault_ui::VaultUnlockFields;
+use super::{Shell, connections_ui::button};
 use crate::agents::attention::{self, AttentionCue};
 use crate::agents::vault_wait::PendingVaultUnlock;
-use crate::hover::HoverFade as _;
-use crate::keeper::{Ask, Keeper, Tried, Typed};
-use crate::text_input::TextInput;
-use crate::theme::{CONTROL_RADIUS, MONO_FONT, SPACE_SM, Theme};
+use crate::keeper::{Ask, Keeper, Tried};
+use crate::theme::{CONTROL_RADIUS, MONO_FONT, SPACE_SM};
 
 pub(super) struct AgentVaultPromptUi {
-    pin: Entity<TextInput>,
-    passphrase: Entity<TextInput>,
-    use_passphrase: bool,
+    fields: VaultUnlockFields,
+    manual: bool,
     busy: bool,
     error: Option<String>,
     focused_for_active: bool,
@@ -36,34 +30,27 @@ pub(super) struct AgentVaultPromptUi {
 impl std::fmt::Debug for AgentVaultPromptUi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentVaultPromptUi")
-            .field("use_passphrase", &self.use_passphrase)
             .field("busy", &self.busy)
             .field("error", &self.error)
             .finish_non_exhaustive()
     }
 }
 
-fn card_button(
-    id: &'static str,
-    label: impl Into<SharedString>,
-    primary: bool,
-    t: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(28.))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .rounded(px(8.))
-        .text_sm()
-        .cursor_pointer()
-        .when(primary, |el| el.bg(t.accent).text_color(t.on_accent))
-        .when(!primary, |el| {
-            el.hover_fade(id, t.row_hover, t.row_active)
-                .text_color(t.text)
-        })
-        .child(label.into())
+impl AgentVaultPromptUi {
+    fn finish(&mut self, card: EntityId, tried: Tried) -> bool {
+        if self.fields.pin.entity_id() != card {
+            return false;
+        }
+        self.busy = false;
+        self.fields.follow(&tried);
+        match tried {
+            Tried::Opened => true,
+            Tried::Again { message, .. } | Tried::Failed(message) => {
+                self.error = Some(message);
+                false
+            }
+        }
+    }
 }
 
 impl Shell {
@@ -83,6 +70,10 @@ impl Shell {
             .enqueue(caller, host, deadline, now)
             .ok()?;
         let cue = AttentionCue::for_vault_unlock(caller, host);
+        self.activity(
+            format!("{} to continue the approved request", cue.title),
+            cx,
+        );
         attention::notify_if_inactive(self.agents.attention.as_ref(), &cue);
         self.ensure_agent_vault_prompt(cx);
         if let Some(ui) = self.agents.vault_prompt.as_mut() {
@@ -122,17 +113,14 @@ impl Shell {
         if self.agents.vault_prompt.is_some() {
             return;
         }
-        let colors = self.theme.input_colors();
-        let pin = cx.new(|cx| TextInput::new("Vault PIN", true, colors, cx));
-        let passphrase = cx.new(|cx| TextInput::new("Vault passphrase", true, colors, cx));
+        let fields = VaultUnlockFields::new(self.theme.input_colors(), cx);
         let repaint = vec![
-            cx.observe(&pin, |_, _, cx| cx.notify()),
-            cx.observe(&passphrase, |_, _, cx| cx.notify()),
+            cx.observe(&fields.pin, |_, _, cx| cx.notify()),
+            cx.observe(&fields.passphrase, |_, _, cx| cx.notify()),
         ];
         self.agents.vault_prompt = Some(AgentVaultPromptUi {
-            pin,
-            passphrase,
-            use_passphrase: false,
+            fields,
+            manual: false,
             busy: false,
             error: None,
             focused_for_active: false,
@@ -142,8 +130,8 @@ impl Shell {
 
     fn clear_agent_vault_prompt(&mut self, cx: &mut Context<Self>) {
         if let Some(ui) = self.agents.vault_prompt.take() {
-            ui.pin.update(cx, |i, cx| i.set_text("", cx));
-            ui.passphrase.update(cx, |i, cx| i.set_text("", cx));
+            ui.fields.pin.update(cx, |i, cx| i.set_text("", cx));
+            ui.fields.passphrase.update(cx, |i, cx| i.set_text("", cx));
         }
     }
 
@@ -192,85 +180,94 @@ impl Shell {
         }
     }
 
-    fn submit_agent_vault_unlock(&mut self, cx: &mut Context<Self>) {
+    fn submit_agent_vault_unlock(&mut self, clicked: bool, cx: &mut Context<Self>) {
+        if self.agents.vault_waits.front(Instant::now()).is_none() {
+            self.sync_agent_vault_wait_tasks(cx);
+            return;
+        }
         if !Keeper::locked(cx) {
             self.on_vault_unlocked(cx);
             return;
         }
-        let pin_set = Keeper::pin_set(cx);
         let Some(ui) = self.agents.vault_prompt.as_mut() else {
             return;
         };
-        if ui.busy {
+        let keychain = Keeper::keychain_enabled(cx) && !ui.manual;
+        if ui.busy || (keychain && !clicked) {
             return;
         }
-        let (input, typed) = if pin_set && !ui.use_passphrase {
-            let pin = ui.pin.read(cx).text().to_owned();
-            if pin.is_empty() {
-                ui.error = Some("Enter the vault PIN.".to_owned());
-                cx.notify();
-                return;
-            }
-            (ui.pin.clone(), Typed::Pin(pin))
+
+        let typed = if keychain {
+            None
         } else {
-            let pass = ui.passphrase.read(cx).text().to_owned();
-            if pass.is_empty() {
-                ui.error = Some("Enter the vault passphrase.".to_owned());
-                cx.notify();
-                return;
+            match ui.fields.read(cx) {
+                Ok((typed, _)) => Some(typed),
+                Err(message) => {
+                    ui.error = Some(message.into());
+                    cx.notify();
+                    return;
+                }
             }
-            (
-                ui.passphrase.clone(),
-                Typed::Passphrase(SecretString::from(pass)),
-            )
         };
 
         ui.busy = true;
         ui.error = None;
-        cx.notify();
-
-        let work = Keeper::try_unlock(typed, cx);
-        cx.spawn(async move |this, cx| {
-            let tried = work.await;
-            let _ = this.update(cx, |s, cx| {
-                if let Some(ui) = s.agents.vault_prompt.as_mut() {
-                    ui.busy = false;
-                    ui.use_passphrase |= matches!(
-                        tried,
-                        Tried::Again {
-                            ask: Ask::Passphrase,
-                            ..
-                        }
-                    );
-                }
-                match tried {
-                    Tried::Opened => {
-                        input.update(cx, |i, cx| i.set_text("", cx));
-                        s.activity("Vault unlocked", cx);
-                        s.on_vault_unlocked(cx);
-                    }
-                    Tried::Again { message, .. } | Tried::Failed(message) => {
-                        if let Some(ui) = s.agents.vault_prompt.as_mut() {
-                            ui.error = Some(message);
-                        }
-                        cx.notify();
-                    }
-                }
+        let card = ui.fields.pin.entity_id();
+        if let Some(typed) = typed {
+            let work = Keeper::try_unlock(typed, cx);
+            cx.spawn(async move |this, cx| {
+                let tried = work.await;
+                let _ = this.update(cx, |s, cx| s.finish_agent_vault_unlock(card, tried, cx));
+            })
+            .detach();
+        } else {
+            let shell = cx.weak_entity();
+            let started = Keeper::unlock_with_keychain(cx, move |cx, refused| {
+                let tried = if !Keeper::locked(cx) {
+                    Tried::Opened
+                } else {
+                    let store = crate::keeper::keychain::STORE_NAME;
+                    Tried::Failed(if refused {
+                        format!(
+                            "{store} access was cancelled or unavailable. Retry or enter your vault credentials."
+                        )
+                    } else {
+                        format!(
+                            "No usable vault passphrase in {store}. Enter your vault credentials."
+                        )
+                    })
+                };
+                let _ = shell.update(cx, |s, cx| s.finish_agent_vault_unlock(card, tried, cx));
             });
-        })
-        .detach();
+            if !started {
+                ui.manual = true;
+                self.finish_agent_vault_unlock(
+                    card,
+                    Tried::Failed(
+                        "Credential store unavailable. Enter your vault credentials.".into(),
+                    ),
+                    cx,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_agent_vault_unlock(&mut self, card: EntityId, tried: Tried, cx: &mut Context<Self>) {
+        if let Some(ui) = self.agents.vault_prompt.as_mut() {
+            if ui.finish(card, tried) {
+                self.vault_unlock_succeeded(cx);
+            }
+            cx.notify();
+        }
     }
 
     fn toggle_agent_vault_passphrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ui) = self.agents.vault_prompt.as_mut() {
-            ui.use_passphrase = !ui.use_passphrase;
+            ui.fields.toggle();
             ui.error = None;
-            let by_pin = Keeper::pin_set(cx) && !ui.use_passphrase;
-            let focus = if by_pin {
-                ui.pin.focus_handle(cx)
-            } else {
-                ui.passphrase.focus_handle(cx)
-            };
+            let (_, input) = ui.fields.selected(cx);
+            let focus = input.focus_handle(cx);
             if window.is_window_active() {
                 window.focus(&focus, cx);
             }
@@ -298,15 +295,13 @@ impl Shell {
 
         self.ensure_agent_vault_prompt(cx);
         let pin_set = Keeper::pin_set(cx);
+        let keychain = Keeper::keychain_enabled(cx) && !self.agents.vault_prompt.as_ref()?.manual;
         let window_active = window.is_window_active();
         let (active_input, by_pin, busy, error, should_focus) = {
             let ui = self.agents.vault_prompt.as_mut()?;
-            let by_pin = pin_set && !ui.use_passphrase;
-            let input = if by_pin {
-                ui.pin.clone()
-            } else {
-                ui.passphrase.clone()
-            };
+            let (ask, input) = ui.fields.selected(cx);
+            let by_pin = ask == Ask::Pin;
+            let input = input.clone();
             let should_focus = if window_active {
                 if ui.focused_for_active {
                     false
@@ -320,7 +315,7 @@ impl Shell {
             };
             (input, by_pin, ui.busy, ui.error.clone(), should_focus)
         };
-        if should_focus {
+        if should_focus && !keychain {
             window.focus(&active_input.focus_handle(cx), cx);
         }
 
@@ -352,7 +347,7 @@ impl Shell {
                 .text_color(t.text)
                 .on_key_down(cx.listener(|s, e: &KeyDownEvent, _, cx| {
                     if e.keystroke.key == "enter" {
-                        s.submit_agent_vault_unlock(cx);
+                        s.submit_agent_vault_unlock(false, cx);
                     } else if e.keystroke.key == "escape" {
                         s.cancel_agent_vault_waits(cx);
                     }
@@ -391,28 +386,32 @@ impl Shell {
                             div()
                                 .text_size(px(12.))
                                 .text_color(t.muted)
-                                .child(if by_pin {
+                                .child(if keychain {
+                                    "Unlock the vault to continue the approved request."
+                                } else if by_pin {
                                     "Enter the vault PIN to continue once."
                                 } else {
                                     "Enter the vault passphrase to continue once."
                                 }),
                         ),
                 )
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(30.))
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(t.border)
-                        .bg(t.row_hover)
-                        .overflow_hidden()
-                        .text_sm()
-                        .child(active_input),
-                )
+                .when(!keychain, |el| {
+                    el.child(
+                        div()
+                            .w_full()
+                            .h(px(30.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(t.border)
+                            .bg(t.row_hover)
+                            .overflow_hidden()
+                            .text_sm()
+                            .child(active_input),
+                    )
+                })
                 .when_some(error, |el, msg| {
                     el.child(
                         div()
@@ -428,24 +427,50 @@ impl Shell {
                         .items_center()
                         .gap(px(CONTROL_RADIUS))
                         .child(
-                            card_button(
+                            button(
                                 "agent-vault-submit",
-                                if busy { "Unlocking…" } else { "Unlock" },
+                                if busy {
+                                    "Unlocking…".to_owned()
+                                } else if keychain {
+                                    format!("Unlock with {}", crate::keeper::keychain::STORE_NAME)
+                                } else {
+                                    "Unlock".to_owned()
+                                },
                                 true,
                                 &t,
                             )
-                            .on_click(cx.listener(|s, _, _, cx| s.submit_agent_vault_unlock(cx))),
+                            .on_click(cx.listener(|s, _, _, cx| {
+                                s.submit_agent_vault_unlock(true, cx);
+                            })),
                         )
-                        .child(
-                            card_button("agent-vault-cancel", "Cancel", false, &t).on_click(
-                                cx.listener(|s, _, _, cx| {
-                                    s.cancel_agent_vault_waits(cx);
-                                }),
-                            ),
-                        )
-                        .when(pin_set, |row| {
+                        .child(button("agent-vault-cancel", "Cancel", false, &t).on_click(
+                            cx.listener(|s, _, _, cx| {
+                                s.cancel_agent_vault_waits(cx);
+                            }),
+                        ))
+                        .when(keychain && !busy, |row| {
                             row.child(
-                                card_button(
+                                button(
+                                    "agent-vault-manual",
+                                    if pin_set { "Use PIN" } else { "Use passphrase" },
+                                    false,
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |s, _, _, cx| {
+                                        if let Some(ui) = s.agents.vault_prompt.as_mut() {
+                                            ui.manual = true;
+                                            ui.error = None;
+                                            ui.focused_for_active = false;
+                                            cx.notify();
+                                        }
+                                    },
+                                )),
+                            )
+                        })
+                        .when(pin_set && !keychain && !busy, |row| {
+                            row.child(
+                                button(
                                     "agent-vault-switch",
                                     if by_pin { "Use passphrase" } else { "Use PIN" },
                                     false,
@@ -461,5 +486,36 @@ impl Shell {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_old_unlock_result_leaves_the_replacement_card_busy_and_without_an_error() {
+        gpui::TestApp::new().update(|cx| {
+            let colors = crate::theme::Theme::zeron_dark().input_colors();
+            let previous = VaultUnlockFields::new(colors, cx);
+            let mut current = AgentVaultPromptUi {
+                fields: VaultUnlockFields::new(colors, cx),
+                manual: true,
+                busy: true,
+                error: None,
+                focused_for_active: false,
+                _repaint: Vec::new(),
+            };
+
+            let old_card = previous.pin.entity_id();
+            assert!(!current.finish(old_card, Tried::Failed("Old failure".into())));
+            assert!(!current.finish(old_card, Tried::Opened));
+            assert!(current.busy);
+            assert!(current.error.is_none());
+
+            let card = current.fields.pin.entity_id();
+            assert!(current.finish(card, Tried::Opened));
+            assert!(!current.busy);
+        });
     }
 }
