@@ -446,11 +446,7 @@ impl Shell {
         if ix < next.len() {
             next.remove(ix);
         }
-        let saved = match crate::settings::dir() {
-            Some(dir) => connections::save(&dir, &next).map_err(|e| e.to_string()),
-            None => Ok(()),
-        };
-        match saved {
+        match self.save_hosts_guarded(&next) {
             Ok(()) => {
                 let name = self.connections.get(ix).map(|c| c.name.clone());
                 self.commit_hosts(
@@ -485,12 +481,10 @@ impl Shell {
             if let Some(c) = next.get_mut(ix) {
                 c.clipboard_always = true;
             }
-            if let Some(dir) = crate::settings::dir()
-                && let Err(e) = connections::save(&dir, &next)
-            {
+            if let Err(e) = self.save_hosts_guarded(&next) {
                 self.alert_failed(format!("Could not save {alias}: {e}"), cx);
             } else {
-                self.connections = next;
+                self.commit_hosts(next, format!("Allow clipboard for {alias}"));
             }
         }
         let others: Vec<Entity<Session>> = self

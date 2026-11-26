@@ -225,6 +225,17 @@ impl Shell {
         self.restore_hosts(step, "Redo", window, cx);
     }
 
+    /// Refuses to overwrite an unreadable `hosts.json` (`store_error`), otherwise writes atomically.
+    pub(super) fn save_hosts_guarded(&self, next: &[Connection]) -> Result<(), String> {
+        if let Some(e) = &self.store_error {
+            return Err(e.clone());
+        }
+        match crate::settings::dir() {
+            Some(dir) => connections::save(&dir, next).map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
+    }
+
     /// Writes back a list from the history and names what changed ("Undo Remove web-01").
     /// Nothing to undo, or a list changed by sync since, only beeps.
     fn restore_hosts(
@@ -237,9 +248,7 @@ impl Shell {
         let Some((list, what)) = step else {
             return window.play_system_bell();
         };
-        if let Some(dir) = crate::settings::dir()
-            && let Err(e) = connections::save(&dir, &list)
-        {
+        if let Err(e) = self.save_hosts_guarded(&list) {
             self.hostlist.history.clear();
             return self.alert(
                 super::Alert::failure(format!("Could not {}: {e}", verb.to_lowercase())),
@@ -264,9 +273,7 @@ impl Shell {
         if !connections::move_to(&mut next, from, to) {
             return;
         }
-        if let Some(dir) = crate::settings::dir()
-            && let Err(e) = connections::save(&dir, &next)
-        {
+        if let Err(e) = self.save_hosts_guarded(&next) {
             tracing::warn!(error = %e, "hosts_move_save_failed");
             return self.alert_failed(format!("Could not move the host: {e}"), cx);
         }

@@ -13,7 +13,7 @@ use tern_ssh::HostEntry;
 
 use super::Shell;
 use super::connections_ui::{button, note};
-use crate::connections::{self, Connection};
+use crate::connections::Connection;
 use crate::picker;
 
 pub(super) struct ImportSheet {
@@ -95,15 +95,12 @@ impl Shell {
             crate::password_command::approve_saved(connection);
         }
         next.extend(fresh);
-        if let Some(dir) = crate::settings::dir()
-            && let Err(e) = connections::save(&dir, &next)
-        {
-            return self.alert_failed(e.to_string(), cx);
+        if let Err(e) = self.save_hosts_guarded(&next) {
+            return self.alert_failed(e, cx);
         }
-        self.connections = next;
-        self.refresh_hosts();
-        self.close_import(window, cx);
         let plural = if count == 1 { "" } else { "s" };
+        self.commit_hosts(next, format!("Import {count} host{plural}"));
+        self.close_import(window, cx);
         self.activity(format!("Imported {count} host{plural}"), cx);
     }
 

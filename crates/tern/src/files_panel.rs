@@ -456,9 +456,7 @@ impl FilesPanel {
 
     pub fn copy_snippet(&mut self, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(SNIPPET.to_owned()));
-        let _ = self.shell.update(cx, |s, cx| {
-            s.activity("Copied the line for your shell's rc file", cx)
-        });
+        self.activity("Copied the line for your shell's rc file".into(), cx);
     }
 
     /// What is picked, as entries.
@@ -491,13 +489,22 @@ impl FilesPanel {
     }
 
     /// A quiet message (ADR 0002) in the shell's status line.
+    ///
+    /// Deferred so calling back into `Shell` while `Shell` is updating this panel (for example
+    /// during `Shell::drop_rows`) never double-leases `Shell`.
     pub(crate) fn activity(&self, text: String, cx: &mut Context<Self>) {
-        let _ = self.shell.update(cx, |s, cx| s.activity(text, cx));
+        let shell = self.shell.clone();
+        gpui::App::defer(cx, move |cx| {
+            let _ = shell.update(cx, |s, cx| s.activity(text, cx));
+        });
     }
 
     pub(crate) fn alert(&self, text: &str, cx: &mut Context<Self>) {
+        let shell = self.shell.clone();
         let text = text.to_owned();
-        let _ = self.shell.update(cx, |s, cx| s.alert_failed(text, cx));
+        gpui::App::defer(cx, move |cx| {
+            let _ = shell.update(cx, |s, cx| s.alert_failed(text, cx));
+        });
     }
 }
 

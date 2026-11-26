@@ -239,6 +239,7 @@ impl Shell {
         if self.tabs.close_others(keep).is_empty() {
             return;
         }
+        self.renaming = None;
         self.sync_broadcast(cx);
         self.front_tab_changed(window, cx);
     }

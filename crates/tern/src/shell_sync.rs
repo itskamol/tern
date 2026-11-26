@@ -414,6 +414,8 @@ impl Shell {
             }
             Err(e) => self.store_error = Some(e.to_string()),
         }
+        self.hostlist.history.clear();
+        self.snippets = super::snippets_ui::SnippetsUi::load();
         self.refresh_hosts();
     }
 

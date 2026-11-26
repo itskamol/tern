@@ -473,11 +473,15 @@ impl Shell {
             )
     }
 
-    /// Focus back to the active terminal, or the window when there is none.
+    /// Focus back to the active terminal, or the window when Settings is open or there is no tab.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = match self.tabs.active_tab() {
-            Some(tab) => tab.focus_handle(cx),
-            None => self.focus.clone(),
+        let focus = if self.settings_page.is_some() {
+            self.focus.clone()
+        } else {
+            match self.tabs.active_tab() {
+                Some(tab) => tab.focus_handle(cx),
+                None => self.focus.clone(),
+            }
         };
         window.focus(&focus, cx);
         cx.notify();
