@@ -477,11 +477,33 @@ impl Shell {
                                     )
                                     .child(
                                         div()
+                                            .flex()
                                             .flex_1()
                                             .min_w_0()
-                                            .overflow_hidden()
-                                            .text_color(t.text)
-                                            .child(SharedString::from(d.value)),
+                                            .flex_wrap()
+                                            .items_center()
+                                            .gap(px(CONTROL_RADIUS))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .text_color(t.text)
+                                                    .child(SharedString::from(d.value)),
+                                            )
+                                            .when_some(d.badge, |row, badge| {
+                                                row.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .px(px(CONTROL_RADIUS))
+                                                        .py(px(1.))
+                                                        .rounded(px(4.))
+                                                        .bg(t.danger.opacity(0.14))
+                                                        .text_size(px(11.))
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                        .text_color(t.danger)
+                                                        .child(SharedString::from(badge)),
+                                                )
+                                            }),
                                     )
                             })),
                     )

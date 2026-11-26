@@ -3,7 +3,24 @@
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 use super::*;
-use crate::agents::protocol::read_line_bounded;
+use crate::agents::protocol::{BrokerMessage, read_line_bounded};
+
+#[cfg(unix)]
+async fn accept_within(listener: &tokio::net::UnixListener) -> tokio::net::UnixStream {
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await;
+    assert!(
+        accepted.is_ok(),
+        "timed out waiting for tern mcp to connect to fake broker (check Unix socket permissions)"
+    );
+    accepted.unwrap().unwrap().0
+}
+
+#[cfg(unix)]
+async fn recv_within<T>(rx: tokio::sync::oneshot::Receiver<T>, label: &str) -> T {
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    assert!(received.is_ok(), "timed out waiting for {label}");
+    received.unwrap().unwrap()
+}
 
 async fn exchange(
     writer: &mut tokio::io::DuplexStream,
@@ -106,7 +123,7 @@ async fn initialize_ping_tools_list_and_closed_tern_recovery_work_without_restar
     {
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
         let fake_broker = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let stream = accept_within(&listener).await;
             let (r, mut w) = stream.into_split();
             let mut r = BufReader::new(r);
             let line = read_line_bounded(&mut r, MAX_FRAME_BYTES)
@@ -197,7 +214,7 @@ async fn notifications_cancelled_with_string_id_sends_broker_cancel_and_suppress
     let (cancel_seen_tx, cancel_seen_rx) = tokio::sync::oneshot::channel::<BrokerRequest>();
 
     let fake_broker = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
+        let stream = accept_within(&listener).await;
         let (r, mut w) = stream.into_split();
         let mut r = BufReader::new(r);
         let first = read_line_bounded(&mut r, MAX_FRAME_BYTES)
@@ -252,7 +269,7 @@ async fn notifications_cancelled_with_string_id_sends_broker_cancel_and_suppress
     client_tx.write_all(&bytes).await.unwrap();
     client_tx.flush().await.unwrap();
 
-    broker_ready_rx.await.unwrap();
+    recv_within(broker_ready_rx, "fake broker ready").await;
 
     let cancel = json!({
         "jsonrpc": "2.0",
@@ -264,7 +281,7 @@ async fn notifications_cancelled_with_string_id_sends_broker_cancel_and_suppress
     client_tx.write_all(&cbytes).await.unwrap();
     client_tx.flush().await.unwrap();
 
-    let cancel_frame = cancel_seen_rx.await.unwrap();
+    let cancel_frame = recv_within(cancel_seen_rx, "broker cancel frame").await;
     assert_eq!(cancel_frame, BrokerRequest::Cancel);
     fake_broker.await.unwrap();
 
@@ -334,7 +351,9 @@ fn assert_matches_object_schema(value: &Value, schema: &Value) {
     }
 
     for (key, val) in obj {
-        let prop_schema = &props[key];
+        let Some(prop_schema) = props.get(key) else {
+            continue;
+        };
         match prop_schema["type"].as_str().unwrap() {
             "string" => assert!(val.is_string(), "field '{key}' must be string: {val}"),
             "boolean" => assert!(val.is_boolean(), "field '{key}' must be bool: {val}"),
@@ -353,8 +372,23 @@ fn assert_matches_object_schema(value: &Value, schema: &Value) {
             "array" => {
                 let items = val.as_array().unwrap();
                 let item_schema = &prop_schema["items"];
-                for item in items {
-                    assert_matches_object_schema(item, item_schema);
+                match item_schema["type"].as_str().unwrap() {
+                    "object" => {
+                        for item in items {
+                            assert_matches_object_schema(item, item_schema);
+                        }
+                    }
+                    "string" => {
+                        for item in items {
+                            assert!(
+                                item.is_string(),
+                                "array item in '{key}' must be string: {item}"
+                            );
+                        }
+                    }
+                    other => {
+                        assert_eq!(other, "object|string", "unsupported array item schema type")
+                    }
                 }
             }
             other => assert_eq!(
@@ -423,17 +457,31 @@ async fn initialize_negotiates_supported_protocol_version_and_gates_output_schem
 #[test]
 fn run_command_description_documents_environment_limits_and_is_error_semantics() {
     let payload = tools_list_payload();
+    let list_hosts = &payload["tools"][0];
+    assert_eq!(list_hosts["name"], "list_hosts");
+    let list_desc = list_hosts["description"].as_str().unwrap();
+    assert!(list_desc.contains("group"));
+    assert!(list_desc.contains("tags"));
+    assert!(list_desc.contains("safe to retry"));
+
     let run_cmd = &payload["tools"][1];
     assert_eq!(run_cmd["name"], "run_command");
     let desc = run_cmd["description"].as_str().unwrap();
     assert!(desc.contains("non-PTY"));
     assert!(desc.contains("non-interactive"));
     assert!(desc.contains("PATH"));
+    assert!(desc.contains("sudo"));
     assert!(desc.contains("64 KiB"));
     assert!(desc.contains("stdout_truncated"));
     assert!(desc.contains("stderr_truncated"));
     assert!(desc.contains("isError"));
     assert!(desc.contains("exit_code"));
+    assert!(desc.contains("tern_not_running"));
+    assert!(desc.contains("unknown_outcome"));
+    assert!(desc.contains("not_dispatched"));
+    assert!(desc.contains("not guaranteed"));
+    assert!(!desc.contains(".bashrc"));
+    assert!(!desc.contains("ionice"));
 }
 
 #[cfg(unix)]
@@ -450,13 +498,26 @@ async fn output_schema_matches_ok_nonzero_exit_and_preserves_vault_locked_reason
     let scripted_results = vec![
         BrokerResult::Ok {
             data: serde_json::to_value(ListHostsResponse {
-                hosts: vec![HostSummary {
-                    alias: "alpha".into(),
-                    host: "10.0.0.5".into(),
-                    user: "deploy".into(),
-                    port: 22,
-                    grant_active: true,
-                }],
+                hosts: vec![
+                    HostSummary {
+                        alias: "alpha".into(),
+                        host: "10.0.0.5".into(),
+                        user: "deploy".into(),
+                        port: 22,
+                        group: Some("core".into()),
+                        tags: vec!["production".into()],
+                        grant_active: true,
+                    },
+                    HostSummary {
+                        alias: "beta".into(),
+                        host: "10.0.0.6".into(),
+                        user: "ops".into(),
+                        port: 22,
+                        group: None,
+                        tags: Vec::new(),
+                        grant_active: false,
+                    },
+                ],
                 usage: "call run_command".into(),
             })
             .unwrap(),
@@ -495,7 +556,7 @@ async fn output_schema_matches_ok_nonzero_exit_and_preserves_vault_locked_reason
 
     let fake_broker = tokio::spawn(async move {
         for result in scripted_results {
-            let (stream, _) = listener.accept().await.unwrap();
+            let stream = accept_within(&listener).await;
             let (r, mut w) = stream.into_split();
             let mut r = BufReader::new(r);
             let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES)
@@ -625,7 +686,7 @@ async fn list_hosts_forwards_query_and_rejects_non_string_query() {
     let listener = tokio::net::UnixListener::bind(&sock).unwrap();
 
     let fake_broker = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
+        let stream = accept_within(&listener).await;
         let (r, mut w) = stream.into_split();
         let mut r = BufReader::new(r);
         let line = read_line_bounded(&mut r, MAX_FRAME_BYTES)
@@ -739,4 +800,459 @@ async fn socket_permission_denied_returns_denied_instead_of_tern_not_running() {
 
     drop(client_tx);
     server.await.unwrap().unwrap();
+}
+
+#[test]
+fn map_client_error_distinguishes_pre_connect_from_post_connect_for_run_command() {
+    use std::io;
+
+    use crate::agents::client::ClientError;
+
+    let unwrap_err = |res: Option<BrokerResult>| match res {
+        Some(BrokerResult::Error(err)) => Some(err),
+        _ => None,
+    };
+
+    // Pre-connect failure is always tern_not_running without phase for both tools.
+    for read_only in [false, true] {
+        let err = unwrap_err(map_client_error(
+            ClientError::Unavailable(io::Error::from(io::ErrorKind::NotFound)),
+            read_only,
+        ))
+        .unwrap();
+        assert_eq!(err.error, AgentErrorCode::TernNotRunning);
+        assert_eq!(err.phase, None);
+    }
+
+    // Post-connect write failure: unknown_outcome for run_command, tern_not_running for list_hosts.
+    let run_write = unwrap_err(map_client_error(
+        ClientError::WriteFailed(io::Error::from(io::ErrorKind::BrokenPipe)),
+        false,
+    ))
+    .unwrap();
+    assert_eq!(run_write.error, AgentErrorCode::UnknownOutcome);
+    assert_eq!(run_write.phase, None);
+    assert!(run_write.message.contains("do not retry blindly"));
+
+    let list_write = unwrap_err(map_client_error(
+        ClientError::WriteFailed(io::Error::from(io::ErrorKind::BrokenPipe)),
+        true,
+    ))
+    .unwrap();
+    assert_eq!(list_write.error, AgentErrorCode::TernNotRunning);
+    assert_eq!(list_write.phase, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn post_connect_broker_drop_returns_unknown_outcome_for_run_command_and_tern_not_running_for_list_hosts()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_sock = dir.path().join("missing.sock");
+    let sock = dir.path().join("agent.sock");
+
+    // 1. Pre-connect failure on run_command returns tern_not_running (no phase).
+    let (mut client_tx, server_rx) = tokio::io::duplex(64 * 1024);
+    let (server_tx, client_rx) = tokio::io::duplex(64 * 1024);
+    let mut client_rx = BufReader::new(client_rx);
+    let server = tokio::spawn(serve_stdio(
+        BufReader::new(server_rx),
+        server_tx,
+        missing_sock,
+    ));
+    let pre = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "run_command", "arguments": { "host": "alpha", "command": "id" } }
+        }),
+    )
+    .await;
+    assert_eq!(pre["result"]["isError"], true);
+    assert_eq!(
+        pre["result"]["structuredContent"]["error"],
+        "tern_not_running"
+    );
+    assert!(pre["result"]["structuredContent"].get("phase").is_none());
+    drop(client_tx);
+    server.await.unwrap().unwrap();
+
+    // 2. Post-connect drops (EOF and read error) map to unknown_outcome for run_command
+    //    and tern_not_running for read-only list_hosts.
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+    let fake_broker = tokio::spawn(async move {
+        // Call 1 (run_command) & Call 2 (list_hosts): read request then drop without replying.
+        for _ in 0..2 {
+            let stream = accept_within(&listener).await;
+            let (r, _w) = stream.into_split();
+            let mut r = BufReader::new(r);
+            let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        // Call 3 (run_command) & Call 4 (list_hosts): send invalid UTF-8 to trigger ReadFailed.
+        for _ in 0..2 {
+            let stream = accept_within(&listener).await;
+            let (r, mut w) = stream.into_split();
+            let mut r = BufReader::new(r);
+            let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES)
+                .await
+                .unwrap()
+                .unwrap();
+            w.write_all(b"\xff\xfe\n").await.unwrap();
+            w.flush().await.unwrap();
+        }
+    });
+
+    let (mut client_tx, server_rx) = tokio::io::duplex(64 * 1024);
+    let (server_tx, client_rx) = tokio::io::duplex(64 * 1024);
+    let mut client_rx = BufReader::new(client_rx);
+    let server = tokio::spawn(serve_stdio(BufReader::new(server_rx), server_tx, sock));
+
+    let run_eof = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": { "name": "run_command", "arguments": { "host": "alpha", "command": "rm -rf /tmp/x" } }
+        }),
+    )
+    .await;
+    assert_eq!(run_eof["result"]["isError"], true);
+    assert_eq!(
+        run_eof["result"]["structuredContent"]["error"],
+        "unknown_outcome"
+    );
+    assert!(
+        run_eof["result"]["structuredContent"]
+            .get("phase")
+            .is_none()
+    );
+    assert!(
+        run_eof["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("do not retry blindly")
+    );
+
+    let list_eof = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": { "name": "list_hosts", "arguments": {} }
+        }),
+    )
+    .await;
+    assert_eq!(list_eof["result"]["isError"], true);
+    assert_eq!(
+        list_eof["result"]["structuredContent"]["error"],
+        "tern_not_running"
+    );
+    assert!(
+        list_eof["result"]["structuredContent"]
+            .get("phase")
+            .is_none()
+    );
+
+    let run_read_err = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": { "name": "run_command", "arguments": { "host": "alpha", "command": "deploy" } }
+        }),
+    )
+    .await;
+    assert_eq!(run_read_err["result"]["isError"], true);
+    assert_eq!(
+        run_read_err["result"]["structuredContent"]["error"],
+        "unknown_outcome"
+    );
+    assert!(
+        run_read_err["result"]["structuredContent"]
+            .get("phase")
+            .is_none()
+    );
+    assert!(
+        run_read_err["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("do not retry blindly")
+    );
+
+    let list_read_err = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": { "name": "list_hosts", "arguments": {} }
+        }),
+    )
+    .await;
+    assert_eq!(list_read_err["result"]["isError"], true);
+    assert_eq!(
+        list_read_err["result"]["structuredContent"]["error"],
+        "tern_not_running"
+    );
+
+    fake_broker.await.unwrap();
+    drop(client_tx);
+    server.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_stdio_logs_start_finish_cancel_and_eof_with_in_flight_calls() {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    #[derive(Clone, Default)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let logs = BufWriter::default();
+    let writer_factory = logs.clone();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(move || writer_factory.clone()),
+    );
+    // Keep two registered dispatches so tracing-core leaves `has_just_one` mode and parallel
+    // test threads without a subscriber cannot poison callsites to `Interest::never()`.
+    let _multi_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("agent.sock");
+    let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+
+    let (cancel_ready_tx, cancel_ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let (eof_ready_tx, eof_ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let fake_broker = tokio::spawn(async move {
+        // 1. Completed call.
+        let stream = accept_within(&listener).await;
+        let (r, mut w) = stream.into_split();
+        let mut r = BufReader::new(r);
+        let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        write_json_line(
+            &mut w,
+            &BrokerMessage::Result(BrokerResult::Ok {
+                data: json!({ "hosts": [], "usage": "call run_command" }),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // 2. Call cancelled via notifications/cancelled.
+        let stream = accept_within(&listener).await;
+        let (r, _w) = stream.into_split();
+        let mut r = BufReader::new(r);
+        let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = cancel_ready_tx.send(());
+        let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES).await;
+
+        // 3. Call still in flight when client closes stdin (EOF).
+        let stream = accept_within(&listener).await;
+        let (r, _w) = stream.into_split();
+        let mut r = BufReader::new(r);
+        let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = eof_ready_tx.send(());
+        let _ = read_line_bounded(&mut r, MAX_FRAME_BYTES).await;
+    });
+
+    let (mut client_tx, server_rx) = tokio::io::duplex(64 * 1024);
+    let (server_tx, client_rx) = tokio::io::duplex(64 * 1024);
+    let mut client_rx = BufReader::new(client_rx);
+    let server = tokio::spawn(serve_stdio(BufReader::new(server_rx), server_tx, sock));
+
+    // 1. Finish path.
+    let ok = exchange(
+        &mut client_tx,
+        &mut client_rx,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_hosts", "arguments": {} }
+        }),
+    )
+    .await;
+    assert_eq!(ok["result"]["isError"], false);
+
+    // 2. Explicit client cancel path.
+    let mut c1 = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": { "host": "alpha", "command": "sleep 70", "timeout_secs": 120 },
+            "_meta": { "progressToken": "tok-1" }
+        }
+    }))
+    .unwrap();
+    c1.push(b'\n');
+    client_tx.write_all(&c1).await.unwrap();
+    client_tx.flush().await.unwrap();
+    recv_within(cancel_ready_rx, "cancel test broker ready").await;
+
+    let mut cancel_msg = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": { "requestId": 2 }
+    }))
+    .unwrap();
+    cancel_msg.push(b'\n');
+    client_tx.write_all(&cancel_msg).await.unwrap();
+    client_tx.flush().await.unwrap();
+
+    // 3. In-flight call aborted when stdin closes (EOF).
+    let mut c2 = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_command",
+            "arguments": { "host": "alpha", "command": "sleep 70" }
+        }
+    }))
+    .unwrap();
+    c2.push(b'\n');
+    client_tx.write_all(&c2).await.unwrap();
+    client_tx.flush().await.unwrap();
+    recv_within(eof_ready_rx, "eof test broker ready").await;
+
+    drop(client_tx);
+    server.await.unwrap().unwrap();
+    fake_broker.await.unwrap();
+
+    let raw = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    let events: Vec<Value> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let find = |msg: &str| {
+        let found = events.iter().find(|e| e["fields"]["message"] == msg);
+        assert!(found.is_some(), "missing log event '{msg}' in:\n{raw}");
+        found.unwrap()
+    };
+
+    let start = find("mcp_tool_call_start");
+    assert_eq!(start["fields"]["tool"], "list_hosts");
+    assert_eq!(start["fields"]["has_progress_token"], false);
+
+    let finish = find("mcp_tool_call_finish");
+    assert_eq!(finish["fields"]["tool"], "list_hosts");
+    assert!(finish["fields"]["duration_ms"].is_u64());
+
+    let cancelled = find("mcp_tool_call_cancelled");
+    assert_eq!(cancelled["fields"]["tool"], "run_command");
+    assert_eq!(cancelled["fields"]["has_progress_token"], true);
+    assert!(cancelled["fields"]["duration_ms"].is_u64());
+
+    let eof = find("mcp_stdio_eof");
+    assert_eq!(eof["fields"]["in_flight"], 1);
+
+    let aborted = find("mcp_tool_call_aborted_on_eof");
+    assert_eq!(aborted["fields"]["tool"], "run_command");
+    assert_eq!(aborted["fields"]["has_progress_token"], false);
+    assert!(aborted["fields"]["duration_ms"].is_u64());
+}
+
+fn contains_closed_additional_properties(schema: &Value) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return false;
+    };
+    if obj.get("additionalProperties") == Some(&json!(false)) {
+        return true;
+    }
+    obj.values().any(contains_closed_additional_properties)
+}
+
+#[test]
+fn output_schema_allows_additive_broker_fields_for_forward_compatibility() {
+    let payload = tools_list_payload();
+    let tools = payload["tools"].as_array().unwrap();
+
+    for tool in tools {
+        // Input schemas stay strict, while output schemas allow future additive broker fields so
+        // an older long-lived `tern mcp` process keeps working when `Tern.app` upgrades.
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"],
+            json!(false),
+            "{} inputSchema must stay strict",
+            tool["name"]
+        );
+        assert!(
+            !contains_closed_additional_properties(&tool["outputSchema"]),
+            "{} outputSchema must not set additionalProperties: false",
+            tool["name"]
+        );
+    }
+
+    assert_matches_object_schema(
+        &json!({
+            "hosts": [{
+                "alias": "alpha",
+                "host": "10.0.0.5",
+                "user": "deploy",
+                "port": 22,
+                "tags": ["prod"],
+                "grant_active": false,
+                "future_field": "kept-forward-compatible"
+            }],
+            "usage": "call run_command",
+            "future_top_level": true
+        }),
+        &tools[0]["outputSchema"],
+    );
+    assert_matches_object_schema(
+        &json!({
+            "host": "alpha",
+            "exit_code": 0,
+            "stdout": "ok\n",
+            "stderr": "",
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "duration_ms": 12,
+            "future_remote_pid": 4242
+        }),
+        &tools[1]["outputSchema"],
+    );
 }

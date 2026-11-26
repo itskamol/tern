@@ -34,7 +34,7 @@ use super::broker::{
 };
 use super::grants::{GrantFingerprint, GrantStore};
 use super::mcp;
-use super::protocol::{AgentErrorCode, MAX_COMMAND_BYTES, UserActionReason};
+use super::protocol::{MAX_COMMAND_BYTES, UserActionReason};
 use super::socket_path;
 use super::store::AgentConfig;
 use super::vault_wait::{PendingVaultUnlock, VaultWaitQueue};
@@ -930,13 +930,10 @@ fn decision_expiry_pre_dispatch_cancel_and_post_dispatch_unknown_outcome() {
     }));
     wait_until(&mut app, |app| {
         app.update(|cx| {
-            host.read(cx).outcomes.iter().any(|o| {
-                matches!(
-                    &o.result,
-                    super::protocol::BrokerResult::Error(e)
-                        if e.error == AgentErrorCode::UnknownOutcome
-                )
-            })
+            host.read(cx)
+                .outcomes
+                .iter()
+                .any(|o| o.kind == super::broker_exec::AgentOutcomeKind::UnknownOutcome)
         })
     });
 }
@@ -1091,12 +1088,24 @@ fn list_hosts_query_ranks_exact_match_first_and_reports_grant_active() {
         ..Connection::default()
     };
 
+    let mut gamma = make_conn("gamma", "10.0.0.9", "ops");
+    gamma.group = Some("alpha-cluster".into());
+    gamma.tags = vec!["production".into(), "db".into()];
+
+    let mut delta = make_conn("delta", "10.0.0.10", "ops");
+    delta.tags = vec!["alpha-tag".into()];
+
+    let mut epsilon = make_conn("epsilon", "10.0.0.11", "ops");
+    epsilon.tags = vec!["staging".into()];
+
     let connections = vec![
         make_conn("alpha-public", "10.0.0.1", "ops"),
-        make_conn("gamma", "10.0.0.9", "ops"),
+        gamma,
         make_conn("prod-alpha", "10.0.0.3", "ops"),
         make_conn("alpha public", "10.0.0.2", "ops"),
         make_conn("beta", "alpha.internal", "ops"),
+        delta,
+        epsilon,
         make_conn("alpha", "10.0.0.5", "deploy"),
     ];
 
@@ -1111,7 +1120,7 @@ fn list_hosts_query_ranks_exact_match_first_and_reports_grant_active() {
     });
     let mcp = McpHarness::start(socket_path(dir.path()), &app);
 
-    // 1. Query ranks exact alias match first, then prefix, substring, host/user, excluding misses.
+    // 1. Query ranks exact alias first, then prefix, substring, host/user, then group/tags.
     mcp.send(json!({
         "jsonrpc": "2.0",
         "id": "q-1",
@@ -1131,10 +1140,36 @@ fn list_hosts_query_ranks_exact_match_first_and_reports_grant_active() {
             "alpha-public",
             "alpha public",
             "prod-alpha",
-            "beta"
+            "beta",
+            "gamma",
+            "delta",
         ]
     );
     assert!(hosts.iter().all(|h| h["grant_active"] == json!(false)));
+    // Untagged/ungrouped host omits group and always returns tags as an array.
+    assert!(hosts[0].get("group").is_none());
+    assert_eq!(hosts[0]["tags"], json!([]));
+    // Grouped/tagged host includes group and tags.
+    assert_eq!(hosts[5]["alias"], "gamma");
+    assert_eq!(hosts[5]["group"], "alpha-cluster");
+    assert_eq!(hosts[5]["tags"], json!(["production", "db"]));
+
+    // 1b. Querying "prod" matches alias before tag ("prod-alpha" before "gamma").
+    mcp.send(json!({
+        "jsonrpc": "2.0",
+        "id": "q-prod",
+        "method": "tools/call",
+        "params": { "name": "list_hosts", "arguments": { "query": "prod" } }
+    }));
+    let q_prod = mcp.recv_id("q-prod", &app);
+    let prod_hosts = q_prod["result"]["structuredContent"]["hosts"]
+        .as_array()
+        .unwrap();
+    let prod_aliases: Vec<&str> = prod_hosts
+        .iter()
+        .map(|h| h["alias"].as_str().unwrap())
+        .collect();
+    assert_eq!(prod_aliases, vec!["prod-alpha", "gamma"]);
 
     // 2. Granting "alpha" sets grant_active = true only for "alpha".
     app.update(|cx| {
@@ -1284,6 +1319,12 @@ fn run_command_timeout_reports_all_three_phases_and_partial_output() {
         r_connect["result"]["structuredContent"]["phase"],
         "not_dispatched"
     );
+    assert!(
+        !r_connect["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("remote process stop is not guaranteed")
+    );
     assert_eq!(r_connect["result"]["structuredContent"]["stdout"], "");
     assert_eq!(r_connect["result"]["structuredContent"]["stderr"], "");
     assert!(
@@ -1313,6 +1354,12 @@ fn run_command_timeout_reports_all_three_phases_and_partial_output() {
         r_uncertain["result"]["structuredContent"]["phase"],
         "dispatch_uncertain"
     );
+    assert!(
+        r_uncertain["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("remote process stop is not guaranteed")
+    );
     assert_eq!(r_uncertain["result"]["structuredContent"]["stdout"], "");
     assert_eq!(r_uncertain["result"]["structuredContent"]["stderr"], "");
 
@@ -1333,6 +1380,12 @@ fn run_command_timeout_reports_all_three_phases_and_partial_output() {
         "timed_out"
     );
     assert_eq!(r_running["result"]["structuredContent"]["phase"], "running");
+    assert!(
+        r_running["result"]["structuredContent"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("remote process stop is not guaranteed")
+    );
     assert_eq!(
         r_running["result"]["structuredContent"]["stdout"],
         "step 1 done\n"

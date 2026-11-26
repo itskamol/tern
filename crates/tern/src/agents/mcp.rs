@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -17,23 +17,25 @@ use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+#[path = "mcp_schema.rs"]
+mod schema;
+
+use self::schema::{LATEST_PROTOCOL_VERSION, tools_list_payload_for_version};
 use super::protocol::{
-    AgentError, AgentErrorCode, BoundedLineReader, BrokerMessage, BrokerRequest, BrokerResult,
-    FrameError, MAX_FRAME_BYTES, write_json_line,
+    AgentError, AgentErrorCode, BoundedLineReader, BrokerRequest, BrokerResult, FrameError,
+    MAX_FRAME_BYTES, write_json_line,
 };
 use super::socket_path;
 
 const JSONRPC_VERSION: &str = "2.0";
 /// MCP protocol versions supported by `tern mcp`, ordered newest first.
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
-const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
 const ERR_PARSE: i64 = -32700;
 const ERR_INVALID_REQUEST: i64 = -32600;
 const ERR_METHOD_NOT_FOUND: i64 = -32601;
 const ERR_INVALID_PARAMS: i64 = -32602;
 const MAX_IN_FLIGHT_CALLS: usize = 32;
 const OUTGOING_CHANNEL_CAP: usize = 64;
-const CANCEL_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Runs `tern mcp` over process stdin/stdout until stdin closes.
 ///
@@ -148,10 +150,6 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
     LATEST_PROTOCOL_VERSION
 }
 
-fn supports_output_schema(protocol_version: &str) -> bool {
-    protocol_version >= "2025-06-18"
-}
-
 /// Normalized JSON-RPC request ID key for tracking concurrent in-flight `tools/call` tasks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RequestKey {
@@ -173,6 +171,9 @@ impl RequestKey {
 }
 
 struct InFlightCall {
+    tool: &'static str,
+    started_at: Instant,
+    has_progress_token: bool,
     cancel_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -189,8 +190,14 @@ enum Outgoing {
 }
 
 struct ParsedToolCall {
+    tool: &'static str,
+    timeout_secs: Option<u64>,
     request: BrokerRequest,
     progress_token: Option<Value>,
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Serves MCP JSON-RPC 2.0 over newline-delimited `reader` and `writer`, dialing `socket_path`
@@ -241,7 +248,10 @@ where
             next = line_reader.next_line(MAX_FRAME_BYTES) => {
                 let line = match next {
                     Ok(Some(line)) => line,
-                    Ok(None) => break Ok(()),
+                    Ok(None) => {
+                        tracing::info!(in_flight = in_flight.len(), "mcp_stdio_eof");
+                        break Ok(());
+                    }
                     Err(FrameError::TooLarge(limit)) => {
                         let resp = JsonRpcResponse::err(
                             Value::Null,
@@ -317,6 +327,12 @@ where
     };
 
     for (_, call) in in_flight.drain() {
+        tracing::info!(
+            tool = call.tool,
+            has_progress_token = call.has_progress_token,
+            duration_ms = elapsed_ms(call.started_at),
+            "mcp_tool_call_aborted_on_eof"
+        );
         call.cancel_tx.send_replace(true);
         call.task.abort();
         let _ = call.task.await;
@@ -336,9 +352,18 @@ fn dispatch_request(
     let Some(id) = req.id else {
         if req.method == "notifications/cancelled"
             && let Some(key) = req.params.get("requestId").and_then(RequestKey::from_value)
-            && let Some(call) = in_flight.remove(&key)
         {
-            call.cancel_tx.send_replace(true);
+            if let Some(call) = in_flight.remove(&key) {
+                tracing::info!(
+                    tool = call.tool,
+                    has_progress_token = call.has_progress_token,
+                    duration_ms = elapsed_ms(call.started_at),
+                    "mcp_tool_call_cancelled"
+                );
+                call.cancel_tx.send_replace(true);
+            } else {
+                tracing::info!("mcp_cancelled_unknown_request");
+            }
         }
         return None;
     };
@@ -383,6 +408,15 @@ fn dispatch_request(
                         "too many concurrent tool calls in flight",
                     ));
                 }
+                let tool = parsed.tool;
+                let has_progress_token = parsed.progress_token.is_some();
+                let started_at = Instant::now();
+                tracing::info!(
+                    tool,
+                    has_progress_token,
+                    timeout_secs = parsed.timeout_secs,
+                    "mcp_tool_call_start"
+                );
                 let key = RequestKey::from_value(&id);
                 let socket = socket_path.to_path_buf();
                 let tx = out_tx.clone();
@@ -401,6 +435,17 @@ fn dispatch_request(
                     else {
                         return;
                     };
+                    let error_code = match &result {
+                        BrokerResult::Ok { .. } => None,
+                        BrokerResult::Error(err) => Some(err.error.as_str()),
+                    };
+                    tracing::info!(
+                        tool,
+                        has_progress_token,
+                        duration_ms = elapsed_ms(started_at),
+                        error_code,
+                        "mcp_tool_call_finish"
+                    );
                     let response = JsonRpcResponse::ok(id, format_tool_result(result));
                     let _ = tx
                         .send(Outgoing::Response {
@@ -410,7 +455,16 @@ fn dispatch_request(
                         .await;
                 });
                 if let Some(k) = key
-                    && let Some(prev) = in_flight.insert(k, InFlightCall { cancel_tx, task })
+                    && let Some(prev) = in_flight.insert(
+                        k,
+                        InFlightCall {
+                            tool,
+                            started_at,
+                            has_progress_token,
+                            cancel_tx,
+                            task,
+                        },
+                    )
                 {
                     prev.cancel_tx.send_replace(true);
                     prev.task.abort();
@@ -444,113 +498,6 @@ fn tools_list_payload() -> Value {
     tools_list_payload_for_version(LATEST_PROTOCOL_VERSION)
 }
 
-fn list_hosts_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "hosts": {
-                "type": "array",
-                "description": "Saved connections available to Agents.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "alias": { "type": "string", "description": "Exact Saved connection alias to pass to run_command." },
-                        "host": { "type": "string", "description": "Remote hostname or IP address." },
-                        "user": { "type": "string", "description": "SSH login username." },
-                        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "SSH port." },
-                        "grant_active": { "type": "boolean", "description": "Point-in-time hint whether an active Host Grant covers this connection; run_command still re-verifies authorization." }
-                    },
-                    "required": ["alias", "host", "user", "port", "grant_active"],
-                    "additionalProperties": false
-                }
-            },
-            "usage": { "type": "string", "description": "Short guidance for calling run_command." }
-        },
-        "required": ["hosts", "usage"],
-        "additionalProperties": false
-    })
-}
-
-fn run_command_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "host": { "type": "string", "description": "Saved connection alias where the command ran." },
-            "exit_code": { "type": "integer", "minimum": 0, "description": "Remote process exit status when exited normally (absent if terminated by a signal or closed without status)." },
-            "signal": { "type": "string", "description": "Signal name when terminated by a signal." },
-            "stdout": { "type": "string", "description": "Captured standard output (UTF-8 lossy), capped at 64 KiB." },
-            "stderr": { "type": "string", "description": "Captured standard error (UTF-8 lossy), capped at 64 KiB." },
-            "stdout_truncated": { "type": "boolean", "description": "True when stdout exceeded 64 KiB and trailing bytes were discarded." },
-            "stderr_truncated": { "type": "boolean", "description": "True when stderr exceeded 64 KiB and trailing bytes were discarded." },
-            "duration_ms": { "type": "integer", "minimum": 0, "description": "Elapsed wall-clock duration in milliseconds." }
-        },
-        "required": [
-            "host",
-            "stdout",
-            "stderr",
-            "stdout_truncated",
-            "stderr_truncated",
-            "duration_ms"
-        ],
-        "additionalProperties": false
-    })
-}
-
-fn tools_list_payload_for_version(protocol_version: &str) -> Value {
-    let mut list_hosts = json!({
-        "name": "list_hosts",
-        "description": "List Saved connections in tern available to Agents, optionally filtered by query (exact alias match ranked first). Each entry includes grant_active as a point-in-time hint; run_command still verifies authorization.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Optional case-insensitive filter matched against alias (exact match first, then prefix and substring), host, or user."
-                }
-            },
-            "additionalProperties": false
-        }
-    });
-    let mut run_command = json!({
-        "name": "run_command",
-        "description": "Run a shell command or inline script on a Saved connection in tern over an isolated non-PTY, non-interactive SSH exec channel. The session PATH and environment may differ from an interactive terminal. Command text is limited to 64 KiB; stdout and stderr are each capped at 64 KiB (check stdout_truncated and stderr_truncated). MCP isError reflects broker or SSH call failure, not the remote exit status: a completed remote command returns isError: false even when exit_code is non-zero (inspect exit_code or signal). On timed_out, structuredContent includes phase (not_dispatched, dispatch_uncertain, or running) plus any partial stdout/stderr; only not_dispatched is safe to retry blindly. Requires approval in tern unless an active Host Grant exists.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "host": {
-                    "type": "string",
-                    "description": "Exact Saved connection alias returned by list_hosts."
-                },
-                "command": {
-                    "type": "string",
-                    "description": "Shell command or inline script executed by the remote user's default shell over SSH exec (up to 64 KiB)."
-                },
-                "timeout_secs": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 300,
-                    "description": "Optional wall-clock timeout in seconds covering connection setup and execution (defaults to 30, clamped to 1..=300)."
-                }
-            },
-            "required": ["host", "command"],
-            "additionalProperties": false
-        }
-    });
-
-    if supports_output_schema(protocol_version) {
-        if let Some(obj) = list_hosts.as_object_mut() {
-            obj.insert("outputSchema".to_owned(), list_hosts_output_schema());
-        }
-        if let Some(obj) = run_command.as_object_mut() {
-            obj.insert("outputSchema".to_owned(), run_command_output_schema());
-        }
-    }
-
-    json!({
-        "tools": [list_hosts, run_command]
-    })
-}
-
 fn extract_progress_token(params: &Value) -> Option<Value> {
     let token = params.get("_meta")?.get("progressToken")?;
     match token {
@@ -572,7 +519,7 @@ fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<ParsedToolC
     };
     let progress_token = extract_progress_token(params);
 
-    let request = match name {
+    let (tool, timeout_secs, request) = match name {
         "list_hosts" => {
             let query = match args.get("query") {
                 None | Some(Value::Null) => None,
@@ -582,7 +529,11 @@ fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<ParsedToolC
                         .to_owned(),
                 ),
             };
-            BrokerRequest::ListHosts { caller, query }
+            (
+                "list_hosts",
+                None,
+                BrokerRequest::ListHosts { caller, query },
+            )
         }
         "run_command" => {
             let host = args
@@ -608,17 +559,23 @@ fn parse_tool_call(params: &Value, caller: Option<String>) -> Result<ParsedToolC
                     }
                 }
             };
-            BrokerRequest::RunCommand {
-                caller,
-                host,
-                command,
+            (
+                "run_command",
                 timeout_secs,
-                wants_progress: progress_token.is_some(),
-            }
+                BrokerRequest::RunCommand {
+                    caller,
+                    host,
+                    command,
+                    timeout_secs,
+                    wants_progress: progress_token.is_some(),
+                },
+            )
         }
         other => return Err(format!("unknown tool: {other}")),
     };
     Ok(ParsedToolCall {
+        tool,
+        timeout_secs,
         request,
         progress_token,
     })
@@ -646,6 +603,10 @@ fn format_tool_result(result: BrokerResult) -> Value {
     }
 }
 
+const fn is_read_only_request(request: &BrokerRequest) -> bool {
+    matches!(request, BrokerRequest::ListHosts { .. })
+}
+
 fn tern_not_running(detail: &str) -> BrokerResult {
     BrokerResult::Error(AgentError::new(
         AgentErrorCode::TernNotRunning,
@@ -653,124 +614,112 @@ fn tern_not_running(detail: &str) -> BrokerResult {
     ))
 }
 
-#[cfg(unix)]
-async fn wait_cancelled(rx: &mut watch::Receiver<bool>) {
-    let _ = rx.wait_for(|&c| c).await;
+fn unknown_outcome(message: impl Into<String>) -> BrokerResult {
+    BrokerResult::Error(AgentError::new(AgentErrorCode::UnknownOutcome, message))
 }
 
-#[cfg(unix)]
 async fn call_broker(
     socket_path: &Path,
     request: &BrokerRequest,
     progress_token: Option<Value>,
     key: Option<RequestKey>,
     out_tx: &mpsc::Sender<Outgoing>,
-    mut cancel_rx: watch::Receiver<bool>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> Option<BrokerResult> {
-    let stream = tokio::select! {
-        biased;
-        () = wait_cancelled(&mut cancel_rx) => return None,
-        connected = tokio::net::UnixStream::connect(socket_path) => match connected {
-            Ok(stream) => stream,
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                tracing::debug!(error = %e, "mcp_broker_permission_denied");
-                return Some(BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::Denied,
-                    format!("permission denied connecting to tern agent.sock ({e})"),
-                )));
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "mcp_broker_unavailable");
-                return Some(tern_not_running(&e.to_string()));
-            }
-        },
-    };
-    let (read_half, mut write_half) = stream.into_split();
-    let write_res = tokio::select! {
-        biased;
-        () = wait_cancelled(&mut cancel_rx) => return None,
-        res = write_json_line(&mut write_half, request) => res,
-    };
-    if let Err(e) = write_res {
-        tracing::warn!(error = %e, "mcp_broker_write_failed");
-        return Some(tern_not_running(&e.to_string()));
-    }
-    let mut reader = BoundedLineReader::new(BufReader::new(read_half));
+    let read_only = is_read_only_request(request);
+    let mut session =
+        match super::client::ClientSession::connect(socket_path, request, cancel_rx).await {
+            Ok(session) => session,
+            Err(err) => return map_client_error(err, read_only),
+        };
     let mut progress_step: u64 = 0;
     loop {
-        let next = tokio::select! {
-            biased;
-            () = wait_cancelled(&mut cancel_rx) => {
-                let _ = tokio::time::timeout(
-                    CANCEL_WRITE_TIMEOUT,
-                    write_json_line(&mut write_half, &BrokerRequest::Cancel),
-                )
-                .await;
-                return None;
-            }
-            line = reader.next_line(MAX_FRAME_BYTES) => line,
-        };
-        match next {
-            Ok(Some(line)) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<BrokerMessage>(&line) {
-                    Ok(BrokerMessage::Progress { message }) => {
-                        if let Some(token) = progress_token.as_ref() {
-                            progress_step = progress_step.saturating_add(1);
-                            let notification = json!({
-                                "jsonrpc": JSONRPC_VERSION,
-                                "method": "notifications/progress",
-                                "params": {
-                                    "progressToken": token,
-                                    "progress": progress_step,
-                                    "message": message,
-                                }
-                            });
-                            let _ = out_tx
-                                .send(Outgoing::Progress {
-                                    key: key.clone(),
-                                    notification,
-                                })
-                                .await;
-                        } else {
-                            tracing::debug!(progress = %message, "mcp_broker_progress");
+        match session.next_frame().await {
+            Ok(super::client::ClientFrame::Progress(message)) => {
+                if let Some(token) = progress_token.as_ref() {
+                    progress_step = progress_step.saturating_add(1);
+                    let notification = json!({
+                        "jsonrpc": JSONRPC_VERSION,
+                        "method": "notifications/progress",
+                        "params": {
+                            "progressToken": token,
+                            "progress": progress_step,
+                            "message": message,
                         }
-                    }
-                    Ok(BrokerMessage::StdoutChunk { .. } | BrokerMessage::StderrChunk { .. }) => {}
-                    Ok(BrokerMessage::Result(result)) => return Some(result),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "mcp_broker_bad_frame");
-                        return Some(BrokerResult::Error(AgentError::new(
-                            AgentErrorCode::SshError,
-                            "received malformed response from tern broker",
-                        )));
-                    }
+                    });
+                    let _ = out_tx
+                        .send(Outgoing::Progress {
+                            key: key.clone(),
+                            notification,
+                        })
+                        .await;
+                } else {
+                    tracing::debug!(progress = %message, "mcp_broker_progress");
                 }
             }
-            Ok(None) => {
-                return Some(tern_not_running("connection closed before response"));
-            }
-            Err(e) => {
-                return Some(tern_not_running(&e.to_string()));
-            }
+            Ok(super::client::ClientFrame::Stdout(_) | super::client::ClientFrame::Stderr(_)) => {}
+            Ok(super::client::ClientFrame::Result(result)) => return Some(result),
+            Err(err) => return map_client_error(err, read_only),
         }
     }
 }
 
-#[cfg(not(unix))]
-async fn call_broker(
-    _socket_path: &Path,
-    _request: &BrokerRequest,
-    _progress_token: Option<Value>,
-    _key: Option<RequestKey>,
-    _out_tx: &mpsc::Sender<Outgoing>,
-    _cancel_rx: watch::Receiver<bool>,
-) -> Option<BrokerResult> {
-    Some(tern_not_running(
-        "local unix socket broker is unsupported on this platform",
-    ))
+fn map_client_error(err: super::client::ClientError, read_only: bool) -> Option<BrokerResult> {
+    match err {
+        super::client::ClientError::Cancelled => None,
+        super::client::ClientError::PermissionDenied(e) => {
+            tracing::debug!(error = %e, "mcp_broker_permission_denied");
+            Some(BrokerResult::Error(AgentError::new(
+                AgentErrorCode::Denied,
+                format!("permission denied connecting to tern agent.sock ({e})"),
+            )))
+        }
+        super::client::ClientError::Unavailable(e) => {
+            tracing::debug!(error = %e, "mcp_broker_unavailable");
+            Some(tern_not_running(&e.to_string()))
+        }
+        super::client::ClientError::WriteFailed(e) => {
+            tracing::warn!(error = %e, read_only, "mcp_broker_write_failed");
+            if read_only {
+                Some(tern_not_running(&e.to_string()))
+            } else {
+                Some(unknown_outcome(format!(
+                    "failed sending request to tern broker ({e}); command may have reached tern — do not retry blindly"
+                )))
+            }
+        }
+        super::client::ClientError::MalformedResponse(e) => {
+            tracing::warn!(error = %e, "mcp_broker_bad_frame");
+            Some(BrokerResult::Error(AgentError::new(
+                AgentErrorCode::SshError,
+                "received malformed response from tern broker",
+            )))
+        }
+        super::client::ClientError::ClosedUnexpectedly => {
+            tracing::warn!(read_only, "mcp_broker_closed_unexpectedly");
+            if read_only {
+                Some(tern_not_running("connection closed before response"))
+            } else {
+                Some(unknown_outcome(
+                    "tern broker closed connection before response; command may have run — do not retry blindly",
+                ))
+            }
+        }
+        super::client::ClientError::ReadFailed(e) => {
+            tracing::warn!(error = %e, read_only, "mcp_broker_read_failed");
+            if read_only {
+                Some(tern_not_running(&e.to_string()))
+            } else {
+                Some(unknown_outcome(format!(
+                    "lost connection to tern broker while waiting for response ({e}); command may have run — do not retry blindly"
+                )))
+            }
+        }
+        #[cfg(not(unix))]
+        super::client::ClientError::UnsupportedPlatform => Some(tern_not_running(
+            "local unix socket broker is unsupported on this platform",
+        )),
+    }
 }
 
 #[cfg(test)]

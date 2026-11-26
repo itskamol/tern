@@ -8,19 +8,14 @@
 
 use std::io;
 use std::path::Path;
-use std::time::Duration;
 
-use base64::Engine as _;
-use tokio::io::{AsyncWrite, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::watch;
 
-use super::protocol::{
-    BoundedLineReader, BrokerMessage, BrokerRequest, BrokerResult, ExecStreamResponse,
-    MAX_FRAME_BYTES, write_json_line,
-};
+use super::client::{ClientError, ClientFrame, ClientSession};
+use super::protocol::{BrokerRequest, BrokerResult, ExecStreamResponse};
 use super::socket_path;
 
-const CANCEL_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 const EXIT_INTERRUPTED: i32 = 130;
 
 /// Parsed CLI arguments for `tern exec`.
@@ -102,51 +97,21 @@ async fn write_err_line<W: AsyncWrite + Unpin>(stderr: &mut W, msg: &str) -> io:
     stderr.flush().await
 }
 
-async fn wait_cancelled(rx: &mut watch::Receiver<bool>) {
-    let _ = rx.wait_for(|&c| c).await;
-}
-
 /// Core testable streaming client driving one `BrokerRequest::ExecStream` over `socket_path`.
 ///
 /// # Errors
 /// Returns an [`io::Error`] if writing to `stdout` or `stderr` fails.
-#[cfg(unix)]
 pub async fn run_client<WOut, WErr>(
     socket_path: &Path,
     args: ExecCliArgs,
     stdout: &mut WOut,
     stderr: &mut WErr,
-    mut cancel_rx: watch::Receiver<bool>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> io::Result<i32>
 where
     WOut: AsyncWrite + Unpin,
     WErr: AsyncWrite + Unpin,
 {
-    let stream = tokio::select! {
-        biased;
-        () = wait_cancelled(&mut cancel_rx) => return Ok(EXIT_INTERRUPTED),
-        res = tokio::net::UnixStream::connect(socket_path) => match res {
-            Ok(s) => s,
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                write_err_line(
-                    stderr,
-                    &format!("tern exec: permission denied connecting to tern agent.sock ({e})"),
-                )
-                .await?;
-                return Ok(1);
-            }
-            Err(e) => {
-                write_err_line(
-                    stderr,
-                    &format!("tern exec: tern is not running or local MCP/Agent broker is disabled ({e})"),
-                )
-                .await?;
-                return Ok(1);
-            }
-        },
-    };
-
-    let (read_half, mut write_half) = stream.into_split();
     let request = BrokerRequest::ExecStream {
         caller: Some("tern exec".to_owned()),
         host: args.host,
@@ -154,115 +119,110 @@ where
         timeout_secs: args.timeout_secs,
         wants_progress: true,
     };
-    if let Err(e) = write_json_line(&mut write_half, &request).await {
-        write_err_line(stderr, &format!("tern exec: failed to send request ({e})")).await?;
-        return Ok(1);
-    }
 
-    let mut reader = BoundedLineReader::new(BufReader::new(read_half));
+    let mut session = match ClientSession::connect(socket_path, &request, cancel_rx).await {
+        Ok(s) => s,
+        Err(err) => return handle_client_error(stderr, err).await,
+    };
+
     loop {
-        let next = tokio::select! {
-            biased;
-            () = wait_cancelled(&mut cancel_rx) => {
-                let _ = tokio::time::timeout(
-                    CANCEL_WRITE_TIMEOUT,
-                    write_json_line(&mut write_half, &BrokerRequest::Cancel),
-                )
-                .await;
-                write_err_line(
-                    stderr,
-                    "tern exec: interrupted (requested remote cancellation; remote process stop is not guaranteed)",
-                )
-                .await?;
-                return Ok(EXIT_INTERRUPTED);
+        match session.next_frame().await {
+            Ok(ClientFrame::Progress(message)) => {
+                write_err_line(stderr, &format!("tern exec: {message}")).await?;
             }
-            line = reader.next_line(MAX_FRAME_BYTES) => line,
-        };
-
-        match next {
-            Ok(Some(line)) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<BrokerMessage>(&line) {
-                    Ok(BrokerMessage::Progress { message }) => {
-                        write_err_line(stderr, &format!("tern exec: {message}")).await?;
-                    }
-                    Ok(BrokerMessage::StdoutChunk { data_b64 }) => {
-                        if let Ok(bytes) =
-                            base64::engine::general_purpose::STANDARD.decode(&data_b64)
-                        {
-                            stdout.write_all(&bytes).await?;
-                            stdout.flush().await?;
-                        }
-                    }
-                    Ok(BrokerMessage::StderrChunk { data_b64 }) => {
-                        if let Ok(bytes) =
-                            base64::engine::general_purpose::STANDARD.decode(&data_b64)
-                        {
-                            stderr.write_all(&bytes).await?;
-                            stderr.flush().await?;
-                        }
-                    }
-                    Ok(BrokerMessage::Result(BrokerResult::Ok { data })) => {
-                        let Ok(done) = serde_json::from_value::<ExecStreamResponse>(data) else {
-                            return Ok(0);
-                        };
-                        if let Some(code) = done.exit_code {
-                            return Ok(i32::try_from(code.min(255)).unwrap_or(255));
-                        }
-                        if let Some(sig) = done.signal {
-                            write_err_line(
-                                stderr,
-                                &format!("tern exec: remote process terminated by signal {sig}"),
-                            )
-                            .await?;
-                            return Ok(exit_code_for_signal(&sig));
-                        }
-                        return Ok(0);
-                    }
-                    Ok(BrokerMessage::Result(BrokerResult::Error(err))) => {
-                        write_err_line(stderr, &format!("tern exec: {}", err.message)).await?;
-                        return Ok(1);
-                    }
-                    Err(e) => {
-                        write_err_line(
-                            stderr,
-                            &format!("tern exec: malformed broker response ({e})"),
-                        )
-                        .await?;
-                        return Ok(1);
-                    }
-                }
+            Ok(ClientFrame::Stdout(bytes)) => {
+                stdout.write_all(&bytes).await?;
+                stdout.flush().await?;
             }
-            Ok(None) => {
-                write_err_line(stderr, "tern exec: broker closed connection unexpectedly").await?;
+            Ok(ClientFrame::Stderr(bytes)) => {
+                stderr.write_all(&bytes).await?;
+                stderr.flush().await?;
+            }
+            Ok(ClientFrame::Result(BrokerResult::Ok { data })) => {
+                let Ok(done) = serde_json::from_value::<ExecStreamResponse>(data) else {
+                    return Ok(0);
+                };
+                if let Some(code) = done.exit_code {
+                    return Ok(i32::try_from(code.min(255)).unwrap_or(255));
+                }
+                if let Some(sig) = done.signal {
+                    write_err_line(
+                        stderr,
+                        &format!("tern exec: remote process terminated by signal {sig}"),
+                    )
+                    .await?;
+                    return Ok(exit_code_for_signal(&sig));
+                }
+                return Ok(0);
+            }
+            Ok(ClientFrame::Result(BrokerResult::Error(err))) => {
+                write_err_line(stderr, &format!("tern exec: {}", err.message)).await?;
                 return Ok(1);
             }
-            Err(e) => {
-                write_err_line(stderr, &format!("tern exec: broker read error ({e})")).await?;
-                return Ok(1);
-            }
+            Err(err) => return handle_client_error(stderr, err).await,
         }
     }
 }
 
-#[cfg(not(unix))]
-pub async fn run_client<WOut, WErr>(
-    _socket_path: &Path,
-    _args: ExecCliArgs,
-    _stdout: &mut WOut,
+async fn handle_client_error<WErr: AsyncWrite + Unpin>(
     stderr: &mut WErr,
-    _cancel_rx: watch::Receiver<bool>,
-) -> io::Result<i32>
-where
-    WOut: AsyncWrite + Unpin,
-    WErr: AsyncWrite + Unpin,
-{
-    write_err_line(
-        stderr,
-        "tern exec: local unix socket broker is unsupported on this platform",
-    )
-    .await?;
-    Ok(1)
+    err: ClientError,
+) -> io::Result<i32> {
+    match err {
+        ClientError::Cancelled => {
+            write_err_line(
+                stderr,
+                "tern exec: interrupted (requested remote cancellation; remote process stop is not guaranteed)",
+            )
+            .await?;
+            Ok(EXIT_INTERRUPTED)
+        }
+        ClientError::PermissionDenied(e) => {
+            write_err_line(
+                stderr,
+                &format!("tern exec: permission denied connecting to tern agent.sock ({e})"),
+            )
+            .await?;
+            Ok(1)
+        }
+        ClientError::Unavailable(e) => {
+            write_err_line(
+                stderr,
+                &format!(
+                    "tern exec: tern is not running or local MCP/Agent broker is disabled ({e})"
+                ),
+            )
+            .await?;
+            Ok(1)
+        }
+        ClientError::WriteFailed(e) => {
+            write_err_line(stderr, &format!("tern exec: failed to send request ({e})")).await?;
+            Ok(1)
+        }
+        ClientError::ReadFailed(e) => {
+            write_err_line(stderr, &format!("tern exec: broker read error ({e})")).await?;
+            Ok(1)
+        }
+        ClientError::MalformedResponse(e) => {
+            write_err_line(
+                stderr,
+                &format!("tern exec: malformed broker response ({e})"),
+            )
+            .await?;
+            Ok(1)
+        }
+        ClientError::ClosedUnexpectedly => {
+            write_err_line(stderr, "tern exec: broker closed connection unexpectedly").await?;
+            Ok(1)
+        }
+        #[cfg(not(unix))]
+        ClientError::UnsupportedPlatform => {
+            write_err_line(
+                stderr,
+                "tern exec: local unix socket broker is unsupported on this platform",
+            )
+            .await?;
+            Ok(1)
+        }
+    }
 }

@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::attention::AttentionCue;
-use super::broker_exec::{AbortOnDrop, ExecMode, caller_display, execute_with_vault_wait};
+use super::broker_exec::{
+    AbortOnDrop, AgentOutcomeKind, DenyReason, ExecMode, caller_display, execute_with_vault_wait,
+};
 pub use super::broker_exec::{build_run_command_prompt, format_activity, summarize_command};
 use super::broker_socket::{IncomingRequest, Responder, bind_and_serve};
 use super::grants::GrantFingerprint;
@@ -72,12 +74,12 @@ pub enum AgentDecision {
 
 /// Summary of a completed `run_command` request, passed to [`AgentHost::on_agent_outcome`]
 /// for quiet **Activity** entries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentOutcome {
     pub caller: String,
     pub host: String,
     pub decision: AgentDecision,
-    pub result: BrokerResult,
+    pub kind: AgentOutcomeKind,
 }
 
 /// Host UI seam implemented by `Shell` (and test hosts in `gpui::TestApp`).
@@ -278,6 +280,17 @@ fn match_host_query(conn: &Connection, query: &str, query_lower: &str) -> Option
     {
         return Some(4);
     }
+    if conn
+        .group
+        .as_deref()
+        .is_some_and(|g| g.to_lowercase().contains(query_lower))
+        || conn
+            .tags
+            .iter()
+            .any(|t| t.to_lowercase().contains(query_lower))
+    {
+        return Some(5);
+    }
     None
 }
 
@@ -320,6 +333,8 @@ fn handle_list_hosts<H: AgentHost>(
                     host: c.host.clone(),
                     user: c.user.clone(),
                     port: c.port,
+                    group: c.group.clone(),
+                    tags: c.tags.clone(),
                     grant_active,
                 }
             })
@@ -389,12 +404,12 @@ pub(super) struct CommandRequest<'a, H> {
 }
 
 impl<H: AgentHost> CommandRequest<'_, H> {
-    fn report(&self, decision: AgentDecision, result: &BrokerResult, cx: &mut AsyncApp) {
+    fn report(&self, decision: AgentDecision, kind: AgentOutcomeKind, cx: &mut AsyncApp) {
         let outcome = AgentOutcome {
             caller: self.caller.clone(),
             host: self.target_host.clone(),
             decision,
-            result: result.clone(),
+            kind,
         };
         let _ = self
             .host
@@ -405,11 +420,12 @@ impl<H: AgentHost> CommandRequest<'_, H> {
         &self,
         decision: AgentDecision,
         code: AgentErrorCode,
+        kind: AgentOutcomeKind,
         message: impl Into<String>,
         cx: &mut AsyncApp,
     ) -> BrokerResult {
         let res = BrokerResult::Error(AgentError::new(code, message));
-        self.report(decision, &res, cx);
+        self.report(decision, kind, cx);
         res
     }
 }
@@ -450,6 +466,7 @@ async fn handle_run_command<H: AgentHost>(
         return req.fail(
             AgentDecision::Cancelled,
             AgentErrorCode::Denied,
+            AgentOutcomeKind::Cancelled,
             "request cancelled by agent",
             cx,
         );
@@ -484,30 +501,44 @@ async fn handle_run_command<H: AgentHost>(
             return req.fail(
                 AgentDecision::Paused,
                 AgentErrorCode::AgentsPaused,
+                AgentOutcomeKind::Paused,
                 "agents are paused in tern",
                 cx,
             );
         }
         Precheck::InvalidCommand(msg) => {
-            return req.fail(AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
+            return req.fail(
+                AgentDecision::Denied,
+                AgentErrorCode::Denied,
+                AgentOutcomeKind::Denied(DenyReason::InvalidCommand),
+                msg,
+                cx,
+            );
         }
         Precheck::UnknownHost => {
             let msg = format!(
                 "host '{}' is not a saved connection; call list_hosts to see available hosts",
                 sanitize_display_text(&req.target_host),
             );
-            return req.fail(AgentDecision::Denied, AgentErrorCode::Denied, msg, cx);
+            return req.fail(
+                AgentDecision::Denied,
+                AgentErrorCode::Denied,
+                AgentOutcomeKind::Denied(DenyReason::UnknownHost),
+                msg,
+                cx,
+            );
         }
         Precheck::Granted { snapshot, conn } => {
             if responder.is_cancelled() {
                 return req.fail(
                     AgentDecision::Cancelled,
                     AgentErrorCode::Denied,
+                    AgentOutcomeKind::Cancelled,
                     "request cancelled by agent",
                     cx,
                 );
             }
-            let res = execute_with_vault_wait(
+            let (res, kind) = execute_with_vault_wait(
                 &req,
                 &conn,
                 &snapshot,
@@ -519,7 +550,7 @@ async fn handle_run_command<H: AgentHost>(
                 cx,
             )
             .await;
-            req.report(AgentDecision::GrantReused, &res, cx);
+            req.report(AgentDecision::GrantReused, kind, cx);
             return res;
         }
         Precheck::NeedsDecision { conn, fingerprint } => (conn, fingerprint),
@@ -540,6 +571,7 @@ async fn handle_run_command<H: AgentHost>(
             return req.fail(
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
+                AgentOutcomeKind::Denied(DenyReason::QueueFull),
                 "too many pending approval decisions in tern",
                 cx,
             );
@@ -578,7 +610,7 @@ async fn handle_run_command<H: AgentHost>(
                 TimeoutPhase::NotDispatched,
                 "approval decision expired",
             ));
-            req.report(AgentDecision::Expired, &res, cx);
+            req.report(AgentDecision::Expired, AgentOutcomeKind::Expired, cx);
             return res;
         }
         DecisionOutcome::Cancelled => {
@@ -592,6 +624,7 @@ async fn handle_run_command<H: AgentHost>(
                 return req.fail(
                     AgentDecision::Paused,
                     AgentErrorCode::AgentsPaused,
+                    AgentOutcomeKind::Paused,
                     "agents are paused in tern",
                     cx,
                 );
@@ -604,6 +637,7 @@ async fn handle_run_command<H: AgentHost>(
             return req.fail(
                 AgentDecision::Cancelled,
                 AgentErrorCode::Denied,
+                AgentOutcomeKind::Cancelled,
                 message,
                 cx,
             );
@@ -612,6 +646,7 @@ async fn handle_run_command<H: AgentHost>(
             return req.fail(
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
+                AgentOutcomeKind::Denied(DenyReason::Denied),
                 "request denied in tern",
                 cx,
             );
@@ -624,6 +659,7 @@ async fn handle_run_command<H: AgentHost>(
         return req.fail(
             AgentDecision::Cancelled,
             AgentErrorCode::Denied,
+            AgentOutcomeKind::Cancelled,
             "request cancelled by agent",
             cx,
         );
@@ -659,6 +695,7 @@ async fn handle_run_command<H: AgentHost>(
             return req.fail(
                 AgentDecision::Paused,
                 AgentErrorCode::AgentsPaused,
+                AgentOutcomeKind::Paused,
                 "agents are paused in tern",
                 cx,
             );
@@ -667,6 +704,7 @@ async fn handle_run_command<H: AgentHost>(
             return req.fail(
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
+                AgentOutcomeKind::Denied(DenyReason::UnknownHost),
                 "saved connection is no longer available in tern",
                 cx,
             );
@@ -675,6 +713,7 @@ async fn handle_run_command<H: AgentHost>(
             return req.fail(
                 AgentDecision::Denied,
                 AgentErrorCode::Denied,
+                AgentOutcomeKind::Denied(DenyReason::HostChanged),
                 "saved connection changed before approval completed",
                 cx,
             );
@@ -682,7 +721,7 @@ async fn handle_run_command<H: AgentHost>(
         Postcheck::Ready(ready) => *ready,
     };
 
-    let res = execute_with_vault_wait(
+    let (res, kind) = execute_with_vault_wait(
         &req,
         &conn,
         &fresh,
@@ -694,6 +733,6 @@ async fn handle_run_command<H: AgentHost>(
         cx,
     )
     .await;
-    req.report(decision, &res, cx);
+    req.report(decision, kind, cx);
     res
 }

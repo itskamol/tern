@@ -9,16 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::AsyncApp;
-use tern_ssh::{ConnectSpec, DEFAULT_EXEC_TIMEOUT, ExecOptions, ExecStreamOptions};
+use tern_ssh::{ConnectSpec, DEFAULT_EXEC_TIMEOUT, ExecCollector, ExecOptions, ExecStreamOptions};
 
 use super::broker::{
-    AgentDecision, AgentHost, AgentOutcome, BrokerSnapshot, CHOICE_ALLOW_ONCE,
-    CHOICE_ALLOW_UNTIL_LOCK, CHOICE_DENY, CommandRequest, Postcheck,
-    WAITING_FOR_VAULT_UNLOCK_MESSAGE, saved_connection,
+    AgentHost, AgentOutcome, BrokerSnapshot, CHOICE_ALLOW_ONCE, CHOICE_ALLOW_UNTIL_LOCK,
+    CHOICE_DENY, CommandRequest, Postcheck, WAITING_FOR_VAULT_UNLOCK_MESSAGE, saved_connection,
 };
 use super::broker_socket::Responder;
 use super::grants::GrantFingerprint;
-use super::headless_login::{self, HeadlessExec, HeadlessExecStream};
+use super::headless_login::{self, HeadlessExec};
 use super::protocol::{
     AgentError, AgentErrorCode, BrokerResult, ExecStreamResponse, RunCommandResponse,
     UserActionReason,
@@ -32,6 +31,34 @@ use crate::password_command::{Approvals, Auth};
 use crate::platform::SshRuntime;
 
 const MAX_COMMAND_PREVIEW_CHARS: usize = 120;
+
+/// Machine-readable reason why an Agent request was denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenyReason {
+    Denied,
+    UnknownHost,
+    InvalidCommand,
+    HostChanged,
+    QueueFull,
+}
+
+/// Typed internal outcome carried on [`AgentOutcome`] for **Activity** formatting without
+/// re-parsing wire JSON or substring-matching English error prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentOutcomeKind {
+    Ran {
+        exit_code: Option<u32>,
+        signal: Option<String>,
+    },
+    Paused,
+    Cancelled,
+    Expired,
+    Denied(DenyReason),
+    TimedOut,
+    UserActionRequired(Option<UserActionReason>),
+    UnknownOutcome,
+    Failed,
+}
 
 /// Aborts a spawned tokio helper task if the owning broker future finishes or is dropped.
 pub(super) struct AbortOnDrop(pub(super) tokio::task::JoinHandle<()>);
@@ -115,9 +142,9 @@ pub(super) async fn execute_with_vault_wait<H: AgentHost>(
     mode: ExecMode,
     responder: &Responder,
     cx: &mut AsyncApp,
-) -> BrokerResult {
+) -> (BrokerResult, AgentOutcomeKind) {
     let first = execute_command(conn, snapshot, command, timeout_secs, mode, responder, cx).await;
-    if !is_vault_locked(&first) || responder.is_cancelled() {
+    if !is_vault_locked(&first.0) || responder.is_cancelled() {
         return first;
     }
 
@@ -129,10 +156,13 @@ pub(super) async fn execute_with_vault_wait<H: AgentHost>(
         Ok(Some(pending)) => pending,
         Ok(None) => return first,
         Err(_) => {
-            return BrokerResult::Error(AgentError::new(
-                AgentErrorCode::TernNotRunning,
-                "tern window is no longer available",
-            ));
+            return (
+                BrokerResult::Error(AgentError::new(
+                    AgentErrorCode::TernNotRunning,
+                    "tern window is no longer available",
+                )),
+                AgentOutcomeKind::Failed,
+            );
         }
     };
 
@@ -155,40 +185,58 @@ pub(super) async fn execute_with_vault_wait<H: AgentHost>(
     drop(cancel_bridge);
 
     match outcome {
-        VaultUnlockOutcome::Expired => BrokerResult::Error(AgentError::user_action_required(
-            UserActionReason::VaultLocked,
-            "timed out waiting for vault unlock in tern",
-        )),
+        VaultUnlockOutcome::Expired => (
+            BrokerResult::Error(AgentError::user_action_required(
+                UserActionReason::VaultLocked,
+                "timed out waiting for vault unlock in tern",
+            )),
+            AgentOutcomeKind::UserActionRequired(Some(UserActionReason::VaultLocked)),
+        ),
         VaultUnlockOutcome::Cancelled => {
             let Ok(paused) = req.host.update(cx, |h, _| h.agent_snapshot().config.paused) else {
-                return BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::TernNotRunning,
-                    "tern window is no longer available",
-                ));
+                return (
+                    BrokerResult::Error(AgentError::new(
+                        AgentErrorCode::TernNotRunning,
+                        "tern window is no longer available",
+                    )),
+                    AgentOutcomeKind::Failed,
+                );
             };
             if paused {
-                BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::AgentsPaused,
-                    "agents are paused in tern",
-                ))
+                (
+                    BrokerResult::Error(AgentError::new(
+                        AgentErrorCode::AgentsPaused,
+                        "agents are paused in tern",
+                    )),
+                    AgentOutcomeKind::Paused,
+                )
             } else if responder.is_cancelled() {
-                BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::Denied,
-                    "request cancelled by agent",
-                ))
+                (
+                    BrokerResult::Error(AgentError::new(
+                        AgentErrorCode::Denied,
+                        "request cancelled by agent",
+                    )),
+                    AgentOutcomeKind::Cancelled,
+                )
             } else {
-                BrokerResult::Error(AgentError::user_action_required(
-                    UserActionReason::VaultLocked,
-                    "vault unlock cancelled in tern",
-                ))
+                (
+                    BrokerResult::Error(AgentError::user_action_required(
+                        UserActionReason::VaultLocked,
+                        "vault unlock cancelled in tern",
+                    )),
+                    AgentOutcomeKind::UserActionRequired(Some(UserActionReason::VaultLocked)),
+                )
             }
         }
         VaultUnlockOutcome::Unlocked => {
             if responder.is_cancelled() {
-                return BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::Denied,
-                    "request cancelled by agent",
-                ));
+                return (
+                    BrokerResult::Error(AgentError::new(
+                        AgentErrorCode::Denied,
+                        "request cancelled by agent",
+                    )),
+                    AgentOutcomeKind::Cancelled,
+                );
             }
             let Ok(recheck) = req.host.update(cx, |h, _| {
                 let fresh = h.agent_snapshot();
@@ -204,24 +252,36 @@ pub(super) async fn execute_with_vault_wait<H: AgentHost>(
                 }
                 Postcheck::Ready(Box::new((fresh, fresh_conn)))
             }) else {
-                return BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::TernNotRunning,
-                    "tern window is no longer available",
-                ));
+                return (
+                    BrokerResult::Error(AgentError::new(
+                        AgentErrorCode::TernNotRunning,
+                        "tern window is no longer available",
+                    )),
+                    AgentOutcomeKind::Failed,
+                );
             };
             match recheck {
-                Postcheck::Paused => BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::AgentsPaused,
-                    "agents are paused in tern",
-                )),
-                Postcheck::UnknownHost => BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::Denied,
-                    "saved connection is no longer available in tern",
-                )),
-                Postcheck::Changed => BrokerResult::Error(AgentError::new(
-                    AgentErrorCode::Denied,
-                    "saved connection changed while waiting for vault unlock",
-                )),
+                Postcheck::Paused => (
+                    BrokerResult::Error(AgentError::new(
+                        AgentErrorCode::AgentsPaused,
+                        "agents are paused in tern",
+                    )),
+                    AgentOutcomeKind::Paused,
+                ),
+                Postcheck::UnknownHost => (
+                    BrokerResult::Error(AgentError::new(
+                        AgentErrorCode::Denied,
+                        "saved connection is no longer available in tern",
+                    )),
+                    AgentOutcomeKind::Denied(DenyReason::UnknownHost),
+                ),
+                Postcheck::Changed => (
+                    BrokerResult::Error(AgentError::new(
+                        AgentErrorCode::Denied,
+                        "saved connection changed while waiting for vault unlock",
+                    )),
+                    AgentOutcomeKind::Denied(DenyReason::HostChanged),
+                ),
                 Postcheck::Ready(ready) => {
                     let (fresh, fresh_conn) = *ready;
                     execute_command(
@@ -240,6 +300,17 @@ pub(super) async fn execute_with_vault_wait<H: AgentHost>(
     }
 }
 
+fn outcome_kind_for_error(err: &AgentError) -> AgentOutcomeKind {
+    match err.error {
+        AgentErrorCode::AgentsPaused => AgentOutcomeKind::Paused,
+        AgentErrorCode::Denied => AgentOutcomeKind::Denied(DenyReason::Denied),
+        AgentErrorCode::TimedOut => AgentOutcomeKind::TimedOut,
+        AgentErrorCode::UserActionRequired => AgentOutcomeKind::UserActionRequired(err.reason),
+        AgentErrorCode::UnknownOutcome => AgentOutcomeKind::UnknownOutcome,
+        AgentErrorCode::SshError | AgentErrorCode::TernNotRunning => AgentOutcomeKind::Failed,
+    }
+}
+
 async fn execute_command(
     conn: &Connection,
     snapshot: &BrokerSnapshot,
@@ -248,13 +319,140 @@ async fn execute_command(
     mode: ExecMode,
     responder: &Responder,
     cx: &mut AsyncApp,
-) -> BrokerResult {
-    match mode {
+) -> (BrokerResult, AgentOutcomeKind) {
+    let (spec, auth, approvals) = match build_spec_and_auth(conn, snapshot) {
+        Ok(parts) => parts,
+        Err(err) => return (err, AgentOutcomeKind::Failed),
+    };
+    let options = match mode {
         ExecMode::Buffered => {
-            execute_run_command(conn, snapshot, command, timeout_secs, responder, cx).await
+            ExecStreamOptions::with_timeout(Some(effective_timeout(timeout_secs)))
         }
-        ExecMode::Stream => {
-            execute_stream_command(conn, snapshot, command, timeout_secs, responder, cx).await
+        ExecMode::Stream => ExecStreamOptions::with_timeout(timeout_secs.map(Duration::from_secs)),
+    };
+    let exec_req = HeadlessExec {
+        spec,
+        auth,
+        approvals,
+        command: command.to_owned(),
+        options,
+    };
+
+    let rt = cx.update(|cx| SshRuntime::handle(cx));
+    let cancelled_after_dispatch = Arc::new(AtomicBool::new(false));
+    let mut cancel_rx = Some(responder.cancel_receiver());
+    let mut cancel_bridge: Option<AbortOnDrop> = None;
+    let started = Instant::now();
+    let collector = std::sync::Mutex::new(ExecCollector::default());
+
+    let exec_res = headless_login::run_stream(
+        exec_req,
+        |exec_cancel| {
+            let Some(mut rx) = cancel_rx.take() else {
+                return;
+            };
+            let flag = Arc::clone(&cancelled_after_dispatch);
+            cancel_bridge = Some(AbortOnDrop(rt.spawn(async move {
+                if rx.wait_for(|&c| c).await.is_ok() {
+                    flag.store(true, Ordering::Release);
+                    exec_cancel.cancel();
+                }
+            })));
+        },
+        |bytes| {
+            let collector = &collector;
+            async move {
+                match mode {
+                    ExecMode::Buffered => {
+                        if let Ok(mut guard) = collector.lock() {
+                            guard.push_stdout(&bytes);
+                        }
+                    }
+                    ExecMode::Stream => responder.send_stdout(&bytes).await,
+                }
+            }
+        },
+        |bytes| {
+            let collector = &collector;
+            async move {
+                match mode {
+                    ExecMode::Buffered => {
+                        if let Ok(mut guard) = collector.lock() {
+                            guard.push_stderr(&bytes);
+                        }
+                    }
+                    ExecMode::Stream => responder.send_stderr(&bytes).await,
+                }
+            }
+        },
+        cx,
+    )
+    .await;
+    drop(cancel_bridge);
+
+    if cancelled_after_dispatch.load(Ordering::Acquire) && exec_res.is_err() {
+        let msg = match mode {
+            ExecMode::Buffered => "agent disconnected after command was dispatched",
+            ExecMode::Stream => "client disconnected or interrupted after command was dispatched",
+        };
+        return (
+            BrokerResult::Error(AgentError::new(AgentErrorCode::UnknownOutcome, msg)),
+            AgentOutcomeKind::UnknownOutcome,
+        );
+    }
+
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let collected = collector.into_inner().unwrap_or_default();
+    match exec_res {
+        Ok(done) => {
+            let kind = AgentOutcomeKind::Ran {
+                exit_code: done.exit_status,
+                signal: done.exit_signal.clone(),
+            };
+            let serialized = match mode {
+                ExecMode::Buffered => {
+                    let output = collected.into_output(done);
+                    serde_json::to_value(RunCommandResponse {
+                        host: conn.name.clone(),
+                        exit_code: output.exit_status,
+                        signal: output.exit_signal,
+                        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                        stdout_truncated: output.stdout_truncated,
+                        stderr_truncated: output.stderr_truncated,
+                        duration_ms,
+                    })
+                }
+                ExecMode::Stream => serde_json::to_value(ExecStreamResponse {
+                    host: conn.name.clone(),
+                    exit_code: done.exit_status,
+                    signal: done.exit_signal,
+                    duration_ms,
+                }),
+            };
+            match serialized {
+                Ok(data) => (BrokerResult::Ok { data }, kind),
+                Err(e) => (
+                    BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string())),
+                    AgentOutcomeKind::Failed,
+                ),
+            }
+        }
+        Err(mut err) => {
+            if err.error == AgentErrorCode::TimedOut {
+                if mode == ExecMode::Buffered {
+                    let partial = collected.into_partial();
+                    err = err.with_partial_output(
+                        String::from_utf8_lossy(&partial.stdout).into_owned(),
+                        String::from_utf8_lossy(&partial.stderr).into_owned(),
+                        partial.stdout_truncated,
+                        partial.stderr_truncated,
+                    );
+                }
+                err = err.with_duration_ms(duration_ms);
+            }
+            let kind = outcome_kind_for_error(&err);
+            (BrokerResult::Error(err), kind)
         }
     }
 }
@@ -291,183 +489,20 @@ fn build_spec_and_auth(
     Ok((spec, auth, approvals))
 }
 
-async fn execute_stream_command(
-    conn: &Connection,
-    snapshot: &BrokerSnapshot,
-    command: &str,
-    timeout_secs: Option<u64>,
-    responder: &Responder,
-    cx: &mut AsyncApp,
-) -> BrokerResult {
-    let (spec, auth, approvals) = match build_spec_and_auth(conn, snapshot) {
-        Ok(parts) => parts,
-        Err(err) => return err,
-    };
-    let options = ExecStreamOptions::with_timeout(timeout_secs.map(Duration::from_secs));
-    let exec_req = HeadlessExecStream {
-        spec,
-        auth,
-        approvals,
-        command: command.to_owned(),
-        options,
-    };
-
-    let rt = cx.update(|cx| SshRuntime::handle(cx));
-    let cancelled_after_dispatch = Arc::new(AtomicBool::new(false));
-    let mut cancel_rx = Some(responder.cancel_receiver());
-    let mut cancel_bridge: Option<AbortOnDrop> = None;
-    let started = Instant::now();
-
-    let exec_res = headless_login::run_stream(
-        exec_req,
-        |exec_cancel| {
-            let Some(mut rx) = cancel_rx.take() else {
-                return;
-            };
-            let flag = Arc::clone(&cancelled_after_dispatch);
-            cancel_bridge = Some(AbortOnDrop(rt.spawn(async move {
-                if rx.wait_for(|&c| c).await.is_ok() {
-                    flag.store(true, Ordering::Release);
-                    exec_cancel.cancel();
-                }
-            })));
-        },
-        |bytes| async move {
-            responder.send_stdout(&bytes).await;
-        },
-        |bytes| async move {
-            responder.send_stderr(&bytes).await;
-        },
-        cx,
-    )
-    .await;
-    drop(cancel_bridge);
-
-    if cancelled_after_dispatch.load(Ordering::Acquire) && exec_res.is_err() {
-        return BrokerResult::Error(AgentError::new(
-            AgentErrorCode::UnknownOutcome,
-            "client disconnected or interrupted after command was dispatched",
-        ));
-    }
-
-    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match exec_res {
-        Ok(done) => {
-            let response = ExecStreamResponse {
-                host: conn.name.clone(),
-                exit_code: done.exit_status,
-                signal: done.exit_signal,
-                duration_ms,
-            };
-            match serde_json::to_value(response) {
-                Ok(data) => BrokerResult::Ok { data },
-                Err(e) => {
-                    BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string()))
-                }
-            }
-        }
-        Err(err) => {
-            let err = if err.error == AgentErrorCode::TimedOut {
-                err.with_duration_ms(duration_ms)
-            } else {
-                err
-            };
-            BrokerResult::Error(err)
-        }
-    }
-}
-
-pub(super) async fn execute_run_command(
-    conn: &Connection,
-    snapshot: &BrokerSnapshot,
-    command: &str,
-    timeout_secs: Option<u64>,
-    responder: &Responder,
-    cx: &mut AsyncApp,
-) -> BrokerResult {
-    let (spec, auth, approvals) = match build_spec_and_auth(conn, snapshot) {
-        Ok(parts) => parts,
-        Err(err) => return err,
-    };
-    let options = ExecOptions::with_timeout(effective_timeout(timeout_secs));
-
-    let exec_req = HeadlessExec {
-        spec,
-        auth,
-        approvals,
-        command: command.to_owned(),
-        options,
-    };
-
-    let rt = cx.update(|cx| SshRuntime::handle(cx));
-    let cancelled_after_dispatch = Arc::new(AtomicBool::new(false));
-    let mut cancel_rx = Some(responder.cancel_receiver());
-    let mut cancel_bridge: Option<AbortOnDrop> = None;
-    let started = Instant::now();
-
-    let exec_res = headless_login::run(
-        exec_req,
-        |exec_cancel| {
-            let Some(mut rx) = cancel_rx.take() else {
-                return;
-            };
-            let flag = Arc::clone(&cancelled_after_dispatch);
-            cancel_bridge = Some(AbortOnDrop(rt.spawn(async move {
-                if rx.wait_for(|&c| c).await.is_ok() {
-                    flag.store(true, Ordering::Release);
-                    exec_cancel.cancel();
-                }
-            })));
-        },
-        cx,
-    )
-    .await;
-    drop(cancel_bridge);
-
-    if cancelled_after_dispatch.load(Ordering::Acquire) && exec_res.is_err() {
-        return BrokerResult::Error(AgentError::new(
-            AgentErrorCode::UnknownOutcome,
-            "agent disconnected after command was dispatched",
-        ));
-    }
-
-    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match exec_res {
-        Ok(output) => {
-            let response = RunCommandResponse {
-                host: conn.name.clone(),
-                exit_code: output.exit_status,
-                signal: output.exit_signal,
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                stdout_truncated: output.stdout_truncated,
-                stderr_truncated: output.stderr_truncated,
-                duration_ms,
-            };
-            match serde_json::to_value(response) {
-                Ok(data) => BrokerResult::Ok { data },
-                Err(e) => {
-                    BrokerResult::Error(AgentError::new(AgentErrorCode::SshError, e.to_string()))
-                }
-            }
-        }
-        Err(err) => {
-            let err = if err.error == AgentErrorCode::TimedOut {
-                err.with_duration_ms(duration_ms)
-            } else {
-                err
-            };
-            BrokerResult::Error(err)
-        }
-    }
-}
-
 pub(super) fn caller_display(caller: Option<&str>) -> String {
     caller
         .map(sanitize_display_text)
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Unknown Agent".to_owned())
+}
+
+/// Returns `true` when `conn` has a case-insensitive `prod` or `production` tag.
+#[must_use]
+pub fn is_production_host(conn: &Connection) -> bool {
+    conn.tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case("prod") || tag.eq_ignore_ascii_case("production"))
 }
 
 /// Builds the compact click-only Decision card prompt for a `run_command` request, attaching
@@ -477,6 +512,7 @@ pub(super) fn caller_display(caller: Option<&str>) -> String {
 pub fn build_run_command_prompt(caller: &str, conn: &Connection, command: &str) -> DecisionPrompt {
     let preview = summarize_command(command);
     let full = sanitize_multiline_display_text(command);
+    let host_detail = format!("{} ({}@{})", conn.name, conn.user, conn.host);
     let mut prompt = DecisionPrompt::new(
         format!("{caller} wants to run a command on {}", conn.name),
         vec![
@@ -485,13 +521,13 @@ pub fn build_run_command_prompt(caller: &str, conn: &Connection, command: &str) 
             DecisionChoice::secondary(CHOICE_DENY, "Deny"),
         ],
     )
-    .with_detail("Agent", format!("{caller} (unverified)"))
-    .with_detail(
-        "Host",
-        format!("{} ({}@{})", conn.name, conn.user, conn.host),
-    )
-    .with_command(preview.clone())
-    .with_footnote(format!(
+    .with_detail("Agent", format!("{caller} (unverified)"));
+    prompt = if is_production_host(conn) {
+        prompt.with_detail_badge("Host", host_detail, "PROD")
+    } else {
+        prompt.with_detail("Host", host_detail)
+    };
+    prompt = prompt.with_command(preview.clone()).with_footnote(format!(
         "Host grant lets any local Agent run commands on {} until lock.",
         conn.name
     ));
@@ -511,69 +547,53 @@ pub fn format_activity(outcome: &AgentOutcome) -> String {
         caller.as_str()
     };
     let host = sanitize_display_text(&outcome.host);
-    match &outcome.result {
-        BrokerResult::Ok { data } => {
-            if let Ok(resp) = serde_json::from_value::<RunCommandResponse>(data.clone()) {
-                if let Some(code) = resp.exit_code {
-                    return format!("{actor} ran command on {host} (exit {code})");
-                }
-                if let Some(sig) = resp.signal {
-                    let sig = sanitize_display_text(&sig);
-                    return format!("{actor} ran command on {host} (signal {sig})");
-                }
-            } else if let Ok(resp) = serde_json::from_value::<ExecStreamResponse>(data.clone()) {
-                if let Some(code) = resp.exit_code {
-                    return format!("{actor} ran command on {host} (exit {code})");
-                }
-                if let Some(sig) = resp.signal {
-                    let sig = sanitize_display_text(&sig);
-                    return format!("{actor} ran command on {host} (signal {sig})");
-                }
-            }
-            format!("{actor} ran command on {host}")
+    match &outcome.kind {
+        AgentOutcomeKind::Ran {
+            exit_code: Some(code),
+            ..
+        } => format!("{actor} ran command on {host} (exit {code})"),
+        AgentOutcomeKind::Ran {
+            signal: Some(sig), ..
+        } => {
+            let sig = sanitize_display_text(sig);
+            format!("{actor} ran command on {host} (signal {sig})")
         }
-        BrokerResult::Error(err) => match (outcome.decision, err.error) {
-            (_, AgentErrorCode::AgentsPaused) | (AgentDecision::Paused, _) => {
-                format!("{actor} request paused on {host}")
-            }
-            (AgentDecision::Cancelled, _) => format!("{actor} request cancelled on {host}"),
-            (AgentDecision::Expired, _) => format!("{actor} approval timed out on {host}"),
-            (_, AgentErrorCode::Denied) => {
-                if err.message.contains("not a saved connection") {
-                    format!("{actor} unknown host {host}")
-                } else if err.message.contains("command must not be empty")
-                    || err.message.contains("command exceeded maximum size")
-                {
-                    format!("{actor} invalid command for {host}")
-                } else if err.message.contains("changed") {
-                    format!("{actor} host changed before running on {host}")
-                } else {
-                    format!("{actor} request denied on {host}")
-                }
-            }
-            (_, AgentErrorCode::TimedOut) => format!("{actor} command timed out on {host}"),
-            (_, AgentErrorCode::UserActionRequired) => match err.reason {
-                Some(UserActionReason::VaultLocked) => {
-                    format!("{actor} blocked: vault locked for {host}")
-                }
-                Some(UserActionReason::UnknownHostKey) => {
-                    format!("{actor} blocked: unknown host key for {host}")
-                }
-                Some(UserActionReason::CommandApprovalRequired) => {
-                    format!("{actor} blocked: command approval needed for {host}")
-                }
-                Some(UserActionReason::InteractiveAuthRequired) => {
-                    format!("{actor} blocked: interactive auth required on {host}")
-                }
-                None => format!("{actor} needs attention in tern for {host}"),
-            },
-            (_, AgentErrorCode::UnknownOutcome) => {
-                format!("{actor} disconnected during command on {host}")
-            }
-            (_, AgentErrorCode::SshError | AgentErrorCode::TernNotRunning) => {
-                format!("{actor} command failed on {host}")
-            }
-        },
+        AgentOutcomeKind::Ran { .. } => format!("{actor} ran command on {host}"),
+        AgentOutcomeKind::Paused => format!("{actor} request paused on {host}"),
+        AgentOutcomeKind::Cancelled => format!("{actor} request cancelled on {host}"),
+        AgentOutcomeKind::Expired => format!("{actor} approval timed out on {host}"),
+        AgentOutcomeKind::Denied(DenyReason::UnknownHost) => {
+            format!("{actor} unknown host {host}")
+        }
+        AgentOutcomeKind::Denied(DenyReason::InvalidCommand) => {
+            format!("{actor} invalid command for {host}")
+        }
+        AgentOutcomeKind::Denied(DenyReason::HostChanged) => {
+            format!("{actor} host changed before running on {host}")
+        }
+        AgentOutcomeKind::Denied(DenyReason::Denied | DenyReason::QueueFull) => {
+            format!("{actor} request denied on {host}")
+        }
+        AgentOutcomeKind::TimedOut => format!("{actor} command timed out on {host}"),
+        AgentOutcomeKind::UserActionRequired(Some(UserActionReason::VaultLocked)) => {
+            format!("{actor} blocked: vault locked for {host}")
+        }
+        AgentOutcomeKind::UserActionRequired(Some(UserActionReason::UnknownHostKey)) => {
+            format!("{actor} blocked: unknown host key for {host}")
+        }
+        AgentOutcomeKind::UserActionRequired(Some(UserActionReason::CommandApprovalRequired)) => {
+            format!("{actor} blocked: command approval needed for {host}")
+        }
+        AgentOutcomeKind::UserActionRequired(Some(UserActionReason::InteractiveAuthRequired)) => {
+            format!("{actor} blocked: interactive auth required on {host}")
+        }
+        AgentOutcomeKind::UserActionRequired(None) => {
+            format!("{actor} needs attention in tern for {host}")
+        }
+        AgentOutcomeKind::UnknownOutcome => {
+            format!("{actor} disconnected during command on {host}")
+        }
+        AgentOutcomeKind::Failed => format!("{actor} command failed on {host}"),
     }
 }
 
@@ -582,6 +602,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::agents::broker::AgentDecision;
 
     #[test]
     fn summarize_command_formats_single_and_multiline_and_strips_control_chars() {
@@ -614,18 +635,9 @@ mod tests {
             caller: "Claude".into(),
             host: "prod".into(),
             decision: AgentDecision::AllowOnce,
-            result: BrokerResult::Ok {
-                data: serde_json::to_value(RunCommandResponse {
-                    host: "prod".into(),
-                    exit_code: Some(0),
-                    signal: None,
-                    stdout: "ok\n".into(),
-                    stderr: String::new(),
-                    stdout_truncated: false,
-                    stderr_truncated: false,
-                    duration_ms: 12,
-                })
-                .unwrap(),
+            kind: AgentOutcomeKind::Ran {
+                exit_code: Some(0),
+                signal: None,
             },
         };
         assert_eq!(
@@ -637,7 +649,7 @@ mod tests {
             caller: "Claude".into(),
             host: "prod".into(),
             decision: AgentDecision::Denied,
-            result: BrokerResult::Error(AgentError::new(AgentErrorCode::Denied, "denied")),
+            kind: AgentOutcomeKind::Denied(DenyReason::Denied),
         };
         assert_eq!(format_activity(&denied), "Claude request denied on prod");
 
@@ -645,10 +657,7 @@ mod tests {
             caller: "Claude".into(),
             host: "ghost".into(),
             decision: AgentDecision::Denied,
-            result: BrokerResult::Error(AgentError::new(
-                AgentErrorCode::Denied,
-                "host 'ghost' is not a saved connection; call list_hosts to see available hosts",
-            )),
+            kind: AgentOutcomeKind::Denied(DenyReason::UnknownHost),
         };
         assert_eq!(format_activity(&unknown_host), "Claude unknown host ghost");
 
@@ -656,10 +665,7 @@ mod tests {
             caller: "Codex".into(),
             host: "alpha".into(),
             decision: AgentDecision::AllowOnce,
-            result: BrokerResult::Error(AgentError::user_action_required(
-                UserActionReason::VaultLocked,
-                "unlock vault",
-            )),
+            kind: AgentOutcomeKind::UserActionRequired(Some(UserActionReason::VaultLocked)),
         };
         assert_eq!(
             format_activity(&locked),
@@ -689,5 +695,27 @@ mod tests {
         let multi = build_run_command_prompt("Codex", &conn, "set -e\necho \x1b[31mhi\x1b[0m\n");
         assert_eq!(multi.command.as_deref(), Some("set -e (+1 line)"));
         assert_eq!(multi.full_command.as_deref(), Some("set -e\necho hi"));
+        assert_eq!(single.details[1].badge, None);
+
+        for tags in [
+            vec!["prod".to_owned()],
+            vec!["PROD".to_owned()],
+            vec!["web".to_owned(), "Production".to_owned()],
+        ] {
+            let prod_conn = Connection {
+                tags,
+                ..conn.clone()
+            };
+            let prod_prompt = build_run_command_prompt("Codex", &prod_conn, "uptime");
+            assert_eq!(prod_prompt.details[1].label, "Host");
+            assert_eq!(prod_prompt.details[1].badge.as_deref(), Some("PROD"));
+        }
+
+        let non_prod = Connection {
+            tags: vec!["staging".into(), "preprod".into()],
+            ..conn
+        };
+        let non_prod_prompt = build_run_command_prompt("Codex", &non_prod, "uptime");
+        assert_eq!(non_prod_prompt.details[1].badge, None);
     }
 }

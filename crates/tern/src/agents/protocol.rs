@@ -28,6 +28,22 @@ pub enum AgentErrorCode {
     UnknownOutcome,
 }
 
+impl AgentErrorCode {
+    /// Canonical snake_case error code name for structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TernNotRunning => "tern_not_running",
+            Self::AgentsPaused => "agents_paused",
+            Self::Denied => "denied",
+            Self::TimedOut => "timed_out",
+            Self::UserActionRequired => "user_action_required",
+            Self::SshError => "ssh_error",
+            Self::UnknownOutcome => "unknown_outcome",
+        }
+    }
+}
+
 /// Machine-readable reason explaining why [`AgentErrorCode::UserActionRequired`] failed closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,6 +165,10 @@ pub struct HostSummary {
     pub host: String,
     pub user: String,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     #[serde(default)]
     pub grant_active: bool,
 }

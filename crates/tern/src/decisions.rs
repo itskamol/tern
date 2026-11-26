@@ -83,6 +83,8 @@ impl DecisionChoice {
 pub struct DecisionDetail {
     pub label: String,
     pub value: String,
+    /// Optional short danger badge drawn beside the value (for example `PROD`).
+    pub badge: Option<String>,
 }
 
 /// Display content of a Decision card.
@@ -119,6 +121,25 @@ impl DecisionPrompt {
         self.details.push(DecisionDetail {
             label: sanitize_display_text(&label),
             value: sanitize_display_text(&value),
+            badge: None,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn with_detail_badge(
+        mut self,
+        label: impl Into<String>,
+        value: impl Into<String>,
+        badge: impl Into<String>,
+    ) -> Self {
+        let label = label.into();
+        let value = value.into();
+        let badge = sanitize_display_text(&badge.into());
+        self.details.push(DecisionDetail {
+            label: sanitize_display_text(&label),
+            value: sanitize_display_text(&value),
+            badge: (!badge.is_empty()).then_some(badge),
         });
         self
     }

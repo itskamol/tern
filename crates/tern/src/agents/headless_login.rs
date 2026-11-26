@@ -7,12 +7,12 @@
 //! locked vault (even when `vault_keychain` opt-in is enabled — never calling `Keeper::need_vault`),
 //! an unapproved command, an unknown host key, a password prompt, or a 2FA challenge.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::AsyncApp;
 use tern_ssh::{
-    ConnectSpec, ExecCancel, ExecError, ExecEvent, ExecOptions, ExecOutput, ExecStreamEvent,
-    ExecStreamOptions, ExecStreamResult, ExecTimeoutPhase, MemoryKey, Prompt,
+    ConnectSpec, ExecCancel, ExecError, ExecStreamEvent, ExecStreamOptions, ExecStreamResult,
+    ExecTimeoutPhase, MemoryKey, Prompt,
 };
 use tern_vault::Key;
 
@@ -22,19 +22,9 @@ use crate::login_ladder::{Facts, InVault, Ladder, Next};
 use crate::password_command::{self as pc, Approvals, Auth, Purpose};
 use crate::platform::SshRuntime;
 
-/// Inputs for one isolated, headless SSH `exec` call on a Saved connection.
+/// Inputs for one isolated, headless SSH `exec_stream` call on a Saved connection.
 #[derive(Debug)]
 pub struct HeadlessExec {
-    pub spec: ConnectSpec,
-    pub auth: Auth,
-    pub approvals: Approvals,
-    pub command: String,
-    pub options: ExecOptions,
-}
-
-/// Inputs for one isolated, headless streaming SSH `exec_stream` call on a Saved connection.
-#[derive(Debug)]
-pub struct HeadlessExecStream {
     pub spec: ConnectSpec,
     pub auth: Auth,
     pub approvals: Approvals,
@@ -89,9 +79,10 @@ fn prepare_headless_spec(
     Ok(spec)
 }
 
-/// Runs `req` strictly headlessly on `SshRuntime`, never opening UI or unlocking Keychain.
+/// Runs an isolated SSH `exec_stream` headlessly, invoking `on_stdout` and `on_stderr` as each
+/// raw chunk arrives from the remote command.
 ///
-/// Calls `on_dispatched` with the [`ExecCancel`] handle at the moment `tern_ssh::exec` is
+/// Calls `on_dispatched` with the [`ExecCancel`] handle at the moment `tern_ssh::exec_stream` is
 /// spawned so callers can distinguish pre-dispatch cancellation from post-dispatch disconnect
 /// (`unknown_outcome`).
 ///
@@ -102,67 +93,8 @@ fn prepare_headless_spec(
 /// - [`AgentErrorCode::TimedOut`] when the wall-clock timeout expires;
 /// - [`AgentErrorCode::SshError`] on changed host key (hard stop), authentication rejection,
 ///   exec refusal, or transport error.
-pub async fn run(
-    req: HeadlessExec,
-    on_dispatched: impl FnOnce(ExecCancel),
-    cx: &mut AsyncApp,
-) -> Result<ExecOutput, AgentError> {
-    let HeadlessExec {
-        spec,
-        auth,
-        approvals,
-        command,
-        options,
-    } = req;
-    let spec = prepare_headless_spec(spec, &auth, &approvals, cx)?;
-
-    let host = spec.host.clone();
-    let port = spec.port;
-    let deadline = Instant::now() + options.effective_timeout();
-    let rt = cx.update(|cx| SshRuntime::handle(cx));
-
-    let mut exec = tern_ssh::exec(spec, command, options, &rt);
-    on_dispatched(exec.cancel_handle());
-
-    let prompt_ctx = PromptContext {
-        host: &host,
-        port,
-        password_command: auth.password_command.as_deref(),
-        approvals: &approvals,
-        deadline,
-    };
-    let mut ladder = Ladder::default();
-    let mut prompt_failure: Option<AgentError> = None;
-
-    while let Some(event) = exec.next().await {
-        match event {
-            ExecEvent::Prompt(prompt) => {
-                // Keep only the latest prompt failure; if a later prompt succeeds (returns None),
-                // clear any earlier skipped-key failure so it cannot leak into later outcomes.
-                prompt_failure = handle_prompt(prompt, &mut ladder, &prompt_ctx, cx).await;
-            }
-            ExecEvent::Finished(result) => {
-                return match result {
-                    Ok(output) => Ok(output),
-                    Err(exec_err) => Err(resolve_exec_error(&exec_err, prompt_failure)),
-                };
-            }
-        }
-    }
-
-    Err(AgentError::new(
-        AgentErrorCode::SshError,
-        "ssh exec channel ended unexpectedly",
-    ))
-}
-
-/// Runs a streaming isolated SSH `exec_stream` headlessly, invoking `on_stdout` and `on_stderr`
-/// as each raw chunk arrives from the remote command.
-///
-/// # Errors
-/// Returns [`AgentError`] with the same fail-closed classification as [`run`].
 pub async fn run_stream<FOut, FutOut, FErr, FutErr>(
-    req: HeadlessExecStream,
+    req: HeadlessExec,
     on_dispatched: impl FnOnce(ExecCancel),
     mut on_stdout: FOut,
     mut on_stderr: FErr,
@@ -174,7 +106,7 @@ where
     FErr: FnMut(Vec<u8>) -> FutErr,
     FutErr: std::future::Future<Output = ()>,
 {
-    let HeadlessExecStream {
+    let HeadlessExec {
         spec,
         auth,
         approvals,
@@ -185,10 +117,7 @@ where
 
     let host = spec.host.clone();
     let port = spec.port;
-    let deadline = Instant::now()
-        + options
-            .effective_timeout()
-            .unwrap_or(Duration::from_secs(30));
+    let deadline = options.effective_timeout().map(|t| Instant::now() + t);
     let rt = cx.update(|cx| SshRuntime::handle(cx));
 
     let mut stream = tern_ssh::exec_stream(spec, command, options, &rt);
@@ -207,6 +136,8 @@ where
     while let Some(event) = stream.next().await {
         match event {
             ExecStreamEvent::Prompt(prompt) => {
+                // Keep only the latest prompt failure; if a later prompt succeeds (returns None),
+                // clear any earlier skipped-key failure so it cannot leak into later outcomes.
                 prompt_failure = handle_prompt(prompt, &mut ladder, &prompt_ctx, cx).await;
             }
             ExecStreamEvent::Stdout(bytes) => on_stdout(bytes).await,
@@ -231,7 +162,7 @@ struct PromptContext<'a> {
     port: u16,
     password_command: Option<&'a str>,
     approvals: &'a Approvals,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 async fn handle_prompt(
@@ -293,15 +224,20 @@ async fn handle_prompt(
                 ));
             }
             Next::RunCommand(cmd) => {
-                let remaining = ctx.deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    drop(prompt);
-                    return Some(AgentError::timed_out(
-                        TimeoutPhase::NotDispatched,
-                        "command timed out before password command ran",
-                    ));
-                }
-                let cmd_timeout = remaining.min(pc::TIMEOUT);
+                let cmd_timeout = match ctx.deadline {
+                    Some(deadline) => {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            drop(prompt);
+                            return Some(AgentError::timed_out(
+                                TimeoutPhase::NotDispatched,
+                                "command timed out before password command ran",
+                            ));
+                        }
+                        remaining.min(pc::TIMEOUT)
+                    }
+                    None => pc::TIMEOUT,
+                };
                 let res = cx
                     .background_executor()
                     .spawn(async move { pc::run(&cmd, cmd_timeout) })

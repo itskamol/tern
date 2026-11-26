@@ -945,3 +945,15 @@ fn external_cancel_wakes_gpui_foreground_task_with_no_window() {
     let empty = app.update(|cx| queue.read(cx).is_empty());
     assert!(empty);
 }
+
+#[test]
+fn decision_detail_badge_sanitizes_control_chars_and_drops_empty_badges() {
+    let prompt = DecisionPrompt::new("Run?", vec![DecisionChoice::primary("ok", "Allow")])
+        .with_detail("Agent", "Codex")
+        .with_detail_badge("Host", "alpha (deploy@10.0.0.5)", "\x1b[31mPROD\u{202e}\n")
+        .with_detail_badge("Empty", "value", "\x1b[0m\n");
+
+    assert_eq!(prompt.details[0].badge, None);
+    assert_eq!(prompt.details[1].badge.as_deref(), Some("PROD"));
+    assert_eq!(prompt.details[2].badge, None);
+}
