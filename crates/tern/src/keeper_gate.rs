@@ -9,7 +9,6 @@ use tern_vault::{SecretString, Vault, VaultError};
 
 use gpui::App;
 
-use crate::keeper::keychain;
 use crate::vault_pin::{self, Outcome};
 
 /// Which secret the person is asked for to open the vault.
@@ -117,12 +116,6 @@ pub(crate) enum Load {
 /// Where the Keychain passphrase comes from: the platform store, or a fake in tests.
 pub(crate) trait Passphrases {
     fn load(&self) -> Load;
-}
-
-impl Passphrases for keychain::Passphrase {
-    fn load(&self) -> Load {
-        keychain::read()
-    }
 }
 
 /// What one Keychain attempt came to.

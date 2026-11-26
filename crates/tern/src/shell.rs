@@ -223,6 +223,24 @@ pub fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Shell>> {
                 ),
                 cx.observe(&shell.transfers, |s, _, cx| s.on_transfers_changed(cx)),
             ];
+            let weak_shell = cx.weak_entity();
+            crate::keeper::Keeper::subscribe(cx, move |transition, cx| {
+                let _ = weak_shell.update(cx, |s, cx| match transition {
+                    crate::keeper::VaultTransition::Unlocked => {
+                        if crate::keeper::Keeper::len(cx).is_some() {
+                            s.on_vault_unlocked(cx);
+                        }
+                    }
+                    crate::keeper::VaultTransition::Locked => {
+                        if crate::keeper::Keeper::len(cx).is_none()
+                            && let Some(ui) = s.vault_ui.as_mut()
+                        {
+                            ui.shown_key = None;
+                        }
+                        cx.notify();
+                    }
+                });
+            });
             shell
         })
     })?;

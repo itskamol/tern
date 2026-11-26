@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{App, AppContext, Global, Task};
@@ -15,7 +15,17 @@ pub use crate::keeper_gate::{Ask, Opening, Pending, Tried, Typed};
 use crate::keeper_gate::{
     Gate, Need, Read, Waiter, adopt, open_typed, open_with, store_due, tried,
 };
+pub(crate) use crate::keeper_store::{CredentialStore, OsCredentialStore, keychain};
 use crate::vault_pin;
+
+/// Lifecycle transition emitted by [`Keeper`] whenever the vault opens or locks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultTransition {
+    Unlocked,
+    Locked,
+}
+
+type TransitionListener = Box<dyn FnMut(VaultTransition, &mut App) + 'static>;
 
 pub struct Keeper {
     path: Option<PathBuf>,
@@ -28,6 +38,12 @@ pub struct Keeper {
     keychain_current: bool,
     /// Numbers each write in the order it was asked for.
     ticket: u64,
+    /// The newest write that reached the disk for this keeper instance.
+    written: Arc<Mutex<u64>>,
+    /// Injected platform or test credential store.
+    store: Arc<dyn CredentialStore>,
+    /// Subscribers notified on every `Locked <-> Unlocked` transition.
+    listeners: Vec<TransitionListener>,
     /// A PIN is set: the Keychain holds the passphrase sealed to it (see `vault_pin`).
     pin: bool,
     /// How many times a lock was asked for, open vault or not: an open that began before one
@@ -37,16 +53,7 @@ pub struct Keeper {
 
 impl Global for Keeper {}
 
-/// The newest write that reached the disk. Writes run on background threads and could finish
-/// out of order; an older one must never overwrite a newer one.
-static WRITTEN: Mutex<u64> = Mutex::new(0);
-
 /// Runs `write` only if no newer write (higher `ticket`) has already run; `None` when skipped.
-fn in_order<T>(ticket: u64, write: impl FnOnce() -> T) -> Option<T> {
-    ordered(&WRITTEN, ticket, write)
-}
-
-/// [`in_order`] against any counter, so a test can use its own.
 fn ordered<T>(written: &Mutex<u64>, ticket: u64, write: impl FnOnce() -> T) -> Option<T> {
     let mut last = written.lock().unwrap_or_else(|e| e.into_inner());
     if ticket < *last {
@@ -68,6 +75,17 @@ impl Keeper {
     /// touching the real macOS Keychain unless code mistakenly invokes `need_vault`.
     #[cfg(test)]
     pub(crate) fn install_at_with_keychain(path: PathBuf, keychain: bool, cx: &mut App) {
+        Self::install_at_with_store(path, keychain, Arc::new(OsCredentialStore), cx);
+    }
+
+    /// Installs a keeper backed by an injected [`CredentialStore`] (e.g. an in-memory fake).
+    #[cfg(test)]
+    pub(crate) fn install_at_with_store(
+        path: PathBuf,
+        keychain: bool,
+        store: Arc<dyn CredentialStore>,
+        cx: &mut App,
+    ) {
         cx.set_global(Self {
             path: Some(path),
             open: None,
@@ -75,8 +93,35 @@ impl Keeper {
             gate: Gate::default(),
             keychain_current: false,
             ticket: 0,
+            written: Arc::new(Mutex::new(0)),
+            store,
+            listeners: Vec::new(),
             pin: false,
             locks: 0,
+        });
+    }
+
+    /// Registers a listener invoked on every [`VaultTransition`] (`Unlocked` or `Locked`).
+    ///
+    /// Delivery is deferred via [`App::defer`] so transitions triggered inside an entity update
+    /// (such as `Shell` locking the vault on idle or sleep) never re-enter that entity while it
+    /// is still leased.
+    pub fn subscribe(cx: &mut App, listener: impl FnMut(VaultTransition, &mut App) + 'static) {
+        cx.global_mut::<Self>().listeners.push(Box::new(listener));
+    }
+
+    fn emit(transition: VaultTransition, cx: &mut App) {
+        cx.defer(move |cx| {
+            if !cx.has_global::<Self>() {
+                return;
+            }
+            let mut listeners = std::mem::take(&mut cx.global_mut::<Self>().listeners);
+            for listener in &mut listeners {
+                listener(transition, cx);
+            }
+            let mut rest = std::mem::take(&mut cx.global_mut::<Self>().listeners);
+            listeners.append(&mut rest);
+            cx.global_mut::<Self>().listeners = listeners;
         });
     }
 
@@ -94,6 +139,9 @@ impl Keeper {
             gate: Gate::default(),
             keychain_current: false,
             ticket: 0,
+            written: Arc::new(Mutex::new(0)),
+            store: Arc::new(OsCredentialStore),
+            listeners: Vec::new(),
             // From the local mark, not the Keychain item: reading that asks macOS first.
             pin: crate::settings::dir().is_some_and(|d| crate::vault_pin::marked(&d)),
             locks: 0,
@@ -144,10 +192,15 @@ impl Keeper {
     /// that was wiped or is gone is forgotten, so the passphrase is asked next.
     pub fn try_unlock(typed: Typed, cx: &mut App) -> Task<Tried> {
         let k = cx.global::<Self>();
-        let (since, path, dir) = (k.locks, k.path.clone(), crate::settings::dir());
+        let (since, path, dir, store) = (
+            k.locks,
+            k.path.clone(),
+            crate::settings::dir(),
+            Arc::clone(&k.store),
+        );
         let work = cx.background_spawn(async move {
             match path {
-                Some(path) => open_typed(typed, &path, dir.as_deref(), &vault_pin::KeychainStore),
+                Some(path) => open_typed(typed, &path, dir.as_deref(), &store),
                 None => vault_pin::Outcome::Failed("There is no settings folder.".into()),
             }
         });
@@ -201,8 +254,8 @@ impl Keeper {
             Need::Wait => true,
             Need::Start => {
                 let since = k.locks;
-                let work =
-                    cx.background_spawn(async move { open_with(&keychain::Passphrase, &path) });
+                let store = Arc::clone(&k.store);
+                let work = cx.background_spawn(async move { open_with(&store, &path) });
                 cx.spawn(async move |cx| {
                     let read = work.await;
                     cx.update(|cx| Self::keychain_done(read, since, cx));
@@ -218,10 +271,15 @@ impl Keeper {
     fn keychain_done(read: Read, since: u64, cx: &mut App) {
         let k = cx.global_mut::<Self>();
         let found = read.vault.filter(|_| k.locks == since);
-        if adopt(&mut k.open, found) {
+        let opened = adopt(&mut k.open, found);
+        if opened {
             k.keychain_current = true;
         }
-        for waiter in k.gate.finish(read.refused) {
+        let waiters = k.gate.finish(read.refused);
+        if opened {
+            Self::emit(VaultTransition::Unlocked, cx);
+        }
+        for waiter in waiters {
             waiter(cx, read.refused);
         }
     }
@@ -262,25 +320,33 @@ impl Keeper {
     pub fn lock(cx: &mut App) -> bool {
         let k = cx.global_mut::<Self>();
         k.locks += 1;
-        k.open.take().map(|mut vault| vault.wipe()).is_some()
+        let was_open = k.open.take().map(|mut vault| vault.wipe()).is_some();
+        if was_open {
+            Self::emit(VaultTransition::Locked, cx);
+        }
+        was_open
     }
 
     /// Hands an unlocked vault back. With the Keychain opt-in on, the passphrase is stored
     /// the first time (and again after it changes).
     pub fn put(vault: Vault, cx: &mut App) {
         let k = cx.global_mut::<Self>();
+        let was_closed = k.open.is_none();
         if store_due(
             k.keychain,
             k.keychain_current,
             k.gate.refused,
             k.gate.busy(),
         ) {
-            match keychain::store(vault.passphrase()) {
+            match k.store.store_passphrase(vault.passphrase()) {
                 Ok(()) => k.keychain_current = true,
                 Err(e) => tracing::warn!(error = %e, "vault_keychain_store_failed"),
             }
         }
         k.open = Some(vault);
+        if was_closed {
+            Self::emit(VaultTransition::Unlocked, cx);
+        }
     }
 
     /// Keeps a vault opened or created away from the keeper (a typed passphrase, a new vault),
@@ -353,13 +419,13 @@ impl Keeper {
             let Some(vault) = k.open.as_ref() else {
                 return Err("Unlock the vault first: its passphrase is what gets stored.".into());
             };
-            keychain::store(vault.passphrase())?;
+            k.store.store_passphrase(vault.passphrase())?;
             k.keychain = true;
             k.keychain_current = true;
             // The person just wrote the item themselves: an earlier refusal no longer holds.
             k.gate.refused = false;
         } else {
-            keychain::delete()?;
+            k.store.delete_passphrase()?;
             k.keychain = false;
             k.keychain_current = false;
         }
@@ -373,8 +439,9 @@ impl Keeper {
         k.keychain_current = false;
         if k.pin {
             k.pin = false;
+            let store = Arc::clone(&k.store);
             if let Some(dir) = crate::settings::dir()
-                && let Err(e) = vault_pin::clear(&dir, &vault_pin::KeychainStore)
+                && let Err(e) = vault_pin::clear(&dir, &store)
             {
                 tracing::warn!(error = %e, "vault_pin_clear_failed");
             }
@@ -395,14 +462,14 @@ impl Keeper {
         if let Some(problem) = tern_vault::pin::problem(&pin) {
             return Err(problem.into());
         }
-        let Some(vault) = cx.global::<Self>().open.as_ref() else {
+        let k = cx.global::<Self>();
+        let Some(vault) = k.open.as_ref() else {
             return Err("Unlock the vault first: its passphrase is what the PIN seals.".into());
         };
         let passphrase = vault.passphrase().clone();
+        let store = Arc::clone(&k.store);
         let dir = crate::settings::dir().ok_or("There is no settings folder.")?;
-        Ok(cx.background_spawn(async move {
-            vault_pin::set(&dir, &passphrase, &pin, &vault_pin::KeychainStore)
-        }))
+        Ok(cx.background_spawn(async move { vault_pin::set(&dir, &passphrase, &pin, &store) }))
     }
 
     /// The sealed passphrase is in the Keychain.
@@ -416,7 +483,8 @@ impl Keeper {
     /// A message when the Keychain refuses.
     pub fn clear_pin(cx: &mut App) -> Result<(), String> {
         let dir = crate::settings::dir().ok_or("There is no settings folder.")?;
-        vault_pin::clear(&dir, &vault_pin::KeychainStore)?;
+        let store = Arc::clone(&cx.global::<Self>().store);
+        vault_pin::clear(&dir, &store)?;
         cx.global_mut::<Self>().pin = false;
         Ok(())
     }
@@ -428,8 +496,9 @@ impl Keeper {
         let snapshot = k.open.as_ref()?.snapshot();
         k.ticket += 1;
         let ticket = k.ticket;
+        let written = Arc::clone(&k.written);
         Some(cx.background_spawn(async move {
-            in_order(ticket, || snapshot.save(&path))
+            ordered(&written, ticket, || snapshot.save(&path))
                 .unwrap_or(Ok(()))
                 .map_err(|e| e.to_string())
         }))
@@ -446,9 +515,12 @@ impl Keeper {
         let path = k.path.clone()?;
         k.ticket += 1;
         let ticket = k.ticket;
+        let written = Arc::clone(&k.written);
         Some(cx.background_spawn(async move {
-            in_order(ticket, || Vault::change_passphrase(&path, current, new))
-                .unwrap_or(Err(VaultError::WrongPassphrase))
+            ordered(&written, ticket, || {
+                Vault::change_passphrase(&path, current, new)
+            })
+            .unwrap_or(Err(VaultError::WrongPassphrase))
         }))
     }
 }
@@ -469,174 +541,54 @@ pub fn step_lock(current: u32, delta: isize) -> u32 {
     choices[at.saturating_add_signed(delta).min(choices.len() - 1)]
 }
 
-pub(crate) mod keychain {
-    //! The vault passphrase in the platform credential store, for the opt-in Keychain unlock
-    //! setting: the login Keychain on macOS, Credential Manager on Windows, the Secret Service
-    //! (GNOME Keyring, KWallet) on Linux.
-    //!
-    //! One generic-password item, service `tern vault` (`tern vault (debug)` in debug builds, so a
-    //! development run never touches the real item). The passphrase goes nowhere else and is never
-    //! logged: errors carry the store's status text only.
-
-    use crate::keeper_gate::Load;
-    use tern_vault::{ExposeSecret, SecretString};
-
-    const ACCOUNT: &str = "passphrase";
-
-    /// The vault passphrase item, as a source for `crate::keeper_gate::Passphrases`.
-    pub struct Passphrase;
-
-    /// The native store, behind three calls. `None` from `get` means "no such item".
-    #[cfg(target_os = "macos")]
-    mod backend {
-        use security_framework::passwords::{
-            delete_generic_password, get_generic_password, set_generic_password,
-        };
-
-        /// `errSecItemNotFound`.
-        const NOT_FOUND: i32 = -25300;
-
-        pub fn set(service: &str, account: &str, secret: &[u8]) -> Result<(), String> {
-            set_generic_password(service, account, secret).map_err(|e| e.to_string())
-        }
-
-        pub fn get(service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
-            match get_generic_password(service, account) {
-                Ok(bytes) => Ok(Some(bytes)),
-                Err(e) if e.code() == NOT_FOUND => Ok(None),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-
-        pub fn delete(service: &str, account: &str) -> Result<(), String> {
-            match delete_generic_password(service, account) {
-                Ok(()) => Ok(()),
-                Err(e) if e.code() == NOT_FOUND => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    mod backend {
-        fn entry(service: &str, account: &str) -> Result<keyring::Entry, String> {
-            keyring::Entry::new(service, account).map_err(|e| e.to_string())
-        }
-
-        pub fn set(service: &str, account: &str, secret: &[u8]) -> Result<(), String> {
-            entry(service, account)?
-                .set_secret(secret)
-                .map_err(|e| e.to_string())
-        }
-
-        pub fn get(service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
-            match entry(service, account)?.get_secret() {
-                Ok(bytes) => Ok(Some(bytes)),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-
-        pub fn delete(service: &str, account: &str) -> Result<(), String> {
-            match entry(service, account)?.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-    }
-
-    /// What the store is called on this OS, for messages.
-    pub const STORE_NAME: &str = if cfg!(target_os = "macos") {
-        "Keychain"
-    } else if cfg!(target_os = "windows") {
-        "Credential Manager"
-    } else {
-        "Secret Service"
-    };
-
-    fn set(service: &str, secret: &[u8]) -> Result<(), String> {
-        backend::set(service, ACCOUNT, secret).map_err(|e| format!("{STORE_NAME}: {e}"))
-    }
-
-    /// The item's bytes; `None` when there is none or the store refuses (logged under `event`).
-    fn get(service: &str, event: &'static str) -> Option<Vec<u8>> {
-        match backend::get(service, ACCOUNT) {
-            Ok(found) => found,
-            Err(e) => {
-                tracing::warn!(error = %e, event);
-                None
-            }
-        }
-    }
-
-    /// Removes an item; one that is already gone counts as removed.
-    fn remove(service: &str) -> Result<(), String> {
-        backend::delete(service, ACCOUNT).map_err(|e| format!("{STORE_NAME}: {e}"))
-    }
-
-    pub fn service() -> &'static str {
-        if cfg!(debug_assertions) {
-            "tern vault (debug)"
-        } else {
-            "tern vault"
-        }
-    }
-
-    /// Stores or replaces the passphrase.
-    pub fn store(passphrase: &SecretString) -> Result<(), String> {
-        set(service(), passphrase.expose_secret().as_bytes())
-    }
-
-    /// The stored passphrase, told apart from an item that is not there and a store that refuses.
-    pub(crate) fn read() -> Load {
-        match backend::get(service(), ACCOUNT) {
-            Ok(Some(bytes)) => String::from_utf8(bytes)
-                .map(|p| Load::Found(SecretString::from(p)))
-                .unwrap_or(Load::Missing),
-            Ok(None) => Load::Missing,
-            Err(e) => {
-                tracing::warn!(error = %e, event = "vault_keychain_read_failed");
-                Load::Refused
-            }
-        }
-    }
-
-    /// Removes the item; an item that is already gone counts as removed.
-    pub fn delete() -> Result<(), String> {
-        remove(service())
-    }
-
-    // ---- the vault PIN ------------------------------------------------------------------------
-
-    /// The vault passphrase sealed to the PIN (see `vault_pin`), in its own item: service
-    /// `tern vault pin` (`tern vault pin (debug)` in debug builds). The PIN opens nothing without
-    /// this item, and the item is useless without the PIN.
-    pub fn pin_service() -> &'static str {
-        if cfg!(debug_assertions) {
-            "tern vault pin (debug)"
-        } else {
-            "tern vault pin"
-        }
-    }
-
-    pub fn store_pin_blob(blob: &[u8]) -> Result<(), String> {
-        set(pin_service(), blob)
-    }
-
-    pub fn load_pin_blob() -> Option<Vec<u8>> {
-        get(pin_service(), "vault_pin_keychain_read_failed")
-    }
-
-    /// Removes the PIN item; one that is already gone counts as removed.
-    pub fn delete_pin_blob() -> Result<(), String> {
-        remove(pin_service())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::keeper_gate::Load;
+
+    #[derive(Default)]
+    struct MemoryStore {
+        passphrase: Mutex<Option<SecretString>>,
+        refuse_read: Mutex<bool>,
+        pin_blob: Mutex<Option<Vec<u8>>>,
+    }
+
+    impl CredentialStore for MemoryStore {
+        fn read_passphrase(&self) -> Load {
+            if *self.refuse_read.lock().unwrap() {
+                return Load::Refused;
+            }
+            match self.passphrase.lock().unwrap().clone() {
+                Some(p) => Load::Found(p),
+                None => Load::Missing,
+            }
+        }
+
+        fn store_passphrase(&self, passphrase: &SecretString) -> Result<(), String> {
+            *self.passphrase.lock().unwrap() = Some(passphrase.clone());
+            Ok(())
+        }
+
+        fn delete_passphrase(&self) -> Result<(), String> {
+            *self.passphrase.lock().unwrap() = None;
+            Ok(())
+        }
+
+        fn store_pin_blob(&self, blob: &[u8]) -> Result<(), String> {
+            *self.pin_blob.lock().unwrap() = Some(blob.to_vec());
+            Ok(())
+        }
+
+        fn load_pin_blob(&self) -> Option<Vec<u8>> {
+            self.pin_blob.lock().unwrap().clone()
+        }
+
+        fn delete_pin_blob(&self) -> Result<(), String> {
+            *self.pin_blob.lock().unwrap() = None;
+            Ok(())
+        }
+    }
 
     #[test]
     fn locks_only_after_the_whole_idle_period_and_never_when_off() {
@@ -689,6 +641,9 @@ mod tests {
                 gate: Gate::default(),
                 keychain_current: false,
                 ticket: 0,
+                written: Arc::new(Mutex::new(0)),
+                store: Arc::new(MemoryStore::default()),
+                listeners: Vec::new(),
                 pin: false,
                 locks: 0,
             })
@@ -754,6 +709,43 @@ mod tests {
             Keeper::sync_done(vault_with("a"), true, false, since, cx);
         });
         assert!(has(&mut app, "a"));
+    }
+
+    #[test]
+    fn emits_unlocked_and_locked_transitions_and_supports_fake_credential_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.age");
+        let vault = vault_with("prod");
+        vault.save(&path).unwrap();
+
+        let store = Arc::new(MemoryStore::default());
+        store
+            .store_passphrase(&SecretString::from("p".to_owned()))
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+
+        let mut app = gpui::TestApp::new();
+        app.update(|cx| {
+            Keeper::install_at_with_store(path.clone(), true, store, cx);
+            Keeper::subscribe(cx, move |transition, _| {
+                seen.lock().unwrap().push(transition);
+            });
+            assert!(Keeper::unlock_with_keychain(cx, |_, _| {}));
+        });
+        app.run_until_parked();
+        assert!(has(&mut app, "prod"));
+        assert_eq!(*events.lock().unwrap(), vec![VaultTransition::Unlocked]);
+
+        app.update(|cx| {
+            assert!(Keeper::lock(cx));
+            assert!(!Keeper::lock(cx));
+        });
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![VaultTransition::Unlocked, VaultTransition::Locked]
+        );
     }
 }
 

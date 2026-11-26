@@ -39,6 +39,7 @@ mod icons;
 mod indicator;
 mod keeper;
 mod keeper_gate;
+mod keeper_store;
 mod keymap;
 mod lifecycle;
 mod lock_on_sleep;

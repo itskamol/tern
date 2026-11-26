@@ -222,3 +222,73 @@ fn work_waiting_on_a_keychain_read_is_handed_back_when_it_answers() {
     });
     assert_eq!(*got.borrow(), [("prompt", true)]);
 }
+
+/// Regression test for the production crash `cannot update tern::shell::Shell while it is already
+/// being updated`: `Shell` subscribes to `Keeper` transitions via `weak_shell.update(...)`, and
+/// `Shell` itself calls `Keeper::lock` (idle lock, Lock now, sleep/screen-lock), `Keeper::put`
+/// (create vault), `Keeper::adopt` (save connection), and `Keeper::sync_done` from inside an
+/// active `Entity<Shell>::update`.
+#[test]
+fn transitions_triggered_inside_a_subscribed_entity_update_do_not_reenter_the_entity() {
+    struct Subscribed {
+        seen: Vec<(VaultTransition, bool)>,
+    }
+
+    let (mut app, _dir) = keeper(Some(vault_with("a")));
+    let entity = app.update(|cx| {
+        cx.new(|cx| {
+            let weak = cx.weak_entity();
+            Keeper::subscribe(cx, move |transition, cx| {
+                let _ = weak.update(cx, |s: &mut Subscribed, cx| {
+                    s.seen.push((transition, Keeper::len(cx).is_some()));
+                });
+            });
+            Subscribed { seen: Vec::new() }
+        })
+    });
+
+    // Mirrors `Shell::watch_idle`, `Shell::lock_vault`, and `Shell::lock_vault_for`.
+    app.update(|cx| {
+        entity.update(cx, |_, cx| {
+            assert!(Keeper::lock(cx));
+        });
+    });
+    assert_eq!(
+        app.update(|cx| entity.read(cx).seen.clone()),
+        vec![(VaultTransition::Locked, false)]
+    );
+
+    // Mirrors `Shell::create_vault`, `Shell::save_connection`, and `Shell::sync_vault`.
+    app.update(|cx| {
+        entity.update(cx, |_, cx| {
+            Keeper::put(vault_with("b"), cx);
+        });
+    });
+    assert_eq!(
+        app.update(|cx| entity.read(cx).seen.clone()),
+        vec![
+            (VaultTransition::Locked, false),
+            (VaultTransition::Unlocked, true),
+        ]
+    );
+
+    // Rapid Lock -> Adopt -> Lock inside one update preserves transition order and lets
+    // subscribers see the actual current vault state when deferred callbacks flush.
+    app.update(|cx| {
+        entity.update(cx, |_, cx| {
+            assert!(Keeper::lock(cx));
+            Keeper::adopt(vault_with("c"), cx);
+            assert!(Keeper::lock(cx));
+        });
+    });
+    assert_eq!(
+        app.update(|cx| entity.read(cx).seen.clone()),
+        vec![
+            (VaultTransition::Locked, false),
+            (VaultTransition::Unlocked, true),
+            (VaultTransition::Locked, false),
+            (VaultTransition::Unlocked, false),
+            (VaultTransition::Locked, false),
+        ]
+    );
+}
