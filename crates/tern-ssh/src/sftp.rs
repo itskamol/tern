@@ -152,26 +152,16 @@ impl Sftp {
         .await
     }
 
-    /// Opens a remote file for reading, with its size.
+    /// Opens a remote file for reading. One round trip: a copy of many small files pays it once
+    /// per file, so nothing else (a size check) rides along.
     ///
     /// # Errors
     ///
     /// The path's errors as in [`Self::list`].
-    pub async fn open_read(&self, remote: &str) -> Result<(File, u64), SftpError> {
+    pub async fn open_read(&self, remote: &str) -> Result<File, SftpError> {
         let (s, remote) = (self.inner.clone(), remote.to_string());
-        self.on_rt(async move {
-            let total = s
-                .metadata(remote.clone())
-                .await
-                .map_err(|e| wire(&remote, &e))?
-                .len();
-            let file = s
-                .open(remote.clone())
-                .await
-                .map_err(|e| wire(&remote, &e))?;
-            Ok((file, total))
-        })
-        .await
+        self.on_rt(async move { s.open(remote.clone()).await.map_err(|e| wire(&remote, &e)) })
+            .await
     }
 
     /// Opens a remote file for writing, creating or emptying it.

@@ -78,7 +78,7 @@ impl FileSource for SftpFiles {
 
     fn read<'a>(&'a self, path: &'a str) -> Call<'a, Reader> {
         async move {
-            let (file, _) = self.sftp.open_read(path).await?;
+            let file = self.sftp.open_read(path).await?;
             Ok(Box::new(file) as Reader)
         }
         .boxed()

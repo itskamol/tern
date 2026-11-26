@@ -297,15 +297,9 @@ async fn copy_through(
     if *stop.borrow() {
         return Err(Stopped::Cancelled);
     }
-    let mut reader = job
-        .from
-        .read(&job.src)
-        .await
-        .map_err(|e| Stopped::Failed(e.to_string()))?;
-    let mut writer = job
-        .to
-        .write(part)
-        .await
+    // Both opens at once: each is a round trip, and a folder of small files pays them per file.
+    // A failed open leaves at most an empty `.part`, which `copy` removes.
+    let (mut reader, mut writer) = tokio::try_join!(job.from.read(&job.src), job.to.write(part))
         .map_err(|e| Stopped::Failed(e.to_string()))?;
     let moved = async {
         let mut buf = vec![0u8; CHUNK];

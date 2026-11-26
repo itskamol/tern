@@ -149,3 +149,56 @@ async fn host_to_host_copy_time_over_slow_links() {
         mib as f64 / median
     );
 }
+
+/// A folder of many small files, host to host: the per-file cost, not the byte rate.
+/// Env: `TERN_BENCH_FILES` (default 300), `TERN_BENCH_KIB` each (default 8).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "timing run, see docs/perf.md"]
+async fn host_to_host_many_small_files_over_slow_links() {
+    let (files, kib, delay_ms) = (
+        env_or("TERN_BENCH_FILES", 300) as usize,
+        env_or("TERN_BENCH_KIB", 8) as usize,
+        env_or("TERN_BENCH_DELAY_MS", 10),
+    );
+    let delay = Duration::from_millis(delay_ms);
+    let (a, b) = (host("a", delay).await, host("b", delay).await);
+    let src = a.root.path().join("home/ui");
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 0..files {
+        let sub = src.join(format!("d{}", i % 10));
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(format!("f{i}.js")), vec![b'x'; kib * 1024]).unwrap();
+    }
+    let item = a
+        .source
+        .list("/home")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.name == "ui")
+        .unwrap();
+    let (queue, events) = TransferQueue::new(tokio::runtime::Handle::current());
+    let t = Instant::now();
+    queue.submit(vec![CopyJob {
+        from: a.source.clone(),
+        item,
+        to: b.source.clone(),
+        dir: "/home".to_owned(),
+        rule: None,
+        moving: false,
+    }]);
+    loop {
+        if let Event::Finished(s) = events.recv().await.unwrap() {
+            assert_eq!((s.copied, s.failed.len()), (files, 0), "{:?}", s.failed);
+            break;
+        }
+    }
+    let secs = t.elapsed().as_secs_f64();
+    let rtt_ms = 2 * delay_ms;
+    println!(
+        "{files} x {kib} KiB host to host, {rtt_ms} ms RTT each link: {secs:.2} s, {:.1} ms/file = {:.1} RTT/file, {:.0} KiB/s",
+        secs * 1000.0 / files as f64,
+        secs * 1000.0 / files as f64 / rtt_ms as f64,
+        (files * kib) as f64 / secs
+    );
+}

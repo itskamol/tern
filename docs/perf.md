@@ -309,6 +309,25 @@ targets (70, 75), as before. Three earlier tries the same day were refused befor
 because another app's window covered the copy; one of them read 82-88 MB with no tab and 87-90
 with one, and those readings are not counted.
 
+## 2026-11-17 — Folders of small files: per-file round trips
+
+Reported: a `ui` folder host to host ran at 56 KB/s, rising to 865 KB/s on larger files. Measured
+with `tests/transfer_bench.rs::host_to_host_many_small_files_over_slow_links`
+(`TERN_BENCH_FILES=60 TERN_BENCH_DELAY_MS=10 cargo test -p tern-ssh --release --test transfer_bench
+host_to_host_many -- --ignored --nocapture`): 60 files of 8 KiB, 20 ms round trip on each link.
+Runs within a pass differ by under 0.05 s.
+
+| Change | Time | Round trips a file |
+| --- | --- | --- |
+| Before | 11.9 s (41 KiB/s) | 9.9 |
+| `Sftp::open_read` without its unused `stat` | 10.45 s | 8.7 |
+| and both ends opened at once in `copy_through` | 9.3 s (51 KiB/s) | 7.8 |
+| Probe only, reverted: 8 files in flight per destination | 1.9 s (250 KiB/s) | 1.6 |
+
+A small file is bound by round trips, not bytes, and the queue runs one file at a time per
+destination host (issue #5, story 25), so they never overlap. Lifting that limit is the large win
+and is a product decision; the two cuts above stay inside it.
+
 ## 2026-11-24 — 0.5.0 release check
 
 `scripts/measure-memory.sh` on the 0.5.0 bundle (release build of 4592be9 bumped to 0.5.0), screen
