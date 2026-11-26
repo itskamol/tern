@@ -122,6 +122,14 @@ does not. See `docs/ui.md` and the project memory on verifying by eye.
   `cargo test -p <crate>` and `cargo clippy -p <crate> --all-targets`.
 - **No network, no real home dir.** Use `tempfile::TempDir`; never touch `~/.ssh` or a real
   gist in a test.
+- **Loopback/socket suites.** `cargo test -p tern-ssh --test exec` and
+  `cargo test -p tern -- agents::` bind loopback TCP and Unix sockets; run them where local
+  sockets are permitted, and bound fake-server `accept()` calls with a short timeout so socket
+  errors fail fast instead of hanging.
+- **Parallel `tracing` capture.** A unit test that installs a scoped subscriber with
+  `tracing::subscriber::set_default` must also keep a second `tracing::Dispatch` (such as
+  `NoSubscriber`) alive so `tracing-core` leaves `has_just_one` mode and parallel test threads
+  cannot poison callsites to `Interest::never()`.
 
 ## Running everything
 
