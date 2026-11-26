@@ -34,8 +34,9 @@ use tokio::sync::mpsc;
 pub use config::load_ssh_config_hosts;
 pub use error::{Disconnect, Error, ForwardError, InputError, Result};
 pub use exec::{
-    DEFAULT_EXEC_TIMEOUT, EXEC_OUTPUT_CAP, Exec, ExecCancel, ExecError, ExecEvent, ExecOptions,
-    ExecOutput, ExecPartialOutput, ExecTimeoutPhase, MAX_EXEC_TIMEOUT, MIN_EXEC_TIMEOUT, exec,
+    DEFAULT_EXEC_TIMEOUT, EXEC_OUTPUT_CAP, Exec, ExecCancel, ExecCollector, ExecError, ExecEvent,
+    ExecOptions, ExecOutput, ExecPartialOutput, ExecTimeoutPhase, MAX_EXEC_TIMEOUT,
+    MIN_EXEC_TIMEOUT, exec,
 };
 pub use exec_stream::{
     ExecStream, ExecStreamEvent, ExecStreamOptions, ExecStreamResult, exec_stream,

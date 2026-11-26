@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Msg, Session};
-use russh::{Channel, ChannelId, MethodKind, MethodSet};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig};
 use tern_ssh::{ConnectSpec, Disconnect, Prompt, SessionEvent, SessionHandle, TermSize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -75,6 +75,8 @@ struct TestServer {
     eof_seen: HashSet<ChannelId>,
     /// `pty`, `shell`, `exec` and `agent` requests received, in order.
     requests: Arc<Mutex<Vec<&'static str>>>,
+    /// RFC 4254 §6.9 channel signals received from clients, in order.
+    signals: Arc<Mutex<Vec<String>>>,
 }
 
 impl TestServer {
@@ -225,6 +227,16 @@ impl server::Handler for TestServer {
         Ok(())
     }
 
+    async fn signal(
+        &mut self,
+        _: ChannelId,
+        signal: Sig,
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.signals.lock().unwrap().push(format!("{signal:?}"));
+        Ok(())
+    }
+
     async fn data(
         &mut self,
         ch: ChannelId,
@@ -307,6 +319,8 @@ pub struct Server {
     pub opened: Arc<Mutex<Vec<String>>>,
     /// `pty`, `shell` and `agent` requests received, in order.
     pub requests: Arc<Mutex<Vec<&'static str>>>,
+    /// RFC 4254 §6.9 channel signals received from clients, in order.
+    pub signals: Arc<Mutex<Vec<String>>>,
 }
 
 /// Decrements a server's active-connection counter when a client stream finishes.
@@ -375,6 +389,8 @@ async fn serve_full(
     let agent = agent_log.clone();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let seen = requests.clone();
+    let signals = Arc::new(Mutex::new(Vec::new()));
+    let sigs = signals.clone();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let handler = TestServer {
@@ -390,6 +406,7 @@ async fn serve_full(
                 agent_asked: false,
                 agent_log: agent.clone(),
                 requests: seen.clone(),
+                signals: sigs.clone(),
             };
             let config = config.clone();
             let counter = active_counter.clone();
@@ -409,6 +426,7 @@ async fn serve_full(
         agent_log,
         opened,
         requests,
+        signals,
     }
 }
 

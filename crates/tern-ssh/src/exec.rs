@@ -9,13 +9,14 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use russh::ChannelMsg;
 use tokio::sync::watch;
-use tokio::time::Instant;
 
-use crate::connect::{AuthenticatedConnection, CONNECT_TIMEOUT, ConnectOptions};
-use crate::error::{Cause, Disconnect, Failure};
-use crate::{ConnectSpec, Prompt, SessionEvent};
+use crate::connect::CONNECT_TIMEOUT;
+use crate::error::{Disconnect, Failure};
+use crate::exec_stream::{
+    ExecStream, ExecStreamEvent, ExecStreamOptions, ExecStreamResult, exec_stream,
+};
+use crate::{ConnectSpec, Prompt};
 
 /// Default wall-clock limit covering connection setup and command execution.
 pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,7 +30,7 @@ pub const EXEC_OUTPUT_CAP: usize = 64 * 1024;
 /// RFC 4254 §5.2 `SSH_EXTENDED_DATA_STDERR`.
 pub(crate) const SSH_EXTENDED_DATA_STDERR: u32 = 1;
 /// Capacity of the internal/public exec event queues (at most one prompt is in flight at once).
-const EXEC_EVENT_QUEUE: usize = 4;
+pub(crate) const EXEC_EVENT_QUEUE: usize = 4;
 /// Grace window after `exit-status` / `exit-signal` for the server to close the channel.
 pub(crate) const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// How long to wait for russh to report why an unexpectedly dropped connection ended.
@@ -141,7 +142,7 @@ pub enum ExecError {
         hop: Option<(String, u16)>,
     },
     /// Connection setup and command execution exceeded the wall-clock timeout.
-    #[error("command timed out after {}", format_duration(*.timeout))]
+    #[error("{}", format_timeout(*.timeout, *.phase))]
     Timeout {
         /// The wall-clock limit that expired.
         timeout: Duration,
@@ -174,6 +175,16 @@ fn format_host_key_changed(line: usize, hop: Option<&(String, u16)>) -> String {
             format!("host key changed for jump host {host}:{port} at known_hosts line {line}")
         }
         None => format!("host key changed at known_hosts line {line}"),
+    }
+}
+
+fn format_timeout(timeout: Duration, phase: ExecTimeoutPhase) -> String {
+    let duration = format_duration(timeout);
+    match phase {
+        ExecTimeoutPhase::NotDispatched => format!("command timed out after {duration}"),
+        ExecTimeoutPhase::DispatchUncertain | ExecTimeoutPhase::Running => format!(
+            "command timed out after {duration} (requested remote interrupt; remote process stop is not guaranteed)"
+        ),
     }
 }
 
@@ -324,233 +335,50 @@ pub fn exec(
     options: ExecOptions,
     rt: &tokio::runtime::Handle,
 ) -> Exec {
-    let command = command.into();
+    let stream_options = ExecStreamOptions::with_timeout(Some(options.effective_timeout()));
+    let mut stream = exec_stream(spec, command, stream_options, rt);
+    let cancel = stream.cancel_handle();
     let (etx, erx) = async_channel::bounded(EXEC_EVENT_QUEUE);
-    let (cancel_tx, cancel_rx) = watch::channel(false);
     rt.spawn(async move {
-        let mut cancel = CancelSignal(cancel_rx);
-        let result = run_exec(spec, command, options, &etx, &mut cancel).await;
+        let result = collect_stream(&mut stream, &etx).await;
         let _ = etx.send(ExecEvent::Finished(result)).await;
     });
     Exec {
         events: erx,
-        cancel: ExecCancel { tx: cancel_tx },
+        cancel,
         finished: false,
     }
 }
 
-async fn run_exec(
-    spec: ConnectSpec,
-    command: String,
-    options: ExecOptions,
+async fn collect_stream(
+    stream: &mut ExecStream,
     exec_tx: &async_channel::Sender<ExecEvent>,
-    cancel: &mut CancelSignal,
 ) -> std::result::Result<ExecOutput, ExecError> {
-    let timeout = options.effective_timeout();
-    let deadline = Instant::now() + timeout;
-    tracing::info!(
-        host = %spec.host,
-        port = spec.port,
-        timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-        "ssh_exec_start"
-    );
-
-    let (session_tx, session_rx) = async_channel::bounded::<SessionEvent>(EXEC_EVENT_QUEUE);
-    let connect_options = ConnectOptions::default();
-    let cause = connect_options.cause.clone();
-    let conn = {
-        let open = AuthenticatedConnection::open(&spec, connect_options, &session_tx);
-        tokio::pin!(open);
-        loop {
-            tokio::select! {
-                biased;
-                () = cancel.wait() => {
-                    tracing::info!(host = %spec.host, port = spec.port, "ssh_exec_cancelled");
+    let mut collector = ExecCollector::default();
+    while let Some(event) = stream.next().await {
+        match event {
+            ExecStreamEvent::Prompt(prompt) => {
+                if exec_tx.send(ExecEvent::Prompt(prompt)).await.is_err() {
+                    stream.cancel_handle().cancel();
                     return Err(ExecError::Cancelled);
                 }
-                () = tokio::time::sleep_until(deadline) => {
-                    tracing::warn!(host = %spec.host, port = spec.port, "ssh_exec_timeout");
-                    return Err(ExecError::Timeout {
+            }
+            ExecStreamEvent::Stdout(bytes) => collector.push_stdout(&bytes),
+            ExecStreamEvent::Stderr(bytes) => collector.push_stderr(&bytes),
+            ExecStreamEvent::Finished(result) => {
+                return match result {
+                    Ok(done) => Ok(collector.into_output(done)),
+                    Err(ExecError::Timeout { timeout, phase, .. }) => Err(ExecError::Timeout {
                         timeout,
-                        phase: ExecTimeoutPhase::NotDispatched,
-                        partial: ExecPartialOutput::default(),
-                    });
-                }
-                res = &mut open => break match res {
-                    Ok(conn) => conn,
-                    Err(failure) => {
-                        let err = map_failure(failure, timeout);
-                        tracing::warn!(host = %spec.host, port = spec.port, error = %err, "ssh_exec_failed");
-                        return Err(err);
-                    }
-                },
-                ev = session_rx.recv() => {
-                    if let Ok(SessionEvent::Prompt(prompt)) = ev
-                        && exec_tx.send(ExecEvent::Prompt(prompt)).await.is_err()
-                    {
-                        return Err(ExecError::Cancelled);
-                    }
-                }
+                        phase,
+                        partial: collector.into_partial(),
+                    }),
+                    Err(other) => Err(other),
+                };
             }
         }
-    };
-
-    let result = run_channel(&conn, &command, deadline, timeout, cancel, &cause).await;
-    let _ = tokio::time::timeout(DISCONNECT_GRACE, conn.disconnect()).await;
-
-    match &result {
-        Ok(out) => {
-            tracing::info!(
-                host = %spec.host,
-                port = spec.port,
-                exit_status = ?out.exit_status,
-                stdout_bytes = out.stdout.len(),
-                stderr_bytes = out.stderr.len(),
-                stdout_truncated = out.stdout_truncated,
-                stderr_truncated = out.stderr_truncated,
-                "ssh_exec_finished"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(host = %spec.host, port = spec.port, error = %err, "ssh_exec_failed");
-        }
     }
-    result
-}
-
-async fn race<T>(
-    deadline: Instant,
-    timeout: Duration,
-    phase: ExecTimeoutPhase,
-    cancel: &mut CancelSignal,
-    fut: impl Future<Output = T>,
-) -> std::result::Result<T, ExecError> {
-    tokio::select! {
-        biased;
-        () = cancel.wait() => Err(ExecError::Cancelled),
-        () = tokio::time::sleep_until(deadline) => Err(ExecError::Timeout {
-            timeout,
-            phase,
-            partial: ExecPartialOutput::default(),
-        }),
-        out = fut => Ok(out),
-    }
-}
-
-async fn run_channel(
-    conn: &AuthenticatedConnection,
-    command: &str,
-    deadline: Instant,
-    timeout: Duration,
-    cancel: &mut CancelSignal,
-    cause: &Cause,
-) -> std::result::Result<ExecOutput, ExecError> {
-    let mut channel = race(
-        deadline,
-        timeout,
-        ExecTimeoutPhase::NotDispatched,
-        cancel,
-        conn.session().channel_open_session(),
-    )
-    .await?
-    .map_err(|e| ExecError::Ssh(Failure::from(e).to_string()))?;
-    race(
-        deadline,
-        timeout,
-        ExecTimeoutPhase::DispatchUncertain,
-        cancel,
-        channel.exec(true, command.as_bytes()),
-    )
-    .await?
-    .map_err(|e| ExecError::Ssh(Failure::from(e).to_string()))?;
-    race(
-        deadline,
-        timeout,
-        ExecTimeoutPhase::DispatchUncertain,
-        cancel,
-        channel.eof(),
-    )
-    .await?
-    .map_err(|e| ExecError::Ssh(Failure::from(e).to_string()))?;
-
-    let mut phase = ExecTimeoutPhase::DispatchUncertain;
-    let mut stdout = BoundedBuf::default();
-    let mut stderr = BoundedBuf::default();
-    let mut exit_status = None;
-    let mut exit_signal = None;
-    let mut closed_cleanly = false;
-    let mut close_deadline: Option<Instant> = None;
-
-    loop {
-        let msg = tokio::select! {
-            biased;
-            () = cancel.wait() => return Err(ExecError::Cancelled),
-            () = tokio::time::sleep_until(deadline) => {
-                return Err(ExecError::Timeout {
-                    timeout,
-                    phase,
-                    partial: ExecPartialOutput {
-                        stdout: stdout.bytes,
-                        stderr: stderr.bytes,
-                        stdout_truncated: stdout.truncated,
-                        stderr_truncated: stderr.truncated,
-                    },
-                });
-            }
-            () = async {
-                match close_deadline {
-                    Some(d) => tokio::time::sleep_until(d).await,
-                    None => std::future::pending().await,
-                }
-            } => break,
-            msg = channel.wait() => msg,
-        };
-        match msg {
-            Some(ChannelMsg::Success) => {
-                phase = ExecTimeoutPhase::Running;
-            }
-            Some(ChannelMsg::Data { data }) => {
-                phase = ExecTimeoutPhase::Running;
-                stdout.push(&data);
-            }
-            Some(ChannelMsg::ExtendedData { data, ext }) if ext == SSH_EXTENDED_DATA_STDERR => {
-                phase = ExecTimeoutPhase::Running;
-                stderr.push(&data);
-            }
-            Some(ChannelMsg::ExitStatus { exit_status: code }) => {
-                phase = ExecTimeoutPhase::Running;
-                exit_status = Some(code);
-                close_deadline.get_or_insert_with(|| Instant::now() + EXIT_GRACE);
-            }
-            Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
-                phase = ExecTimeoutPhase::Running;
-                exit_signal = Some(format!("{signal_name:?}"));
-                close_deadline.get_or_insert_with(|| Instant::now() + EXIT_GRACE);
-            }
-            Some(ChannelMsg::Failure) => return Err(ExecError::Refused),
-            Some(ChannelMsg::Close) => {
-                closed_cleanly = true;
-                break;
-            }
-            None => break,
-            Some(_) => {}
-        }
-    }
-
-    if exit_status.is_none() && exit_signal.is_none() && !closed_cleanly {
-        let grace = CAUSE_GRACE.min(deadline.saturating_duration_since(Instant::now()));
-        let detail = describe_drop(cause.wait(grace).await.as_ref());
-        return Err(ExecError::Ssh(detail.to_owned()));
-    }
-
-    Ok(ExecOutput {
-        exit_status,
-        exit_signal,
-        stdout: stdout.bytes,
-        stderr: stderr.bytes,
-        stdout_truncated: stdout.truncated,
-        stderr_truncated: stderr.truncated,
-    })
+    Err(ExecError::Cancelled)
 }
 
 pub(crate) fn describe_drop(reason: Option<&Disconnect>) -> &'static str {
@@ -562,9 +390,53 @@ pub(crate) fn describe_drop(reason: Option<&Disconnect>) -> &'static str {
     }
 }
 
+/// Accumulates bounded `stdout` and `stderr` up to [`EXEC_OUTPUT_CAP`] bytes each from an
+/// [`ExecStream`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ExecCollector {
+    stdout: BoundedBuf,
+    stderr: BoundedBuf,
+}
+
+impl ExecCollector {
+    /// Appends `chunk` to `stdout`, discarding bytes beyond [`EXEC_OUTPUT_CAP`].
+    pub fn push_stdout(&mut self, chunk: &[u8]) {
+        self.stdout.push(chunk);
+    }
+
+    /// Appends `chunk` to `stderr`, discarding bytes beyond [`EXEC_OUTPUT_CAP`].
+    pub fn push_stderr(&mut self, chunk: &[u8]) {
+        self.stderr.push(chunk);
+    }
+
+    /// Consumes collected bytes and terminal stream metadata into [`ExecOutput`].
+    #[must_use]
+    pub fn into_output(self, done: ExecStreamResult) -> ExecOutput {
+        ExecOutput {
+            exit_status: done.exit_status,
+            exit_signal: done.exit_signal,
+            stdout: self.stdout.bytes,
+            stderr: self.stderr.bytes,
+            stdout_truncated: self.stdout.truncated,
+            stderr_truncated: self.stderr.truncated,
+        }
+    }
+
+    /// Consumes collected bytes into [`ExecPartialOutput`] for [`ExecError::Timeout`].
+    #[must_use]
+    pub fn into_partial(self) -> ExecPartialOutput {
+        ExecPartialOutput {
+            stdout: self.stdout.bytes,
+            stderr: self.stderr.bytes,
+            stdout_truncated: self.stdout.truncated,
+            stderr_truncated: self.stderr.truncated,
+        }
+    }
+}
+
 /// Accumulates up to [`EXEC_OUTPUT_CAP`] bytes without growing unboundedly, recording whether
 /// any bytes beyond the cap were discarded.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct BoundedBuf {
     bytes: Vec<u8>,
     truncated: bool,

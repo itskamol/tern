@@ -81,7 +81,15 @@ fn exec_error_messages_are_lowercase_without_trailing_punctuation() {
                 phase: ExecTimeoutPhase::Running,
                 partial: ExecPartialOutput::default(),
             },
-            "command timed out after 15s",
+            "command timed out after 15s (requested remote interrupt; remote process stop is not guaranteed)",
+        ),
+        (
+            ExecError::Timeout {
+                timeout: Duration::from_secs(5),
+                phase: ExecTimeoutPhase::DispatchUncertain,
+                partial: ExecPartialOutput::default(),
+            },
+            "command timed out after 5s (requested remote interrupt; remote process stop is not guaranteed)",
         ),
         (
             ExecError::Timeout {

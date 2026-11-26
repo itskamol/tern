@@ -16,8 +16,8 @@ use tokio::time::Instant;
 use crate::connect::{AuthenticatedConnection, CONNECT_TIMEOUT, ConnectOptions};
 use crate::error::{Cause, Failure};
 use crate::exec::{
-    CAUSE_GRACE, CancelSignal, DISCONNECT_GRACE, EXIT_GRACE, SSH_EXTENDED_DATA_STDERR,
-    describe_drop, map_failure,
+    CAUSE_GRACE, CancelSignal, DISCONNECT_GRACE, EXEC_EVENT_QUEUE, EXIT_GRACE,
+    SSH_EXTENDED_DATA_STDERR, describe_drop, map_failure,
 };
 use crate::{
     ConnectSpec, ExecCancel, ExecError, ExecPartialOutput, ExecTimeoutPhase, MIN_EXEC_TIMEOUT,
@@ -164,6 +164,67 @@ async fn race_opt<T>(
     }
 }
 
+async fn send_open_prompt(
+    exec_tx: &async_channel::Sender<ExecStreamEvent>,
+    prompt: Prompt,
+    deadline: Option<(Instant, Duration)>,
+    cancel: &mut CancelSignal,
+) -> std::result::Result<(), ExecError> {
+    tokio::select! {
+        biased;
+        () = cancel.wait() => Err(ExecError::Cancelled),
+        () = sleep_deadline(deadline.map(|(d, _)| d)) => Err(ExecError::Timeout {
+            timeout: deadline.map_or(CONNECT_TIMEOUT, |(_, t)| t),
+            phase: ExecTimeoutPhase::NotDispatched,
+            partial: ExecPartialOutput::default(),
+        }),
+        res = exec_tx.send(ExecStreamEvent::Prompt(prompt)) => {
+            if res.is_err() {
+                return Err(ExecError::Cancelled);
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn cancel_channel(channel: &mut russh::Channel<russh::client::Msg>) {
+    // Best-effort remote SIGINT (RFC 4254 §6.9; server may ignore).
+    let _ = tokio::time::timeout(SIGNAL_GRACE, channel.signal(Sig::INT)).await;
+    let _ = tokio::time::timeout(SIGNAL_GRACE, channel.close()).await;
+}
+
+async fn send_stream_event(
+    exec_tx: &async_channel::Sender<ExecStreamEvent>,
+    event: ExecStreamEvent,
+    channel: &mut russh::Channel<russh::client::Msg>,
+    deadline: Option<(Instant, Duration)>,
+    phase: ExecTimeoutPhase,
+    cancel: &mut CancelSignal,
+) -> std::result::Result<(), ExecError> {
+    tokio::select! {
+        biased;
+        () = cancel.wait() => {
+            cancel_channel(channel).await;
+            Err(ExecError::Cancelled)
+        }
+        () = sleep_deadline(deadline.map(|(d, _)| d)) => {
+            cancel_channel(channel).await;
+            Err(ExecError::Timeout {
+                timeout: deadline.map_or(CONNECT_TIMEOUT, |(_, t)| t),
+                phase,
+                partial: ExecPartialOutput::default(),
+            })
+        }
+        res = exec_tx.send(event) => {
+            if res.is_err() {
+                cancel_channel(channel).await;
+                return Err(ExecError::Cancelled);
+            }
+            Ok(())
+        }
+    }
+}
+
 async fn run_stream(
     spec: ConnectSpec,
     command: String,
@@ -180,7 +241,7 @@ async fn run_stream(
         "ssh_exec_stream_start"
     );
 
-    let (session_tx, session_rx) = async_channel::bounded::<SessionEvent>(4);
+    let (session_tx, session_rx) = async_channel::bounded::<SessionEvent>(EXEC_EVENT_QUEUE);
     let connect_options = ConnectOptions::default();
     let cause = connect_options.cause.clone();
     let conn = {
@@ -195,6 +256,7 @@ async fn run_stream(
                 }
                 () = sleep_deadline(deadline.map(|(d, _)| d)) => {
                     let t = deadline.map_or(CONNECT_TIMEOUT, |(_, t)| t);
+                    tracing::warn!(host = %spec.host, port = spec.port, "ssh_exec_timeout");
                     return Err(ExecError::Timeout {
                         timeout: t,
                         phase: ExecTimeoutPhase::NotDispatched,
@@ -205,14 +267,25 @@ async fn run_stream(
                     Ok(conn) => conn,
                     Err(failure) => {
                         let t = timeout.unwrap_or(CONNECT_TIMEOUT);
-                        return Err(map_failure(failure, t));
+                        let err = map_failure(failure, t);
+                        tracing::warn!(host = %spec.host, port = spec.port, error = %err, "ssh_exec_failed");
+                        return Err(err);
                     }
                 },
                 ev = session_rx.recv() => {
                     if let Ok(SessionEvent::Prompt(prompt)) = ev
-                        && exec_tx.send(ExecStreamEvent::Prompt(prompt)).await.is_err()
+                        && let Err(err) = send_open_prompt(exec_tx, prompt, deadline, cancel).await
                     {
-                        return Err(ExecError::Cancelled);
+                        match &err {
+                            ExecError::Timeout { .. } => {
+                                tracing::warn!(host = %spec.host, port = spec.port, "ssh_exec_timeout");
+                            }
+                            ExecError::Cancelled => {
+                                tracing::info!(host = %spec.host, port = spec.port, "ssh_exec_stream_cancelled");
+                            }
+                            _ => {}
+                        }
+                        return Err(err);
                     }
                 }
             }
@@ -221,6 +294,32 @@ async fn run_stream(
 
     let result = run_stream_channel(&conn, &command, deadline, cancel, &cause, exec_tx).await;
     let _ = tokio::time::timeout(DISCONNECT_GRACE, conn.disconnect()).await;
+
+    match &result {
+        Ok(done) => {
+            tracing::info!(
+                host = %spec.host,
+                port = spec.port,
+                exit_status = ?done.exit_status,
+                exit_signal = ?done.exit_signal,
+                "ssh_exec_finished"
+            );
+        }
+        Err(ExecError::Timeout { phase, .. }) => {
+            tracing::warn!(
+                host = %spec.host,
+                port = spec.port,
+                ?phase,
+                "ssh_exec_timeout"
+            );
+        }
+        Err(ExecError::Cancelled) => {
+            tracing::info!(host = %spec.host, port = spec.port, "ssh_exec_stream_cancelled");
+        }
+        Err(err) => {
+            tracing::warn!(host = %spec.host, port = spec.port, error = %err, "ssh_exec_failed");
+        }
+    }
     result
 }
 
@@ -269,12 +368,11 @@ async fn run_stream_channel(
         let msg = tokio::select! {
             biased;
             () = cancel.wait() => {
-                // Best-effort remote SIGINT (RFC 4254 §6.9; server may ignore).
-                let _ = tokio::time::timeout(SIGNAL_GRACE, channel.signal(Sig::INT)).await;
-                let _ = tokio::time::timeout(SIGNAL_GRACE, channel.close()).await;
+                cancel_channel(&mut channel).await;
                 return Err(ExecError::Cancelled);
             }
             () = sleep_deadline(deadline.map(|(d, _)| d)) => {
+                cancel_channel(&mut channel).await;
                 let t = deadline.map_or(CONNECT_TIMEOUT, |(_, t)| t);
                 return Err(ExecError::Timeout {
                     timeout: t,
@@ -291,28 +389,30 @@ async fn run_stream_channel(
             }
             Some(ChannelMsg::Data { data }) => {
                 phase = ExecTimeoutPhase::Running;
-                if !data.is_empty()
-                    && exec_tx
-                        .send(ExecStreamEvent::Stdout(data.to_vec()))
-                        .await
-                        .is_err()
-                {
-                    let _ = tokio::time::timeout(SIGNAL_GRACE, channel.signal(Sig::INT)).await;
-                    let _ = tokio::time::timeout(SIGNAL_GRACE, channel.close()).await;
-                    return Err(ExecError::Cancelled);
+                if !data.is_empty() {
+                    send_stream_event(
+                        exec_tx,
+                        ExecStreamEvent::Stdout(data.to_vec()),
+                        &mut channel,
+                        deadline,
+                        phase,
+                        cancel,
+                    )
+                    .await?;
                 }
             }
             Some(ChannelMsg::ExtendedData { data, ext }) if ext == SSH_EXTENDED_DATA_STDERR => {
                 phase = ExecTimeoutPhase::Running;
-                if !data.is_empty()
-                    && exec_tx
-                        .send(ExecStreamEvent::Stderr(data.to_vec()))
-                        .await
-                        .is_err()
-                {
-                    let _ = tokio::time::timeout(SIGNAL_GRACE, channel.signal(Sig::INT)).await;
-                    let _ = tokio::time::timeout(SIGNAL_GRACE, channel.close()).await;
-                    return Err(ExecError::Cancelled);
+                if !data.is_empty() {
+                    send_stream_event(
+                        exec_tx,
+                        ExecStreamEvent::Stderr(data.to_vec()),
+                        &mut channel,
+                        deadline,
+                        phase,
+                        cancel,
+                    )
+                    .await?;
                 }
             }
             Some(ChannelMsg::ExitStatus { exit_status: code }) => {

@@ -350,6 +350,11 @@ async fn timeout_aborts_hanging_command_and_tears_down_connection() {
         }
     );
     assert!(
+        err.to_string()
+            .contains("remote process stop is not guaranteed"),
+        "running timeout must warn remote stop is not guaranteed: {err}"
+    );
+    assert!(
         elapsed >= Duration::from_millis(900),
         "0s timeout must clamp to 1s, finished too fast in {elapsed:?}"
     );
@@ -358,6 +363,7 @@ async fn timeout_aborts_hanging_command_and_tears_down_connection() {
         "1s timeout took too long: {elapsed:?}"
     );
     wait_active(&server.active, 0).await;
+    assert_eq!(*server.signals.lock().unwrap(), vec!["INT"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -574,6 +580,7 @@ async fn timeout_aborts_stalled_connection_setup() {
             partial: ExecPartialOutput::default(),
         }
     );
+    assert_eq!(err.to_string(), "command timed out after 1s");
     assert!(
         elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(5),
         "setup timeout took {elapsed:?}"
